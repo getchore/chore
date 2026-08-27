@@ -131,9 +131,21 @@ web-build:
 [unix]
 [doc('Set the workspace version. `just version 0.2.0`.')]
 version VERSION:
-    sed -i '' -e '0,/^version = ".*"$/s//version = "{{VERSION}}"/' Cargo.toml
-    cargo update --workspace
-    @grep -m1 '^version' Cargo.toml
+    #!/usr/bin/env python3
+    # Rewrites the first `version = "..."` line, the one under
+    # [workspace.package]. A sed range does this differently on BSD and GNU,
+    # and silently doing nothing is the worst of the outcomes.
+    import re, pathlib
+    p = pathlib.Path("Cargo.toml")
+    s = p.read_text()
+    s, n = re.subn(r'^version = ".*"$', 'version = "{{VERSION}}"', s, count=1, flags=re.M)
+    assert n == 1, "no version line in Cargo.toml"
+    # The path dependency carries a version too, and cargo refuses to resolve
+    # when it lags behind the crate it points at.
+    s, d = re.subn(r'(path = "crates/chorefile", version = ")[^"]+(")', r'\g<1>{{VERSION}}\g<2>', s, count=1)
+    assert d == 1, "workspace dependency pin not found"
+    p.write_text(s)
+    print(f'Cargo.toml: version = "{{VERSION}}"')
 
 # Tag and push, which is what triggers the release build.
 [group('release')]

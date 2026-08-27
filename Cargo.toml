@@ -4,13 +4,13 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "1.0.0"
 license = "MIT"
 repository = "https://github.com/getchore/chore"
 rust-version = "1.85"
 
 [workspace.dependencies]
-chorefile = { path = "crates/chorefile", version = "0.1.0" }
+chorefile = { path = "crates/chorefile", version = "1.0.0" }
 
 # --- HTTP, for `download` -----------------------------------------------
 # rustls, never native-tls: OpenSSL would leave a dynamic link on Linux and
