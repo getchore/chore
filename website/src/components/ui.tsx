@@ -109,7 +109,7 @@ export function GitHubIcon() {
 
 /// Spread onto any link that leaves the site. `noopener` keeps the opened
 /// page from reaching back through `window.opener`; `noreferrer` also drops
-/// the referrer. Anchors within the page must not use it — sending a reader
+/// the referrer. Anchors within the page must not use it, since sending a reader
 /// to a new tab to read the next section would be hostile.
 export const EXTERNAL = { target: '_blank', rel: 'noopener noreferrer' } as const
 
@@ -117,7 +117,7 @@ export type AmbientVariant = 'grid' | 'dots' | 'rail' | 'corner'
 
 /**
  * Ambient background for a section. In dark, a flat #08090c band reads as a
- * hole in the page — the hero has a grid and a glow, and everything below it
+ * hole in the page. The hero has a grid and a glow, and everything below it
  * looked unfinished by comparison. Each variant pairs one texture with one
  * light source in a different place, so the sections feel related without
  * repeating. Deliberately near-invisible: it should register as depth, not

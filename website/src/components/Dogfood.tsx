@@ -95,7 +95,7 @@ export function Dogfood() {
               maxW: '620px',
             })}
           >
-            The compiler, the tests, the release matrix — and this page.
+            The compiler, the tests, the release matrix, and this page.
           </p>
 
           <div

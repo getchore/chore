@@ -10,7 +10,7 @@ const part = {
   pipe: css({ color: 'fg.faint' }),
 }
 
-/** The one-liner is the first thing anyone reads — colour it like code. */
+/** The one-liner is the first thing anyone reads, so colour it like code. */
 function highlightCommand(command: string) {
   return command.split(' ').map((word, i) => {
     const space = i === 0 ? '' : ' '
@@ -60,7 +60,7 @@ export function Install() {
       await navigator.clipboard.writeText(command)
       setCopied(true)
     } catch {
-      /* clipboard blocked — the text stays selectable */
+      /* clipboard blocked, but the text stays selectable */
     }
   }
 

@@ -2,10 +2,10 @@ import { css } from 'styled-system/css'
 import { Band, Eyebrow, Heading } from './ui'
 
 const FEATURES: { tag: string; title: string; body: string }[] = [
-  { tag: 'portable', title: 'The shell is inside the binary', body: 'No bash. No PowerShell quoting. No surprises.' },
+  { tag: 'portable', title: 'The shell is inside the binary', body: 'No bash on the runner, and no PowerShell quoting rules.' },
   { tag: 'batteries', title: 'download · extract · archive', body: 'Retries, timeouts and checksums, built in.' },
-  { tag: 'safe', title: 'argv goes straight to the OS', body: 'Nothing re-quoted. A quoted word is one argument.' },
-  { tag: 'preview', title: '--dry that actually predicts', body: 'Effects skipped, conditions still run.' },
+  { tag: 'safe', title: 'argv goes straight to the OS', body: 'Nothing is re-quoted, and a quoted word is always one argument.' },
+  { tag: 'preview', title: '--dry that actually predicts', body: 'Effects are skipped, but conditions still run.' },
   { tag: 'lint', title: 'chore check', body: 'Catches typos and curl before anything runs.' },
   { tag: 'agents', title: 'chore spec', body: 'The whole language as JSON, from the binary.' },
 ]

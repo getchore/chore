@@ -1,8 +1,8 @@
 # chore
 
 One static binary that runs your project's tasks from a `chorefile`. Tasks run
-through a built-in POSIX-sh-subset interpreter — `chore` never spawns `sh`,
-`cmd` or PowerShell — so a chorefile does the same thing on macOS, Linux and
+through a built-in POSIX-sh-subset interpreter. `chore` never spawns `sh`,
+`cmd` or PowerShell, so a chorefile does the same thing on macOS, Linux and
 Windows. Builtins cover what scripts shell out for: `download`, `extract`,
 `archive`, `copy`, `move`, `remove`, `find`, `sha256`.
 
@@ -26,7 +26,7 @@ $ chore check
 2 problems
 ```
 
-`check` only parses — nothing runs. It exits nonzero for errors like these; a
+`check` only parses, and nothing runs. It exits nonzero for errors like these; a
 command it cannot find on this machine's `PATH` is a warning instead, so a tool
 that exists solely in CI does not break the gate.
 
@@ -78,7 +78,7 @@ $ chore list
 ## Docs
 
 [getchore.github.io/chore](https://getchore.github.io/chore/) is the guide, and
-[docs/SPEC.md](docs/SPEC.md) is the full language reference — `chore help` and
+[docs/SPEC.md](docs/SPEC.md) is the full language reference. `chore help` and
 `chore spec` print the same material from the binary. Release and installer
 mechanics are in [docs/RELEASING.md](docs/RELEASING.md).
 

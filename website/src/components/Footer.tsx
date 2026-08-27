@@ -90,8 +90,8 @@ export function Footer() {
           })}
         >
           <span>
-            <strong className={css({ color: 'fg.muted', fontWeight: '600' })}>chore</strong> — MIT licensed. Built in
-            Rust.
+            <strong className={css({ color: 'fg.muted', fontWeight: '600' })}>chore</strong> is MIT licensed and
+            built in Rust.
           </span>
           <div className={css({ display: 'flex', gap: '6' })}>
             <a className={css({ _hover: { color: 'fg.default' } })} href={GITHUB_URL} {...EXTERNAL}>

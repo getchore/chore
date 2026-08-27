@@ -142,7 +142,7 @@ interrupted transfer never leaves a truncated file that looks complete, and a
 failed `--sha256` leaves nothing behind.
 
 **extract.** Also reads `.tgz`, `.txz`, `.tzst` and `.lzma`, and sniffs the
-leading bytes when the name says nothing — so an archive with a lying
+leading bytes when the name says nothing, so an archive with a lying
 extension still unpacks. `--member` matches an entry's full path or just its
 filename, so `--member chore` finds `bin/chore`. On a compressed *single* file
 (not a tar), `--member` and `--strip` are an error. An entry with an absolute
@@ -154,7 +154,7 @@ format: `.zip`, `.tar`, `.tar.gz` or `.tgz`, `.tar.xz` or `.txz`, `.tar.zst` or
 name becomes a top-level entry, as `tar cf` and `zip -r` do, so extracting
 gives the directory back rather than its contents loose. A source written with
 a trailing `/` contributes its **contents** instead, with no directory of its
-own — the same reading of the slash that `extract` gives its `dest`. Several
+own, the same reading of the slash that `extract` gives its `dest`. Several
 sources pack side by side into one archive, and two of them claiming the same
 top-level name is an error. Entries are sorted within each source, and the
 sources themselves appear in the order they were written, so the same command
@@ -181,7 +181,7 @@ read/write round trip is lossless and successive `>>` lines stack.
 
 **which**, **exists** and **env <NAME>** report a miss as exit 1 rather than a
 hard failure, which is what lets them drive an `if`. Under fail-fast a bare
-`which foo` still stops the task — put it in a condition or a `try`.
+`which foo` still stops the task. Put it in a condition or a `try`.
 **env NAME value** sets the variable for the rest of the run, including
 spawned children.
 
@@ -206,13 +206,13 @@ not apply to it.
 - A task runs once per invocation, keyed on **name and arguments**, so a
   parameterised task called twice with different arguments still runs twice.
   `--force` disables this.
-- When a task's output is captured — `$(task)`, `task | cmd`, `task > file` —
+- When a task's output is captured (`$(task)`, `task | cmd`, `task > file`),
   the value it printed is remembered, and a later capture of the same task with
   the same arguments gets that value back without running the body again. So a
   task can serve as a function: `platform=$(platform-id)` answers the same
   thing every time it is asked, and the body still executes exactly once. A
   task whose output was only ever streamed to the terminal has no remembered
-  value, so capturing it afterwards runs it again — an empty string would
+  value, so capturing it afterwards runs it again. An empty string would
   otherwise be interpolated into a path.
 - `cd` changes the interpreter's directory, not the process's.
 
@@ -225,7 +225,7 @@ leave every interpolated path downstream empty, and the preview would describe
 a run that could never happen.
 
 Because the effects are skipped, a read-only command sees the world *before*
-the run, not the one the recipe builds as it goes — `find build/` runs before
+the run, not the one the recipe builds as it goes. `find build/` runs before
 the `mkdir build` that would create it. Such a command is reported on stderr
 and treated as a command that exited nonzero; it does not stop the preview. A
 statement moves on, `&&` and `||` branch as usual, and a `$(...)` yields the
@@ -236,8 +236,8 @@ A condition is believed only when its command actually **answered**. Any
 command that *fails* inside an `if` condition leaves the condition undecided,
 and an undecided condition previews the `then` branch, since previewing the
 work beats previewing nothing. The rule is positional, not per-builtin:
-`exists`, `which` and `env <NAME>` are the only builtins that cannot fail — a
-miss is their answer, a nonzero exit — so `if exists build/version.txt`
+`exists`, `which` and `env <NAME>` are the only builtins that cannot fail. A
+miss is their answer, a nonzero exit, so `if exists build/version.txt`
 previews `else` while `if read build/version.txt` previews `then`. The choice
 is made over the condition as a whole, so a failure anywhere inside `&&`, `||`
 or `!` still previews `then`, and `!` has no truth value to flip. A program on
@@ -247,7 +247,7 @@ not be spawned did not.
 ### Top-level statements
 
 Top-level assignments are evaluated once, before the first task. `list`,
-`help`, `check` and `spec` never evaluate them — they only need the parse
+`help`, `check` and `spec` never evaluate them, since they only need the parse
 tree, so `chore list` does no I/O and works even when a file a global reads is
 missing.
 
@@ -264,21 +264,21 @@ include libs/chorefile as libs     # its tasks become libs::build
   root per invocation, so a `download ... third_party/` in an included file
   lands where the project's author expects rather than beside that file.
 - `as` namespaces **both tasks and globals** (`libs::build`). Without `as`
-  everything merges flat, and a duplicate name — task or global — across two
+  everything merges flat, and a duplicate name, task or global, across two
   files is an error.
 - `::` is reserved in task names. A cycle names the whole loop and is an
   error.
 
 ### What `as` renames, and what it leaves alone
 
-`as ns` is applied to a whole subtree — the included file and everything it
-included — once that subtree has resolved. It renames the definitions, and
+`as ns` is applied to a whole subtree, meaning the included file and everything
+it included, once that subtree has resolved. It renames the definitions, and
 inside that subtree's own bodies it renames every reference that **resolved
 within it**: a command whose name is a single literal word naming one of the
 subtree's tasks, and a `$x` naming one of its globals, wherever they appear.
 
 Everything else is left bare, which is what lets an included file still reach a
-builtin, a program on `PATH`, or — under a flat merge — a name its includer
+builtin, a program on `PATH`, or, under a flat merge, a name its includer
 defines. Bare names are resolved late, against the merged table.
 
 Two consequences worth stating:
@@ -295,7 +295,7 @@ Two consequences worth stating:
   line further down, which is worse.
 
 Because `as` namespaces globals too, `$libs::dist` is a variable name that no
-chorefile can write — only an include can construct it.
+chorefile can write; only an include can construct it.
 
 ### Order of included globals
 
@@ -319,14 +319,14 @@ inside it.
 Including the same file twice on different branches is not a cycle and is not
 deduplicated. Flat, it fails as a duplicate name; under two different `as`
 namespaces, its tasks exist twice under two prefixes, which is what asking for
-them twice means. A true cycle — a file that includes itself, directly or
-through others — is an error naming the whole loop.
+them twice means. A true cycle, a file that includes itself either directly or
+through others, is an error naming the whole loop.
 
 ## check
 
 Builtins are reserved by convention, not by the interpreter: at runtime a task
 wins over a builtin of the same name, and it is `check` that reports it. The
-same is true of a task named after a subcommand — `chore list` is always the
+same is true of a task named after a subcommand. `chore list` is always the
 subcommand, so the task is unreachable.
 
 Reports syntax errors, reserved names, unknown commands, undefined variables,
@@ -353,8 +353,8 @@ task dylib {
 ```
 
 A condition counts as decided only when every operand is literal text or one of
-the read-only platform variables — `$OS`, `$ARCH`, `$ENV`, `$PLATFORM`, `$EXE`
-— combined with the comparison operators, `!`, `&&` and `||`. Nested `if`s and
+the read-only platform variables (`$OS`, `$ARCH`, `$ENV`, `$PLATFORM`, `$EXE`)
+combined with the comparison operators, `!`, `&&` and `||`. Nested `if`s and
 a `for` body inherit the guard around them. Anything else keeps the warning: a
 command's exit code, a `$( ... )` capture, a task argument, a global, and a
 platform name the chorefile has assigned over are all treated as unknown, and

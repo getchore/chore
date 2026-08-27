@@ -15,18 +15,18 @@ Six, one per platform anyone actually runs:
 
 Each archive holds the binary plus `LICENSE` and `README.md`, ships with a
 `.sha256` sidecar, and the release carries a combined `SHA256SUMS`. v1.0.0
-shipped all thirteen assets — six archives, six sidecars, `SHA256SUMS` — and
+shipped all thirteen assets (six archives, six sidecars and `SHA256SUMS`), and
 `install.sh` installs from them and verifies the checksum, so the whole path
 from tag to installed binary is known to work.
 
 `x86_64-pc-windows-gnu` is deliberately not on this list. CI's `cross` job
-builds it on every PR — it is the only target where `ring` and `zstd-sys`
-compile against mingw, so a linking break there is worth catching early — but
-it is not published as a release asset. Windows users get msvc.
+builds it on every PR, because it is the only target where `ring` and
+`zstd-sys` compile against mingw and a linking break there is worth catching
+early. It is not published as a release asset. Windows users get msvc.
 
 Linux is musl on both arches. The result is statically linked, so one asset
-per architecture covers every distro, glibc or not — which is the same
-promise the binary makes about not needing a shell.
+per architecture covers every distro, glibc or not. That is the same promise
+the binary makes about not needing a shell.
 
 Both macOS targets build on the arm runner: Apple's clang cross-compiles, so
 the C in `zstd-sys` and `ring` builds for either arch without a second
@@ -74,7 +74,7 @@ when that pin lags behind the crate it points at.
 
 The script rewrites both and asserts on each, which is the point of it being a
 script. The `sed` range it replaced matched under GNU and not under BSD, so on
-a Mac it edited nothing, said nothing and exited zero — a release tool that
+a Mac it edited nothing, said nothing and exited zero. A release tool that
 fails silently is worse than one that is not there.
 
 The tag triggers `.github/workflows/release.yml`, which refuses to build if
@@ -86,26 +86,26 @@ The smoke test writes a one-task chorefile and runs `--version`, `list`,
 `list --json`, `check` and the task itself. `x86_64-apple-darwin` is skipped:
 it is the one cross-built target and Rosetta may not be on the runner, so a
 failure there would say nothing about the binary. `chore check` exits nonzero
-only for errors — a command missing from the runner's `PATH` is a warning — so
-the smoke test does not depend on what happens to be installed there.
+only for errors, and a command missing from the runner's `PATH` is a warning,
+so the smoke test does not depend on what happens to be installed there.
 
 A tag containing `-alpha`, `-beta` or `-rc` is published as a prerelease.
 
-To rehearse without tagging, run the workflow manually with a tag name — it
-builds everything and leaves the release as a **draft**.
+To rehearse without tagging, run the workflow manually with a tag name. It
+builds everything and leaves the release as a draft.
 
 ## Installers
 
 `install.sh` and `install.ps1` live in `installers/`, and the website build
-copies them into `dist/` — so they are served from the Pages site, not from a
-release asset. A change to either is live once the `website` workflow deploys
-the merge to `main`. CI shellchecks and parse-checks both on every PR.
+copies them into `dist/`, so they are served from the Pages site rather than
+from a release asset. A change to either is live once the `website` workflow
+deploys the merge to `main`. CI shellchecks and parse-checks both on every PR.
 
 There is no staged or versioned copy: whatever is on `main` is what the next
 person to run the one-liner executes, which is why the CI check is not
-optional. Pinning the scripts themselves — serving `install.sh` from a tag
-rather than from the tip of `main` — is the obvious next step and is not done
-yet.
+optional. Pinning the scripts themselves, so that `install.sh` is served from
+a tag rather than from the tip of `main`, is the obvious next step and is not
+done yet.
 
 Neither calls the GitHub API. `…/releases/latest/download/<asset>` resolves
 server-side, so there is no JSON to parse and no rate limit to hit.
@@ -125,19 +125,21 @@ irm https://getchore.github.io/chore/install.ps1 | iex
 ```
 
 Both are live on the Pages site and both serve `200`. Both take an optional
-release tag as their first argument, which wins over
-`CHORE_VERSION`; both also honour `CHORE_INSTALL_DIR` (default `~/.local/bin`).
+release tag as their first argument, which wins over `CHORE_VERSION`, and both
+honour `CHORE_INSTALL_DIR` (default `~/.local/bin`).
 Checksum verification is best-effort on a missing sidecar and fatal on a
 mismatch. `install.ps1` sets the user PATH; `install.sh` only prints the line
 to add, rather than guessing which of your rc files is the right one.
 
 ## Not yet wired up
 
-- **Signing and notarization.** macOS assets are unsigned, so Gatekeeper
-  quarantines a download from a browser. `curl | sh` is unaffected — the
-  quarantine bit comes from the browser, not the file. Notarizing needs an
-  Apple Developer account and four secrets.
-- **crates.io.** `cargo publish -p chorefile && cargo publish -p chore`,
-  in that order. Not automated until the crate names are claimed.
-- **Homebrew / Scoop / winget.** Worth adding once the asset names are
-  stable through a release or two.
+macOS assets are unsigned, so Gatekeeper quarantines a download from a
+browser. `curl | sh` is unaffected, because the quarantine bit comes from the
+browser rather than the file. Notarizing needs an Apple Developer account and
+four secrets.
+
+Publishing to crates.io is `cargo publish -p chorefile && cargo publish -p
+chore`, in that order, and is not automated until the crate names are claimed.
+
+Homebrew, Scoop and winget are worth adding once the asset names have been
+stable through a release or two.
