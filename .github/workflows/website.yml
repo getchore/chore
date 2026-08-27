@@ -3,12 +3,17 @@ name: website
 on:
   push:
     branches: [main]
-    paths:
+    paths: &site
       - 'website/**'
       # The installers are published by the site, so a fix to them has to
       # redeploy Pages, not just sit on main.
       - 'installers/**'
       - '.github/workflows/website.yml'
+  # Build on pull requests too, without deploying. Otherwise nothing checks
+  # the site before it merges: `ci.yml` covers the Rust workspace only, so a
+  # website that does not compile goes green and is discovered on main.
+  pull_request:
+    paths: *site
   workflow_dispatch:
 
 # Allow one concurrent deployment; let an in-progress run finish.
@@ -54,13 +59,18 @@ jobs:
           touch dist/.nojekyll
 
       - uses: actions/configure-pages@v5
+        if: github.event_name != 'pull_request'
 
       - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
         with:
           path: website/dist
 
   deploy:
     needs: build
+    # A pull request gets the build for its answer, and nothing else: it must
+    # not publish, and a fork's token could not anyway.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
