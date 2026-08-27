@@ -16,6 +16,10 @@ musl=x86_64-unknown-linux-musl
 # so its tasks live beside it: `chore web::build`, `chore web::dev`.
 include website as web
 
+# Checks that need a CI runner's toolchain and would be dead weight in a
+# developer checkout: `chore gha::windows-dll-check`.
+include .github as gha
+
 # Compile the workspace, tests and examples included.
 task build {
     # --all-targets so a test file that no longer compiles fails here, rather

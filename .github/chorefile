@@ -1,0 +1,26 @@
+# Checks that only make sense on a CI runner.
+#
+# These need tools no developer checkout has — a mingw objdump, a musl
+# toolchain — so they live here rather than in the root chorefile, and are
+# reached as `chore gha::<task>`. Nothing here is meant to be run locally,
+# which is the whole reason it is a separate file.
+
+# Fail if the Windows binary needs the mingw runtime installed: gha::windows-dll-check <target>.
+task windows-dll-check target {
+    # Not `$EXE`: that is the *host's* extension, and this cross-compiles on
+    # Linux. A windows-gnu binary is `chore.exe` wherever it was built.
+    exe=$ROOT/target/$1/release/chore.exe
+    if !exists $exe { fail "no binary at $exe" }
+    # objdump lists every DLL the .exe imports, one `DLL Name:` line each.
+    # Matching the whole line prefix, rather than the bare library name,
+    # keeps an unrelated path in the output from tripping the check.
+    deps=$(x86_64-w64-mingw32-objdump -p $exe)
+    echo "$deps"
+    # libgcc, libstdc++ or libwinpthread here would mean a user needs msys2
+    # installed to run chore. Everything else it imports is a Windows API DLL
+    # that every process already loads.
+    if $deps contains "DLL Name: libgcc" { fail "$1 binary imports the mingw runtime: libgcc" }
+    if $deps contains "DLL Name: libstdc" { fail "$1 binary imports the mingw runtime: libstdc++" }
+    if $deps contains "DLL Name: libwinpthread" { fail "$1 binary imports the mingw runtime: libwinpthread" }
+    echo "$1 binary imports no mingw runtime"
+}

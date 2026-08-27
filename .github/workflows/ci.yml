@@ -132,25 +132,12 @@ jobs:
       # want. Only a `=>` mapping is a real dependency.
       - if: endsWith(matrix.target, '-linux-musl')
         run: ./target/release/chore static-check
-      # Left inline deliberately. This assertion needs
-      # x86_64-w64-mingw32-objdump, which exists only on this one cross job;
-      # as a chore task it would be dead weight in every developer checkout,
-      # and there is no task in the chorefile for it.
-      #
-      # Nothing links against a system library here, so the .exe should stand
-      # alone apart from the Windows API DLLs every process loads.
+      # Lives in `.github/chorefile`, included by the root chorefile as
+      # `gha`. It needs x86_64-w64-mingw32-objdump, which only this job has,
+      # so putting it in the root chorefile would be dead weight in every
+      # developer checkout -- but a file only CI reaches is not.
       - if: endsWith(matrix.target, '-windows-gnu')
-        run: |
-          exe=target/${{ matrix.target }}/release/chore.exe
-          test -f "$exe" || { echo "::error::no binary at $exe"; exit 1; }
-          deps=$(x86_64-w64-mingw32-objdump -p "$exe" | sed -n 's/.*DLL Name: *//p')
-          echo "$deps"
-          # libgcc / libstdc++ / libwinpthread would mean the binary needs the
-          # mingw runtime installed on the user's machine, which it must not.
-          if printf '%s\n' "$deps" | grep -qiE '^(libgcc|libstdc|libwinpthread)'; then
-            echo "::error::binary depends on the mingw runtime"
-            exit 1
-          fi
+        run: ./target/release/chore gha::windows-dll-check ${{ matrix.target }}
 
   # The installers are shipped from main, not from a release asset, so a
   # broken one is live the moment it merges.
