@@ -194,20 +194,38 @@ fn list_json_has_the_documented_fields() {
     let run = chore(&dir, &["list", "--json"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert!(run.stdout.trim_start().starts_with('['), "{}", run.stdout);
-    // `chore` reports paths from the canonical working directory, which on
-    // macOS is `/private/var/...` where the temp dir is `/var/...`.
-    let chorefile = dir
-        .path()
-        .canonicalize()
-        .expect("canonical")
-        .join("chorefile");
+    // The whole record, except `file`, whose spelling is the host's business.
     assert!(
-        run.stdout.contains(&format!(
-            r#"{{"name": "greet", "description": null, "params": ["name"], "namespace": null, "file": "{}"}}"#,
-            chorefile.display()
-        )),
+        run.stdout.contains(
+            r#""name": "greet", "description": null, "params": ["name"], "namespace": null, "file": ""#
+        ),
         "{}",
         run.stdout
+    );
+    // `file` is checked against the contract rather than against this
+    // platform's spelling of a path: chorefiles are written with `/` and
+    // reported with `/` everywhere, so a Windows `\\` here, or the `\\?\\`
+    // prefix `canonicalize` adds there, would be the bug. The directory name
+    // is unique per test, so ending with it is an exact-enough match.
+    let dir_name = dir
+        .path()
+        .file_name()
+        .expect("temp dir name")
+        .to_string_lossy()
+        .into_owned();
+    let file = run
+        .stdout
+        .split(r#""file": ""#)
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a file field");
+    assert!(
+        file.ends_with(&format!("{dir_name}/chorefile")),
+        "file field was {file:?}, expected it to end with {dir_name}/chorefile"
+    );
+    assert!(
+        !file.contains('\\'),
+        "file field was {file:?}, expected `/` separators"
     );
     assert!(
         run.stdout

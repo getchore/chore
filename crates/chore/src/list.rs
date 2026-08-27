@@ -66,8 +66,11 @@ pub fn json(out: &mut dyn Write, merged: &Merged) -> io::Result<()> {
             .name
             .rsplit_once(NAMESPACE_SEP)
             .map_or("null".to_string(), |(ns, _)| quote(ns));
-        let file =
-            origin(task, merged).map_or("null".to_string(), |p| quote(&p.display().to_string()));
+        // `vars::display`, not `Path::display`: a chorefile is written with
+        // `/` and reported with `/` on every platform, and this field is read
+        // by tools that should not have to care which host produced it.
+        let file = origin(task, merged)
+            .map_or("null".to_string(), |p| quote(&chorefile::vars::display(p)));
         writeln!(
             out,
             "  {{\"name\": {}, \"description\": {}, \"params\": [{}], \
