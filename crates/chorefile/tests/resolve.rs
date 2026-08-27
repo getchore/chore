@@ -151,7 +151,7 @@ fn calls(block: &ast::Block) -> Vec<String> {
                 }
                 out.extend(calls(&node.body));
             }
-            Stmt::Exit(_) => {}
+            Stmt::Exit(_) | Stmt::Return(_) => {}
         }
     }
     out
@@ -217,7 +217,7 @@ fn reads(block: &ast::Block) -> Vec<String> {
                 }
                 out.extend(reads(&node.body));
             }
-            Stmt::Exit(code) => {
+            Stmt::Exit(code) | Stmt::Return(code) => {
                 if let Some(w) = code {
                     word(w, &mut out);
                 }

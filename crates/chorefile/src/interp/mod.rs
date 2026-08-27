@@ -83,7 +83,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::ast::{Block, CompareOp, Cond, File, Stmt, Task};
+use crate::ast::{Block, CompareOp, Cond, File, Stmt, Task, Word};
 use crate::error::{Error, Result};
 use crate::exec::{Builtin, Output};
 use crate::resolve::Merged;
@@ -181,10 +181,22 @@ enum Called {
 }
 
 /// What a block did when it stopped.
+///
+/// The two abnormal exits differ only in where they stop, and that is the
+/// whole of the distinction between the statements that raise them:
+/// [`Flow::Exit`] unwinds every frame to the top of the run, while
+/// [`Flow::Return`] is caught by `call_task` at the end of the task that
+/// raised it, so the caller carries on with its next statement.
 enum Flow {
     Normal,
     /// `exit [code]`, unwinding to the top of the run.
     Exit(i32),
+    /// `return [code]`, unwinding to the end of the enclosing task only. The
+    /// code becomes that task's exit status, which is what `&&`, `||`, `try`,
+    /// a condition and a capture read. In the task the command line named
+    /// there is no caller left to return to, so it ends the run with that
+    /// code — zero, and so a success, unless one was written.
+    Return(i32),
 }
 
 /// A parsed chorefile, plus everything a run needs to keep track of.
@@ -305,6 +317,11 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Run one task by name. Returns the exit code the run ends with.
+    ///
+    /// This task has no caller, so the two ways of stopping early meet here
+    /// and give the same answer: an `exit` unwound to the top, and a `return`
+    /// that ended this task, both end the run with the code they named — zero
+    /// by default, so a bare `return` on the last reachable line is a success.
     pub fn run_task(&mut self, name: &str, args: &[String]) -> Result<i32> {
         self.run_globals()?;
         match self.call_task(name, args, false)? {
@@ -380,11 +397,14 @@ impl<'a> Interpreter<'a> {
 
     // -- statements --------------------------------------------------------
 
+    /// Run a block until it ends or something stops it early. Both kinds of
+    /// early stop leave every enclosing block — including a `for` body, which
+    /// is why `return` inside a loop leaves the task rather than the loop.
     fn block(&mut self, block: &Block) -> Result<Flow> {
         for stmt in block {
             match self.stmt(stmt)? {
                 Flow::Normal => {}
-                exit => return Ok(exit),
+                stopped => return Ok(stopped),
             }
         }
         Ok(Flow::Normal)
@@ -459,26 +479,31 @@ impl<'a> Interpreter<'a> {
                 }
                 for item in items {
                     self.assign(&node.var, item);
+                    // There is no `break`, so anything that stops the body
+                    // stops the loop and everything around it: `return` in a
+                    // `for` ends the task, not the iteration.
                     match self.block(&node.body)? {
                         Flow::Normal => {}
-                        exit => return Ok(exit),
+                        stopped => return Ok(stopped),
                     }
                 }
             }
-            Stmt::Exit(code) => {
-                let code = match code {
-                    Some(word) => {
-                        let text = self.expand_to_string(word)?;
-                        text.trim().parse().map_err(|_| Error::Run {
-                            message: format!("exit code `{text}` is not a number"),
-                        })?
-                    }
-                    None => 0,
-                };
-                return Ok(Flow::Exit(code));
-            }
+            Stmt::Exit(code) => return Ok(Flow::Exit(self.status_code(code, "exit")?)),
+            Stmt::Return(code) => return Ok(Flow::Return(self.status_code(code, "return")?)),
         }
         Ok(Flow::Normal)
+    }
+
+    /// The code written after `exit` or `return`, or zero when it was left
+    /// off. `keyword` only names the statement in the error.
+    fn status_code(&mut self, code: &Option<Word>, keyword: &str) -> Result<i32> {
+        let Some(word) = code else {
+            return Ok(0);
+        };
+        let text = self.expand_to_string(word)?;
+        text.trim().parse().map_err(|_| Error::Run {
+            message: format!("{keyword} code `{text}` is not a number"),
+        })
     }
 
     /// A called task may have run `exit`; that unwinds through the caller too.

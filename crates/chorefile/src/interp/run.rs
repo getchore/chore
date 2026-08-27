@@ -536,6 +536,13 @@ impl Interpreter<'_> {
 
         match flow? {
             Flow::Normal => Ok(Called::Done(Output::ok())),
+            // `return` stops here, at the frame that raised it: the call is
+            // over, the caller is not. The code is the task's status, so a
+            // `return 1` reads to the caller exactly like a command that
+            // exited 1 — `&&` skips, `||` takes over, `try` swallows it, and
+            // outside those the caller stops fail-fast. `exit` is the other
+            // half of this match precisely because it does *not* stop here.
+            Flow::Return(code) => Ok(Called::Done(Output::failed(code))),
             Flow::Exit(code) => Ok(Called::Exited(code)),
         }
     }

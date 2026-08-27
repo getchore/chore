@@ -130,7 +130,14 @@ pub fn target_from_name(name: &str) -> Option<Target> {
 /// `Err` means the archive tried to write outside `dest` and the whole
 /// extraction must stop, because a malicious archive is not something to
 /// half-apply.
-pub fn safe_entry(name: &str, strip: usize) -> Result<Option<PathBuf>> {
+///
+/// `flatten` reduces a surviving entry to its base name. It is applied here,
+/// after the component check, rather than by the callers: the base name of a
+/// name that already passed this function is an ordinary component — never
+/// empty, `.`, `..`, or a drive prefix — so a flattened entry cannot reach
+/// outside `dest` either. Doing it anywhere else would put a second place
+/// that builds a path out of an archive name.
+pub fn safe_entry(name: &str, strip: usize, flatten: bool) -> Result<Option<PathBuf>> {
     let reject = || run_err(format!("extract: refusing unsafe archive entry {name:?}"));
 
     // Archives written on Windows use `\`; treat both as separators so a
@@ -161,6 +168,10 @@ pub fn safe_entry(name: &str, strip: usize) -> Result<Option<PathBuf>> {
     if parts.len() <= strip {
         return Ok(None);
     }
+    if flatten {
+        // `parts` is non-empty here, and every part is an ordinary component.
+        return Ok(Some(PathBuf::from(parts[parts.len() - 1])));
+    }
     Ok(Some(parts[strip..].iter().collect()))
 }
 
@@ -188,12 +199,27 @@ pub struct ExtractArgs {
     pub dest: String,
     pub member: Option<String>,
     pub strip: usize,
+    /// Write every entry directly into `dest` under its base name.
+    ///
+    /// Without it, `--member` keeps the path the entry had *inside* the
+    /// archive, so pulling one binary out of a release tarball lands it
+    /// somewhere you cannot predict without opening the archive first:
+    ///
+    /// ```text
+    /// extract out.tar.gz got --member sona   ->  got/pkg/bin/sona
+    /// ```
+    ///
+    /// which forces every `extract --member` to be followed by a `move` to
+    /// put the file where it was actually wanted. With `--flatten` the same
+    /// call lands `got/sona` and the `move` disappears.
+    pub flatten: bool,
 }
 
-/// Parse `extract <archive> <dest> [--member name] [--strip n]`.
+/// Parse `extract <archive> <dest> [--member name] [--strip n] [--flatten]`.
 pub fn parse_extract(rest: &[String]) -> Result<ExtractArgs> {
     let mut args = ExtractArgs::default();
     let mut positional = Vec::new();
+    let mut saw_strip = false;
     let mut it = rest.iter();
 
     while let Some(arg) = it.next() {
@@ -206,6 +232,7 @@ pub fn parse_extract(rest: &[String]) -> Result<ExtractArgs> {
                 );
             }
             "--strip" => {
+                saw_strip = true;
                 let v = it
                     .next()
                     .ok_or_else(|| run_err("extract: --strip needs a value"))?;
@@ -213,11 +240,23 @@ pub fn parse_extract(rest: &[String]) -> Result<ExtractArgs> {
                     .parse()
                     .map_err(|_| run_err(format!("extract: --strip {v} is not a number")))?;
             }
+            "--flatten" => args.flatten = true,
             other if other.starts_with("--") => {
                 return Err(run_err(format!("extract: unknown option {other}")));
             }
             other => positional.push(other.to_string()),
         }
+    }
+
+    // Both flags drop path components, and combining them reads two ways:
+    // strip-then-flatten (where the strip does nothing) and flatten-then-strip
+    // (where the file usually vanishes). Neither reading is worth guessing at,
+    // and `--flatten` alone is what anyone writing the pair actually wants.
+    if saw_strip && args.flatten {
+        return Err(run_err(
+            "extract: --strip and --flatten cannot be combined; --flatten already drops every \
+directory, so drop the --strip",
+        ));
     }
 
     let [archive, dest] = positional.as_slice() else {
@@ -307,9 +346,9 @@ fn extract_compressed(
 
     // One plain file. `dest` is the output path unless it looks like a
     // directory, in which case the compressed name minus its extension is.
-    if args.strip != 0 || args.member.is_some() {
+    if args.strip != 0 || args.member.is_some() || args.flatten {
         return Err(run_err(format!(
-            "extract: {} holds a single file, so --member and --strip do not apply",
+            "extract: {} holds a single file, so --member, --strip and --flatten do not apply",
             crate::vars::display(src)
         )));
     }
@@ -349,12 +388,45 @@ fn decompress(
         .map_err(|e| io_err("extract: cannot decompress", src, e))
 }
 
+/// The base names already written under `--flatten`, so a second entry that
+/// wants one is refused instead of overwriting the first.
+///
+/// Overwriting is the one outcome nobody can debug: the run succeeds and the
+/// file that ends up in `dest` depends on the order entries happen to sit in
+/// the archive. Refusing names both entries, and the fix — a narrower
+/// `--member`, or two calls — is then obvious. Without `--flatten` this never
+/// records anything, since distinct archive entries already have distinct
+/// paths.
+#[derive(Default)]
+struct Claimed(std::collections::HashMap<PathBuf, String>);
+
+impl Claimed {
+    fn claim(&mut self, rel: &Path, name: &str, args: &ExtractArgs) -> Result<()> {
+        if !args.flatten {
+            return Ok(());
+        }
+        match self.0.entry(rel.to_path_buf()) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(name.to_string());
+                Ok(())
+            }
+            std::collections::hash_map::Entry::Occupied(slot) => Err(run_err(format!(
+                "extract: --flatten would write both {:?} and {name:?} to {:?}; \
+name one of them with --member, or extract them separately",
+                slot.get(),
+                rel.to_string_lossy(),
+            ))),
+        }
+    }
+}
+
 fn extract_zip(src: &Path, dest: &Path, args: &ExtractArgs) -> Result<()> {
     let file = File::open(src).map_err(|e| io_err("extract: cannot open", src, e))?;
     let mut zip = zip::ZipArchive::new(BufReader::new(file))
         .map_err(|e| io_err("extract: cannot read zip", src, e))?;
 
     let mut found = false;
+    let mut claimed = Claimed::default();
     for i in 0..zip.len() {
         let mut entry = zip
             .by_index(i)
@@ -363,16 +435,24 @@ fn extract_zip(src: &Path, dest: &Path, args: &ExtractArgs) -> Result<()> {
         if !wanted(&name, args) {
             continue;
         }
-        let Some(rel) = safe_entry(&name, args.strip)? else {
+        let Some(rel) = safe_entry(&name, args.strip, args.flatten)? else {
             continue;
         };
-        found = true;
-        let out = dest.join(rel);
 
         if entry.is_dir() {
+            // A flattened extraction has no directories to put anything in,
+            // so a directory entry has nothing left to name.
+            if args.flatten {
+                continue;
+            }
+            found = true;
+            let out = dest.join(rel);
             fs::create_dir_all(&out).map_err(|e| io_err("extract: cannot create", &out, e))?;
             continue;
         }
+        found = true;
+        claimed.claim(&rel, &name, args)?;
+        let out = dest.join(rel);
         let mode = entry.unix_mode();
         write_file(&out, &mut entry, mode)?;
     }
@@ -382,6 +462,7 @@ fn extract_zip(src: &Path, dest: &Path, args: &ExtractArgs) -> Result<()> {
 fn extract_tar<R: Read>(reader: R, src: &Path, dest: &Path, args: &ExtractArgs) -> Result<()> {
     let mut tar = tar::Archive::new(reader);
     let mut found = false;
+    let mut claimed = Claimed::default();
 
     for entry in tar
         .entries()
@@ -396,28 +477,33 @@ fn extract_tar<R: Read>(reader: R, src: &Path, dest: &Path, args: &ExtractArgs) 
         if !wanted(&name, args) {
             continue;
         }
-        let Some(rel) = safe_entry(&name, args.strip)? else {
+        let Some(rel) = safe_entry(&name, args.strip, args.flatten)? else {
             continue;
         };
-        let out = dest.join(rel);
         let kind = entry.header().entry_type();
 
         if kind.is_dir() {
+            // See the zip loop: a flattened tree has no directories in it.
+            if args.flatten {
+                continue;
+            }
             found = true;
+            let out = dest.join(rel);
             fs::create_dir_all(&out).map_err(|e| io_err("extract: cannot create", &out, e))?;
             continue;
         }
-        if kind.is_symlink() || kind.is_hard_link() {
-            found = true;
-            link(&entry, &out, &name)?;
-            continue;
-        }
-        if !kind.is_file() {
+        if !kind.is_file() && !kind.is_symlink() && !kind.is_hard_link() {
             // Devices, fifos and sockets have no portable meaning in a
             // project tree, so they are dropped rather than half-created.
             continue;
         }
         found = true;
+        claimed.claim(&rel, &name, args)?;
+        let out = dest.join(rel);
+        if kind.is_symlink() || kind.is_hard_link() {
+            link(&entry, &out, &name)?;
+            continue;
+        }
         let mode = entry.header().mode().ok();
         write_file(&out, &mut entry, mode)?;
     }

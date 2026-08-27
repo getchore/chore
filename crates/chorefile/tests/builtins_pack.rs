@@ -450,6 +450,228 @@ fn a_missing_member_is_an_error_naming_it() {
 }
 
 // ---------------------------------------------------------------------------
+// --flatten
+// ---------------------------------------------------------------------------
+
+/// Every path under `dir`, relative, sorted, `/`-separated, with a trailing
+/// `/` on directories, so a whole extraction can be asserted in one go.
+fn tree(dir: &Path) -> Vec<String> {
+    fn walk(root: &Path, at: &Path, out: &mut Vec<String>) {
+        for entry in fs::read_dir(at).unwrap_or_else(|e| panic!("{}: {e}", at.display())) {
+            let path = entry.unwrap().path();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            // `symlink_metadata`, so a symlink to a directory is a leaf here
+            // rather than something to descend into.
+            let is_dir = fs::symlink_metadata(&path).unwrap().is_dir();
+            out.push(if is_dir { format!("{rel}/") } else { rel });
+            if is_dir {
+                walk(root, &path, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// The motivating case: one binary out of a nested archive, landing at a path
+/// the chorefile picked rather than one the archive did.
+#[test]
+fn flatten_with_member_lands_one_file_directly_in_dest() {
+    for name in ["out.zip", "out.tar.gz"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        sample_tree(dir);
+        ok(dir, &["archive", "src", name]);
+
+        // Without the flag, the entry keeps the path it had in the archive.
+        ok(dir, &["extract", name, "kept", "--member", "tool"]);
+        assert_eq!(
+            tree(&dir.join("kept")),
+            ["src/", "src/bin/", "src/bin/tool"],
+            "{name}"
+        );
+
+        // With it, exactly one file, named after the member and nothing else.
+        ok(
+            dir,
+            &["extract", name, "got", "--member", "tool", "--flatten"],
+        );
+        assert_eq!(tree(&dir.join("got")), ["tool"], "{name}");
+        assert_eq!(
+            read(&dir.join("got/tool")),
+            "#!/bin/sh\necho hi\n",
+            "{name}"
+        );
+    }
+}
+
+/// The mode still rides along, which is the whole reason a chorefile pulls a
+/// binary out of an archive in the first place.
+#[cfg(unix)]
+#[test]
+fn a_flattened_member_keeps_its_executable_bit() {
+    use std::os::unix::fs::PermissionsExt;
+    for name in ["out.zip", "out.tar.gz"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        sample_tree(dir);
+        ok(dir, &["archive", "src", name]);
+        ok(
+            dir,
+            &["extract", name, "bin", "--member", "tool", "--flatten"],
+        );
+
+        let mode = fs::metadata(dir.join("bin/tool"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "{name}: lost the executable bit ({mode:o})"
+        );
+    }
+}
+
+/// Without `--member`, a whole nested archive collapses to its leaves: the
+/// files land loose in `dest` and not one directory is created.
+#[test]
+fn flatten_collapses_a_whole_archive_to_its_files() {
+    for name in ["out.zip", "out.tar", "out.tar.gz"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        sample_tree(dir);
+        ok(dir, &["archive", "src", name]);
+
+        ok(dir, &["extract", name, "flat", "--flatten"]);
+        assert_eq!(
+            tree(&dir.join("flat")),
+            ["README.md", "leaf.txt", "tool"],
+            "{name}"
+        );
+        assert_eq!(read(&dir.join("flat/leaf.txt")), "leaf\n", "{name}");
+    }
+}
+
+/// Two entries with the same base name are the one thing flattening can lose,
+/// so they are refused by name rather than silently resolved by archive order.
+#[test]
+fn colliding_flattened_entries_are_refused() {
+    for name in ["out.zip", "out.tar.gz"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("pkg/debug/tool"), "debug\n");
+        write(&dir.join("pkg/release/tool"), "release\n");
+        ok(dir, &["archive", "pkg/", name]);
+
+        let message = err(dir, &["extract", name, "flat", "--flatten"]);
+        assert!(message.contains("debug/tool"), "{name}: {message}");
+        assert!(message.contains("release/tool"), "{name}: {message}");
+        assert!(message.contains("--member"), "{name}: {message}");
+
+        // A `--member` narrow enough to pick one of them still works, which is
+        // the fix the message points at.
+        ok(
+            dir,
+            &[
+                "extract",
+                name,
+                "one",
+                "--member",
+                "debug/tool",
+                "--flatten",
+            ],
+        );
+        assert_eq!(tree(&dir.join("one")), ["tool"], "{name}");
+        assert_eq!(read(&dir.join("one/tool")), "debug\n", "{name}");
+    }
+}
+
+/// Both flags drop path components, and combining them has two plausible
+/// readings, so it is a usage error rather than a guess.
+#[test]
+fn strip_and_flatten_cannot_be_combined() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    sample_tree(dir);
+    ok(dir, &["archive", "src", "out.tar"]);
+
+    let message = err(
+        dir,
+        &["extract", "out.tar", "flat", "--strip", "1", "--flatten"],
+    );
+    assert!(message.contains("--strip"), "{message}");
+    assert!(message.contains("--flatten"), "{message}");
+    assert!(!dir.join("flat").exists());
+
+    // Even `--strip 0`, which would have been a no-op: the pair is refused on
+    // sight so the rule needs no footnote.
+    let message = err(
+        dir,
+        &["extract", "out.tar", "flat", "--flatten", "--strip", "0"],
+    );
+    assert!(message.contains("cannot be combined"), "{message}");
+}
+
+/// A compressed single file has no entries to flatten, and saying so beats
+/// quietly ignoring the flag.
+#[test]
+fn flatten_does_not_apply_to_a_bare_compressed_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let gz = dir.join("notes.txt.gz");
+    let mut enc = flate2::write::GzEncoder::new(
+        fs::File::create(&gz).unwrap(),
+        flate2::Compression::default(),
+    );
+    enc.write_all(b"just text\n").unwrap();
+    enc.finish().unwrap();
+
+    let message = err(dir, &["extract", "notes.txt.gz", "out", "--flatten"]);
+    assert!(message.contains("--flatten"), "{message}");
+    assert!(message.contains("single file"), "{message}");
+}
+
+/// `--flatten` is not a way around the entry-name check: a name that climbs
+/// out of `dest` is refused before anything is written, exactly as it is
+/// without the flag.
+#[test]
+fn a_traversing_archive_is_still_refused_under_flatten() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let outside = dir.join("OWNED");
+
+    let zip_path = dir.join("evil.zip");
+    {
+        let mut w = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        w.start_file::<_, ()>("../OWNED", Default::default())
+            .unwrap();
+        w.write_all(b"pwned").unwrap();
+        w.finish().unwrap();
+    }
+    let message = err(dir, &["extract", "evil.zip", "unpacked", "--flatten"]);
+    assert!(message.contains("OWNED"), "{message}");
+    assert!(
+        !outside.exists(),
+        "zip escaped the destination under --flatten"
+    );
+
+    for entry in ["../OWNED", "/tmp/OWNED", "..\\OWNED", "pkg/../../OWNED"] {
+        let tar_path = dir.join("evil.tar");
+        fs::write(&tar_path, raw_tar(entry, b"pwned")).unwrap();
+        let message = err(dir, &["extract", "evil.tar", "unpacked", "--flatten"]);
+        assert!(message.contains("OWNED"), "{entry}: {message}");
+        assert!(!outside.exists(), "{entry} escaped the destination");
+    }
+    assert!(!dir.join("unpacked").exists());
+}
+
+// ---------------------------------------------------------------------------
 // path traversal
 // ---------------------------------------------------------------------------
 
@@ -468,22 +690,49 @@ fn unsafe_entry_names_are_rejected() {
         "\\\\server\\share\\evil",
     ] {
         assert!(
-            pack::safe_entry(name, 0).is_err(),
+            pack::safe_entry(name, 0, false).is_err(),
             "{name} should have been rejected"
         );
     }
 
     assert_eq!(
-        pack::safe_entry("a/b/c.txt", 0).unwrap(),
+        pack::safe_entry("a/b/c.txt", 0, false).unwrap(),
         Some(PathBuf::from("a").join("b").join("c.txt"))
     );
     // `.` and doubled separators are noise, not an escape.
     assert_eq!(
-        pack::safe_entry("./a//b.txt", 0).unwrap(),
+        pack::safe_entry("./a//b.txt", 0, false).unwrap(),
         Some(PathBuf::from("a").join("b.txt"))
     );
     // Stripped past its own depth: skipped, not an error.
-    assert_eq!(pack::safe_entry("a/b.txt", 5).unwrap(), None);
+    assert_eq!(pack::safe_entry("a/b.txt", 5, false).unwrap(), None);
+
+    // Flattening happens after the same component check, so a name that would
+    // escape is still refused, and what survives is a bare filename.
+    for name in [
+        "../evil",
+        "a/../../evil",
+        "/etc/passwd",
+        "..\\evil",
+        "C:evil",
+    ] {
+        assert!(
+            pack::safe_entry(name, 0, true).is_err(),
+            "{name} should have been rejected under --flatten"
+        );
+    }
+    assert_eq!(
+        pack::safe_entry("a/b/c.txt", 0, true).unwrap(),
+        Some(PathBuf::from("c.txt"))
+    );
+    assert_eq!(
+        pack::safe_entry("./a//b.txt", 0, true).unwrap(),
+        Some(PathBuf::from("b.txt"))
+    );
+    assert_eq!(
+        pack::safe_entry("lone.txt", 0, true).unwrap(),
+        Some(PathBuf::from("lone.txt"))
+    );
 }
 
 /// End to end, with archives built by hand the way an attacker would: the

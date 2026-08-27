@@ -1062,6 +1062,235 @@ fn exit_stops_the_run_and_sets_the_code() {
     assert!(trace().is_empty(), "{:?}", trace());
 }
 
+/// The shape the statement exists for: a `setup` task that finds its work
+/// already done stops itself, and the `dev` task that called it goes on to the
+/// next step. `exit` would have taken `dev` down with it.
+#[test]
+fn return_ends_the_task_and_the_caller_carries_on() {
+    let f = file(vec![
+        task(
+            "dev",
+            &[],
+            vec![
+                run(cmd("setup", vec![])),
+                run(cmd("hit", vec![lit("tauri-dev")])),
+            ],
+        ),
+        task(
+            "setup",
+            &[],
+            vec![
+                run(cmd("hit", vec![lit("checked")])),
+                Stmt::Return(None),
+                run(cmd("hit", vec![lit("downloaded")])),
+            ],
+        ),
+    ]);
+    let ran = go(&f, "dev", &[]);
+    assert_eq!(ran.result.unwrap(), 0);
+    assert_eq!(trace(), ["checked", "tauri-dev"]);
+}
+
+/// There is no `break`, and someone will reach for `return` as one: it leaves
+/// the task, not the iteration and not just the loop.
+#[test]
+fn return_inside_a_for_leaves_the_whole_task() {
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                run(cmd("find-first", vec![])),
+                run(cmd("hit", vec![lit("after-call")])),
+            ],
+        ),
+        task(
+            "find-first",
+            &[],
+            vec![
+                Stmt::For(For {
+                    var: "item".into(),
+                    items: vec![lit("a"), lit("b"), lit("c")],
+                    body: vec![
+                        run(cmd("hit", vec![unquoted(vec![var("item")])])),
+                        Stmt::Return(None),
+                    ],
+                    span: sp(),
+                }),
+                run(cmd("hit", vec![lit("past-the-loop")])),
+            ],
+        ),
+    ]);
+    go(&f, "t", &[]).ok();
+    // One iteration, nothing after the loop, and the caller still ran.
+    assert_eq!(trace(), ["a", "after-call"]);
+}
+
+#[test]
+fn return_inside_a_nested_if_leaves_the_task() {
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                run(cmd("guard", vec![])),
+                run(cmd("hit", vec![lit("after-call")])),
+            ],
+        ),
+        task(
+            "guard",
+            &[],
+            vec![
+                Stmt::If(If {
+                    cond: Cond::Compare {
+                        left: lit("yes"),
+                        op: CompareOp::Eq,
+                        right: lit("yes"),
+                    },
+                    then: vec![Stmt::If(If {
+                        cond: Cond::Command(cmd("status", vec![lit("0")])),
+                        then: vec![Stmt::Return(None)],
+                        otherwise: None,
+                        span: sp(),
+                    })],
+                    otherwise: None,
+                    span: sp(),
+                }),
+                run(cmd("hit", vec![lit("unreached")])),
+            ],
+        ),
+    ]);
+    go(&f, "t", &[]).ok();
+    assert_eq!(trace(), ["after-call"]);
+}
+
+/// A task that returned early still produced whatever it printed first, and
+/// that value — not an empty string — is what the capture gets. Run-once
+/// records it, so the second capture replays it without running the body.
+#[test]
+fn a_captured_task_that_returns_early_yields_what_it_printed() {
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                assign(
+                    "a",
+                    unquoted(vec![part(PartKind::Capture(Box::new(cmd("id", vec![]))))]),
+                ),
+                assign(
+                    "b",
+                    unquoted(vec![part(PartKind::Capture(Box::new(cmd("id", vec![]))))]),
+                ),
+                run(cmd(
+                    "say",
+                    vec![
+                        unquoted(vec![text("a=["), var("a"), text("]")]),
+                        unquoted(vec![text("b=["), var("b"), text("]")]),
+                    ],
+                )),
+            ],
+        ),
+        task(
+            "id",
+            &[],
+            vec![
+                run(cmd("hit", vec![lit("body")])),
+                run(cmd("say", vec![lit("cached")])),
+                Stmt::Return(None),
+                run(cmd("say", vec![lit("unreached")])),
+            ],
+        ),
+    ]);
+    let ran = go(&f, "t", &[]);
+    assert_eq!(ran.printed(), ["a=[cached] b=[cached]"]);
+    assert_eq!(trace(), ["body"]);
+}
+
+/// The code is the task's exit status, so every construct that reads a
+/// command's status reads a `return` the same way.
+#[test]
+fn a_return_code_becomes_the_tasks_status() {
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                // `||` sees the failure and takes over; `&&` would not run.
+                run(Chain::Or(
+                    Box::new(cmd("nope", vec![])),
+                    Box::new(cmd("hit", vec![lit("fallback")])),
+                )),
+                Stmt::If(If {
+                    cond: Cond::Command(cmd("nope", vec![])),
+                    then: vec![run(cmd("hit", vec![lit("unreached")]))],
+                    otherwise: Some(vec![run(cmd("hit", vec![lit("condition-false")]))]),
+                    span: sp(),
+                }),
+                // `try` swallows it, the same as any other nonzero command.
+                Stmt::Try(cmd("nope", vec![])),
+                run(cmd("hit", vec![lit("after-try")])),
+            ],
+        ),
+        task("nope", &[], vec![Stmt::Return(Some(lit("3")))]),
+    ]);
+    let ran = exec(&f, "t", &[], Mode::Run, Repeat::Always, &root());
+    assert_eq!(ran.result.unwrap(), 0);
+    assert_eq!(trace(), ["fallback", "condition-false", "after-try"]);
+}
+
+/// Outside `try` and the operators, a nonzero `return` stops the caller
+/// fail-fast, exactly as a command that exited nonzero would.
+#[test]
+fn an_unhandled_nonzero_return_stops_the_caller() {
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                run(cmd("nope", vec![])),
+                run(cmd("hit", vec![lit("unreached")])),
+            ],
+        ),
+        task("nope", &[], vec![Stmt::Return(Some(lit("4")))]),
+    ]);
+    let message = go(&f, "t", &[]).err_text();
+    assert!(message.contains("nope"), "{message}");
+    assert!(message.contains('4'), "{message}");
+    assert!(trace().is_empty(), "{:?}", trace());
+}
+
+/// In the task the command line named there is no caller left, so `return`
+/// ends the run — successfully unless it named a code.
+#[test]
+fn return_in_the_top_level_task_ends_the_run() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            run(cmd("hit", vec![lit("first")])),
+            Stmt::Return(None),
+            run(cmd("hit", vec![lit("unreached")])),
+        ],
+    )]);
+    let ran = go(&f, "t", &[]);
+    assert_eq!(ran.result.unwrap(), 0);
+    assert_eq!(trace(), ["first"]);
+
+    let f = file(vec![task("t", &[], vec![Stmt::Return(Some(lit("5")))])]);
+    assert_eq!(go(&f, "t", &[]).result.unwrap(), 5);
+}
+
+/// A `return` code that is not a number is the author's mistake, and the
+/// message names the statement it was written on.
+#[test]
+fn a_non_numeric_return_code_is_an_error() {
+    let f = file(vec![task("t", &[], vec![Stmt::Return(Some(lit("soon")))])]);
+    let message = go(&f, "t", &[]).err_text();
+    assert!(message.contains("return code"), "{message}");
+    assert!(message.contains("soon"), "{message}");
+}
+
 // ---------------------------------------------------------------------------
 // Tasks
 // ---------------------------------------------------------------------------

@@ -170,6 +170,16 @@ impl<'a> Parser<'a> {
                     file.globals.push(self.assign()?);
                     self.end_of_stmt()?;
                 }
+                // `return` leaves a task, and at the top level there is no
+                // task to leave. Saying so beats the generic "expected a task,
+                // an assignment or an include", which leaves the reader to
+                // guess that `exit` is the statement they wanted.
+                Token::Word { .. } if self.at_keyword("return") => {
+                    return self.err(
+                        "`return` is only valid inside a task; \
+                         at the top level, use `exit` to end the run",
+                    );
+                }
                 ref other => {
                     return self.err(format!(
                         "expected a task, an assignment or an include at the top level, found {}",
@@ -301,11 +311,11 @@ impl<'a> Parser<'a> {
         }
         if self.at_keyword("exit") {
             self.bump();
-            let code = match matches!(self.kind(), Token::Word { .. }) {
-                true => Some(self.word("an exit code")?),
-                false => None,
-            };
-            return Ok(Stmt::Exit(code));
+            return Ok(Stmt::Exit(self.status_code("an exit code")?));
+        }
+        if self.at_keyword("return") {
+            self.bump();
+            return Ok(Stmt::Return(self.status_code("a return code")?));
         }
         if matches!(self.kind(), Token::Word { .. })
             && self.tokens[self.i + 1].token == Token::Assign
@@ -313,6 +323,15 @@ impl<'a> Parser<'a> {
             return Ok(Stmt::Assign(self.assign()?));
         }
         Ok(Stmt::Command(self.chain()?))
+    }
+
+    /// The optional code after `exit` or `return`. Both take one at most, and
+    /// a bare keyword — the common case — means zero.
+    fn status_code(&mut self, what: &str) -> Result<Option<Word>> {
+        match matches!(self.kind(), Token::Word { .. }) {
+            true => Ok(Some(self.word(what)?)),
+            false => Ok(None),
+        }
     }
 
     fn assign(&mut self) -> Result<Assign> {

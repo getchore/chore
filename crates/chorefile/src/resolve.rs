@@ -537,7 +537,10 @@ impl Renamer<'_> {
                     }
                     self.block(&mut node.body, locals);
                 }
-                ast::Stmt::Exit(code) => {
+                // `exit` and `return` differ in where they stop, not in what
+                // they name, so a code written as `$status` is renamed the
+                // same way in both.
+                ast::Stmt::Exit(code) | ast::Stmt::Return(code) => {
                     if let Some(word) = code {
                         self.word(word, locals);
                     }
@@ -641,7 +644,10 @@ fn locals_of(block: &ast::Block) -> HashSet<String> {
                     out.insert(node.var.clone());
                     walk(&node.body, out);
                 }
-                ast::Stmt::Command(_) | ast::Stmt::Try(_) | ast::Stmt::Exit(_) => {}
+                ast::Stmt::Command(_)
+                | ast::Stmt::Try(_)
+                | ast::Stmt::Exit(_)
+                | ast::Stmt::Return(_) => {}
             }
         }
     }

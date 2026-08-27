@@ -30,7 +30,8 @@ if cond { } else if cond { } else { }
 for x in a b c { }
 for f in $(find src *.rs) { }        space-split
 try cmd                      don't fail on nonzero
-exit [code]
+exit [code]                  end the whole run
+return [code]                end the current task; the caller carries on
 task name { }
 task name arg1 arg2 { }      $1 $2, $@ all, $# count
 include other.chore
@@ -65,6 +66,42 @@ if $OS == windows && $ENV == gnu { cmake -B build $flags -G "MinGW Makefiles" }
 else                             { cmake -B build $flags }
 ```
 
+### `return`
+
+`return` ends the task it is written in and hands control back to whoever
+called it, which carries on with its next statement. `exit` ends the whole run.
+That is the entire difference, and it is what lets a task stop early without
+taking its caller down:
+
+```sh
+task setup {
+    if exists $bin/sona-$TRIPLE { echo "already in place"  return }
+    download ...
+}
+
+# `setup` returns, and this task still gets to run
+task dev {
+    setup
+    pnpm exec tauri dev
+}
+```
+
+An optional code becomes the **task's** exit status, so `&&`, `||`, `try`, an
+`if` condition and a `$( )` capture read it exactly as they read any other
+command's: `return 1` is a task answering "no", not a failed run, and the
+caller decides what that means. Left off, the code is 0. A nonzero return that
+nothing handles stops the caller fail-fast, like any other nonzero command.
+
+`return` is not a loop control. Inside a `for` it leaves the **task**, not the
+loop; there is no `break`.
+
+A task that printed something before returning still produced that value, so a
+`$(task)` gets what it echoed, and run-once records it for the next capture.
+
+In the task named on the command line there is no caller left, so `return`
+ends the run — successfully, unless it named a code. `return` outside a task is
+a syntax error: there is no task to leave, and `exit` is what ends a run.
+
 ### Task parameters
 
 Declared parameters are **required**: `task deploy env { }` called with no
@@ -93,6 +130,7 @@ $OS        macos | linux | windows
 $ARCH      x86_64 | arm64
 $ENV       gnu | msvc | ""
 $PLATFORM  $OS-$ARCH
+$TRIPLE    rustc target triple, e.g. aarch64-apple-darwin
 $EXE       "" or ".exe"
 $HOME      user home
 $ROOT      dir containing the top-level chorefile
@@ -108,7 +146,7 @@ Reserved; a task may not shadow one.
 ```
 download <url> <dest> [--retries n] [--timeout s] [--sha256 h]
                               http(s), and gh://owner/repo/tag/asset
-extract  <archive> <dest> [--member name] [--strip n]
+extract  <archive> <dest> [--member name] [--strip n] [--flatten]
                               zip, tar, .gz .xz .zst
 archive  <src...> <dest>      format from the extension; `src/` packs contents
 copy     <src> <dest>         file or dir
@@ -147,6 +185,16 @@ extension still unpacks. `--member` matches an entry's full path or just its
 filename, so `--member chore` finds `bin/chore`. On a compressed *single* file
 (not a tar), `--member` and `--strip` are an error. An entry with an absolute
 path, or one that climbs out of `dest`, aborts the extraction.
+
+`--flatten` writes every entry directly into `dest` under its base name,
+discarding the directory path it had inside the archive; directory entries are
+dropped, since a flattened tree has none. It exists for `--member`: without it,
+`extract out.tar.gz got --member sona` lands `got/pkg/bin/sona`, a path you
+cannot predict without opening the archive first, and every such call has to be
+followed by a `move`. Two entries that would flatten to the same name is an
+error naming both — the alternative is a run that succeeds and whose result
+depends on the order entries sit in the archive. `--strip` and `--flatten`
+cannot be combined, since `--flatten` already drops every directory.
 
 **archive.** The last argument is the destination, and its extension picks the
 format: `.zip`, `.tar`, `.tar.gz` or `.tgz`, `.tar.xz` or `.txz`, `.tar.zst` or
@@ -194,6 +242,15 @@ Windows file is executable by extension rather than by mode.
 **cd** is not in this list. It changes the interpreter's directory rather than
 the process's, so it is handled before builtin and `PATH` lookup, and `^` does
 not apply to it.
+
+**$TRIPLE** is the rustc target triple for the host, spelled the way `rustc
+-vV` and `cargo --target` spell it. It is not derivable from `$OS` and `$ARCH`
+— `linux` alone cannot say `gnu` or `musl`, and `windows` alone cannot say
+`msvc` or `gnu` — which is why chore reports it rather than leaving every Rust
+chorefile to write the same mapping table. Use `$PLATFORM` for naming your own
+release artifacts and `$TRIPLE` for anything handed to a toolchain. On a target
+chore has no triple for it is empty: a guessed triple is accepted by cargo and
+then builds the wrong thing, where an empty one fails somewhere you can see it.
 
 **$HOME** is empty when neither `HOME` nor `USERPROFILE` is set.
 

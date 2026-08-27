@@ -681,7 +681,10 @@ impl<'a> Checker<'a> {
                     scope.names.remove(&node.var);
                 }
             }
-            Stmt::Exit(code) => {
+            // `return`'s code word is checked exactly as `exit`'s is; the
+            // difference between them is where control goes, not what a
+            // reader can write in the code.
+            Stmt::Exit(code) | Stmt::Return(code) => {
                 if let Some(word) = code {
                     self.word(word, scope);
                 }

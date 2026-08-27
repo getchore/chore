@@ -135,14 +135,15 @@ GH_TOKEN, if set, is sent as a bearer token. 5xx and 429 are retried; other 4xx 
     },
     Builtin {
         name: "extract",
-        usage: "extract <archive> <dest> [--member name] [--strip n]",
+        usage: "extract <archive> <dest> [--member name] [--strip n] [--flatten]",
         summary: "unpack a zip or tar, compressed or not",
         description: "Handles zip, tar, and .gz, .xz and .zst streams holding either a tar or \
 a single file. The format comes from the extension, and from the leading bytes when the name \
 says nothing. Entry names are checked before they become paths: an absolute name, or one that \
 climbs out of `dest`, aborts the whole extraction. For a compressed single file, --member and \
 --strip are an error, and a `dest` ending in `/` means \"into this directory, under the name \
-with the compression extension removed\".",
+with the compression extension removed\". Without --flatten an entry keeps the directory path it \
+had inside the archive, so `--member sona` can land at `dest/pkg/bin/sona`.",
         effects: true,
         flags: &[
             Flag {
@@ -158,6 +159,14 @@ or just its filename, so `--member chore` finds `bin/chore`",
                 default: "0",
                 meaning: "drop n leading path components from each entry; entries with fewer \
 components are skipped",
+            },
+            Flag {
+                name: "--flatten",
+                argument: "",
+                default: "off",
+                meaning: "write every entry directly into `dest` under its base name, dropping \
+the directory path it had inside the archive; two entries that would collide is an error, and it \
+cannot be combined with --strip",
             },
         ],
     },
@@ -351,6 +360,12 @@ static VARIABLES: &[Variable] = &[
         scope: "run",
     },
     Variable {
+        name: "TRIPLE",
+        values: "e.g. aarch64-apple-darwin",
+        meaning: "the rustc target triple, for anything handed to a toolchain",
+        scope: "run",
+    },
+    Variable {
         name: "EXE",
         values: "\"\" | .exe",
         meaning: "the executable suffix, so `build/tool$EXE` is portable",
@@ -443,6 +458,14 @@ echo other }",
         example: "exit 1",
         meaning: "Stop the run with the given code, 0 by default. A called task's `exit` \
 unwinds its caller too.",
+    },
+    Form {
+        name: "return",
+        syntax: "return [code]",
+        example: "if exists $out { return }",
+        meaning: "End the current task and hand control back to its caller, which carries on. \
+An optional code becomes the task's exit status, so `&&`, `||`, `try`, a condition and a \
+capture read it as they read any command's. Inside a `for` it leaves the task, not the loop.",
     },
     Form {
         name: "task",

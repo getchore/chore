@@ -273,12 +273,12 @@ fn extract_reports_its_real_flags() {
     assert_eq!(b.name, "extract");
     assert_eq!(
         b.usage,
-        "extract <archive> <dest> [--member name] [--strip n]"
+        "extract <archive> <dest> [--member name] [--strip n] [--flatten]"
     );
     assert!(b.effects, "extract writes files, so --dry must skip it");
 
     let flags: Vec<&str> = b.flags.iter().map(|f| f.name).collect();
-    assert_eq!(flags, ["--member", "--strip"]);
+    assert_eq!(flags, ["--member", "--strip", "--flatten"]);
 
     let strip = b.flags.iter().find(|f| f.name == "--strip").unwrap();
     assert_eq!(strip.argument, "n");

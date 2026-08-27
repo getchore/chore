@@ -56,6 +56,8 @@ fn render_stmt(stmt: &Stmt) -> String {
         Stmt::Try(c) => format!("try {}", render_chain(c)),
         Stmt::Exit(None) => "exit".into(),
         Stmt::Exit(Some(w)) => format!("exit {}", render_word(w)),
+        Stmt::Return(None) => "return".into(),
+        Stmt::Return(Some(w)) => format!("return {}", render_word(w)),
         Stmt::For(f) => {
             let items: Vec<String> = f.items.iter().map(render_word).collect();
             format!(
@@ -324,6 +326,25 @@ fn try_and_exit() {
 }
 
 #[test]
+fn return_with_and_without_a_code() {
+    assert_eq!(
+        body("task t {\n return\n return 2\n return $code\n}"),
+        "{ return; return 2; return $code }"
+    );
+}
+
+/// `return` ends the task it sits in, wherever that is, so it parses as a
+/// statement anywhere a statement is allowed — a `for` body and a nested `if`
+/// included.
+#[test]
+fn return_parses_inside_a_loop_and_a_nested_if() {
+    assert_eq!(
+        body("task t {\n for f in a b {\n  if $f == a { return 0 }\n }\n exit 1\n}"),
+        "{ for f in a b { if $f == a { return 0 } }; exit 1 }"
+    );
+}
+
+#[test]
 fn task_parameters_and_positionals() {
     let f = file("task greet who when {\n echo $1 $2 $@ $#\n}");
     assert_eq!(f.tasks[0].params, ["who", "when"]);
@@ -517,6 +538,17 @@ fn a_for_span_covers_the_header_only() {
 }
 
 #[test]
+fn a_return_code_keeps_the_span_of_the_word_it_was_written_as() {
+    let src = "task t {\n return $code\n}";
+    let f = file(src);
+    let Stmt::Return(Some(code)) = &f.tasks[0].body[0] else {
+        panic!("expected a return with a code");
+    };
+    assert_eq!(&src[code.span.range()], "$code");
+    assert_eq!(&src[code.parts[0].span.range()], "$code");
+}
+
+#[test]
 fn a_redirect_span_covers_the_operator_and_its_target() {
     let src = "task t {\n echo hi >> out.log\n}";
     let f = file(src);
@@ -629,6 +661,18 @@ fn error_command_at_the_top_level() {
     let message = error("echo hi\n");
     assert!(message.contains("top level"), "message was: {message}");
     assert!(message.contains("`echo`"), "message was: {message}");
+}
+
+#[test]
+fn error_return_outside_a_task() {
+    // There is no task to leave at the top level, and the message has to say
+    // which statement the author wanted instead.
+    let message = error("return\n");
+    assert!(
+        message.contains("only valid inside a task"),
+        "message was: {message}"
+    );
+    assert!(message.contains("`exit`"), "message was: {message}");
 }
 
 #[test]

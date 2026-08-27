@@ -45,7 +45,25 @@ pub enum Stmt {
     For(For),
     /// `try <cmd>` — run it, ignore a nonzero exit.
     Try(Chain),
+    /// `exit [code]` — ends the **whole run**, unwinding every caller with
+    /// this code. Nothing after it happens, in this task or in the one that
+    /// called it.
     Exit(Option<Word>),
+    /// `return [code]` — ends the **enclosing task** and hands control back to
+    /// its caller, which carries on with the next statement. The code becomes
+    /// the task's exit status, so `&&`, `||`, `try`, an `if` condition and a
+    /// `$( )` capture all read it exactly as they read any other command's.
+    ///
+    /// This is the difference the two statements exist to draw: a `setup` task
+    /// that finds its work already done wants to stop *itself*, so that a
+    /// `dev` task calling it still gets to run `tauri dev`. `exit` stops the
+    /// run and takes the caller down with it; `return` stops one frame
+    /// earlier. In the task named on the command line there is no caller, so
+    /// `return` ends the run — successfully, unless it names a code.
+    ///
+    /// It is not a loop control: inside a `for`, `return` leaves the task, not
+    /// the loop. There is no `break`.
+    Return(Option<Word>),
 }
 
 #[derive(Debug)]
