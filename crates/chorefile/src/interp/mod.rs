@@ -7,6 +7,26 @@
 //! This module holds the run's state and its statements; [`expand`] turns
 //! words into argv, and [`run`] carries a command out.
 //!
+//! # `include`
+//!
+//! By the time a tree reaches here, [`resolve`](crate::resolve) has followed
+//! every `include` and merged the result into one [`File`], so the
+//! interpreter never learns that more than one file existed. A task pulled in
+//! under `include libs/chorefile as libs` is simply a task *named*
+//! `libs::build`: it is looked up, called, captured, piped, redirected and
+//! keyed for run-once by that whole string, which is what keeps a `build` in
+//! one namespace from standing in for a `build` in another. `$TASK` reports
+//! the same name — the one `chore list` prints and the one that has to be
+//! typed to run it.
+//!
+//! The one thing merging must not move is `$ROOT`. It is one directory per
+//! invocation, the top-level chorefile's, so that a relative path written in
+//! an included file lands where the project's author expects rather than next
+//! to the file that happened to contain it. The interpreter holds it in a
+//! field, answers `$ROOT` from that field, and hands the same path to every
+//! builtin as `Ctx::root`; [`Interpreter::merged`] takes it from
+//! [`Merged::root`] so a caller cannot supply a different one by accident.
+//!
 //! # What `--dry` does with a command that cannot run
 //!
 //! A preview skips effects but still runs captures and conditions, so a
@@ -66,6 +86,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::ast::{Block, CompareOp, Cond, File, Stmt, Task};
 use crate::error::{Error, Result};
 use crate::exec::{Builtin, Output};
+use crate::resolve::Merged;
 use crate::{builtins, vars};
 
 /// How much of a run actually happens.
@@ -235,6 +256,19 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Run a chorefile and everything its `include`s pulled in.
+    ///
+    /// The merged tree names an included task the way `include ... as libs`
+    /// asked — `libs::build` — and the interpreter treats that as a task name
+    /// like any other. The reason to prefer this over [`new`](Self::new) is
+    /// the root: it comes from [`Merged::root`], the top-level chorefile's
+    /// directory, so a caller cannot pair a merged tree with an included
+    /// file's directory and send its `download ... third_party/` somewhere
+    /// its author never chose.
+    pub fn merged(merged: &'a Merged, mode: Mode, repeat: Repeat) -> Self {
+        Self::new(&merged.file, &merged.root, mode, repeat)
+    }
+
     /// Start somewhere other than `$ROOT`.
     pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.frames[0].cwd = cwd.into();
@@ -307,8 +341,20 @@ impl<'a> Interpreter<'a> {
         match name {
             // Derived from the frame, so they cannot be stored in a map.
             "CWD" => return Some(vars::display(self.cwd())),
+            // The name the task was *called* by, which after `include ... as`
+            // is the namespaced one: a task merged in as `libs::build` sees
+            // `libs::build`, the same string `chore list` shows and the same
+            // one that has to be typed to run it. Answering `build` would name
+            // something that cannot be called.
             "TASK" => return Some(self.frame().task.clone()),
             "NOW" => return Some(self.now.clone()),
+            // Answered from the field, not the map: `$ROOT` is one directory
+            // per invocation, and an assignment — in the top-level file or in
+            // one merged in by `include` — must not move it. The builtins
+            // already read `self.root` through `Ctx::root`, so resolving it
+            // anywhere else is what would let `$ROOT` and `remove`'s refusal
+            // to delete the root disagree about where the root is.
+            "ROOT" => return Some(vars::display(&self.root)),
             _ => {}
         }
         self.frame()

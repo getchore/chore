@@ -1682,3 +1682,345 @@ fn tasks_are_listed_in_source_order() {
     assert!(interp.task("b").is_some());
     assert!(interp.task("c").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Included tasks (`include ... as`)
+// ---------------------------------------------------------------------------
+//
+// `resolve` merges every included file into one tree before the interpreter
+// sees it, so a task pulled in under `include libs/chorefile as libs` arrives
+// here simply *named* `libs::build`. These build that merged tree by hand —
+// the interpreter is the unit under test, and it must not need `resolve` to
+// exist to be tested. What is being pinned down is that the whole namespaced
+// name, and nothing shorter, is what the interpreter looks up, keys and
+// reports.
+
+#[test]
+fn a_namespaced_task_runs_as_a_statement() {
+    let f = file(vec![
+        task("t", &[], vec![run(cmd("libs::build", vec![]))]),
+        task(
+            "libs::build",
+            &[],
+            vec![run(cmd("hit", vec![lit("built")]))],
+        ),
+    ]);
+    go(&f, "t", &[]).ok();
+    assert_eq!(trace(), ["built"]);
+}
+
+#[test]
+fn a_namespaced_task_is_callable_from_the_command_line() {
+    // `chore libs::build` hands the whole name to `run_task`.
+    let f = file(vec![task(
+        "libs::build",
+        &[],
+        vec![run(cmd("hit", vec![lit("built")]))],
+    )]);
+    go(&f, "libs::build", &[]).ok();
+    assert_eq!(trace(), ["built"]);
+}
+
+#[test]
+fn a_namespaced_task_captures_pipes_and_redirects() {
+    let dir = Temp::new("ns-capture");
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                // $( ... )
+                assign(
+                    "v",
+                    unquoted(vec![part(PartKind::Capture(Box::new(cmd(
+                        "libs::version",
+                        vec![],
+                    ))))]),
+                ),
+                run(cmd("say", vec![unquoted(vec![text("got "), var("v")])])),
+                // A pipe.
+                run(Chain::Pipe(
+                    Box::new(cmd("libs::version", vec![])),
+                    Box::new(cmd("upper", vec![])),
+                )),
+                // A redirect.
+                run(cmd_with(
+                    "libs::version",
+                    vec![],
+                    vec![redirect(RedirectKind::Stdout, "v.txt")],
+                )),
+                run(cmd("read", vec![lit("v.txt")])),
+            ],
+        ),
+        task(
+            "libs::version",
+            &[],
+            vec![run(cmd("say", vec![lit("1.2.3")]))],
+        ),
+    ]);
+    let ran = exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path());
+    assert_eq!(ran.printed(), ["got 1.2.3", "1.2.3", "1.2.3"]);
+}
+
+#[test]
+fn same_named_tasks_in_different_namespaces_both_run() {
+    // The very collision `as` exists to prevent: two `build`s that must stay
+    // two tasks. A key that dropped the namespace would run one and skip the
+    // other, silently.
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                run(cmd("libs::build", vec![])),
+                run(cmd("tools::build", vec![])),
+                run(cmd("build", vec![])),
+            ],
+        ),
+        task("libs::build", &[], vec![run(cmd("hit", vec![lit("libs")]))]),
+        task(
+            "tools::build",
+            &[],
+            vec![run(cmd("hit", vec![lit("tools")]))],
+        ),
+        task("build", &[], vec![run(cmd("hit", vec![lit("bare")]))]),
+    ]);
+    go(&f, "t", &[]).ok();
+    assert_eq!(trace(), ["libs", "tools", "bare"]);
+}
+
+#[test]
+fn run_once_is_keyed_per_namespace() {
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                run(cmd("libs::build", vec![])),
+                run(cmd("tools::build", vec![])),
+                // Each is already done; neither may run a second time, and
+                // the second call must not be answered by the first's record.
+                run(cmd("libs::build", vec![])),
+                run(cmd("tools::build", vec![])),
+            ],
+        ),
+        task("libs::build", &[], vec![run(cmd("hit", vec![lit("libs")]))]),
+        task(
+            "tools::build",
+            &[],
+            vec![run(cmd("hit", vec![lit("tools")]))],
+        ),
+    ]);
+    go(&f, "t", &[]).ok();
+    assert_eq!(trace(), ["libs", "tools"]);
+}
+
+#[test]
+fn a_replayed_capture_is_keyed_per_namespace_too() {
+    // Two namespaced tasks used as functions: the remembered value belongs to
+    // the one that printed it.
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                assign(
+                    "a",
+                    unquoted(vec![part(PartKind::Capture(Box::new(cmd(
+                        "libs::id",
+                        vec![],
+                    ))))]),
+                ),
+                assign(
+                    "b",
+                    unquoted(vec![part(PartKind::Capture(Box::new(cmd(
+                        "tools::id",
+                        vec![],
+                    ))))]),
+                ),
+                assign(
+                    "a2",
+                    unquoted(vec![part(PartKind::Capture(Box::new(cmd(
+                        "libs::id",
+                        vec![],
+                    ))))]),
+                ),
+                run(cmd(
+                    "say",
+                    vec![unquoted(vec![
+                        var("a"),
+                        text(" "),
+                        var("b"),
+                        text(" "),
+                        var("a2"),
+                    ])],
+                )),
+            ],
+        ),
+        task("libs::id", &[], vec![run(cmd("say", vec![lit("libs")]))]),
+        task("tools::id", &[], vec![run(cmd("say", vec![lit("tools")]))]),
+    ]);
+    let ran = go(&f, "t", &[]);
+    assert_eq!(ran.printed(), ["libs tools libs"]);
+}
+
+#[test]
+fn task_variable_holds_the_namespaced_name() {
+    // The name `chore list` shows and the name that has to be typed to run
+    // it. Answering `build` would name something uncallable.
+    let f = file(vec![
+        task("t", &[], vec![run(cmd("libs::build", vec![]))]),
+        task(
+            "libs::build",
+            &[],
+            vec![run(cmd("say", vec![unquoted(vec![var("TASK")])]))],
+        ),
+    ]);
+    assert_eq!(go(&f, "t", &[]).printed(), ["libs::build"]);
+}
+
+#[test]
+fn a_namespaced_task_calls_a_bare_sibling() {
+    // Merging is flat, so a task in a namespace reaches a top-level task by
+    // its plain name — and its own name is no prefix on the lookup.
+    let f = file(vec![
+        task(
+            "libs::build",
+            &[],
+            vec![
+                run(cmd("prepare", vec![])),
+                run(cmd("hit", vec![lit("built")])),
+            ],
+        ),
+        task("prepare", &[], vec![run(cmd("hit", vec![lit("prepared")]))]),
+    ]);
+    go(&f, "libs::build", &[]).ok();
+    assert_eq!(trace(), ["prepared", "built"]);
+}
+
+#[test]
+fn a_namespaced_task_takes_arguments_and_reports_a_missing_one_by_full_name() {
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![run(cmd("libs::build", vec![lit("release")]))],
+        ),
+        task(
+            "libs::build",
+            &["profile"],
+            vec![run(cmd(
+                "hit",
+                vec![unquoted(vec![part(PartKind::Var(VarRef::Positional(1)))])],
+            ))],
+        ),
+    ]);
+    go(&f, "t", &[]).ok();
+    assert_eq!(trace(), ["release"]);
+
+    let missing = file(vec![
+        task("t", &[], vec![run(cmd("libs::build", vec![]))]),
+        task("libs::build", &["profile"], vec![]),
+    ]);
+    let message = go(&missing, "t", &[]).err_text();
+    assert!(message.contains("libs::build"), "{message}");
+}
+
+#[test]
+fn an_unknown_namespaced_task_is_reported_by_full_name() {
+    let f = file(vec![task("t", &[], vec![])]);
+    let message = go(&f, "libs::build", &[]).err_text();
+    assert!(message.contains("unknown task `libs::build`"), "{message}");
+}
+
+#[test]
+fn a_namespaced_task_recursing_still_hits_the_depth_guard() {
+    // The guard counts frames, so the shape of the name cannot slip past it.
+    let f = file(vec![task(
+        "libs::build",
+        &[],
+        vec![assign("n", lit("x")), run(cmd("libs::build", vec![]))],
+    )]);
+    // --force, or run-once would stop the second call before the guard could.
+    let ran = exec(&f, "libs::build", &[], Mode::Run, Repeat::Always, &root());
+    let message = ran.err_text();
+    assert!(message.contains("libs::build"), "{message}");
+    assert!(message.contains("recursed"), "{message}");
+}
+
+#[test]
+fn root_stays_the_top_level_directory_inside_an_included_task() {
+    // The rule `include` is most likely to break by accident: a relative path
+    // written in an included file belongs under the *project's* root, not
+    // beside the file that happened to contain it. The interpreter is handed
+    // one root for the run and every task sees it, wherever it came from.
+    let dir = Temp::new("ns-root");
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                run(cmd("say", vec![unquoted(vec![var("ROOT")])])),
+                run(cmd("libs::fetch", vec![])),
+            ],
+        ),
+        task(
+            "libs::fetch",
+            &[],
+            vec![
+                run(cmd("say", vec![unquoted(vec![var("ROOT")])])),
+                // A relative path in the included task resolves against the
+                // run's directory, which starts at that same root.
+                run(cmd("touch", vec![unquoted(vec![text("third_party.txt")])])),
+            ],
+        ),
+    ]);
+    let ran = exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path());
+    let root = chorefile::vars::display(dir.path());
+    assert_eq!(ran.printed(), [root.clone(), root]);
+    assert!(dir.path().join("third_party.txt").is_file());
+}
+
+#[test]
+fn root_cannot_be_reassigned_by_a_global_or_a_task() {
+    // A merged tree carries every included file's globals, so an included
+    // `ROOT=...` would otherwise move the root for the whole run — and only
+    // for `$ROOT`, since the builtins read the interpreter's own field. One
+    // root per invocation, and nothing in the file may move it.
+    let dir = Temp::new("ns-root-fixed");
+    let f = File {
+        includes: Vec::new(),
+        globals: vec![Assign {
+            name: "ROOT".into(),
+            value: lit("/somewhere/else"),
+            span: sp(),
+        }],
+        tasks: vec![task(
+            "libs::fetch",
+            &[],
+            vec![
+                run(cmd("say", vec![unquoted(vec![var("ROOT")])])),
+                assign("ROOT", lit("/elsewhere")),
+                run(cmd("say", vec![unquoted(vec![var("ROOT")])])),
+            ],
+        )],
+    };
+    let ran = exec(&f, "libs::fetch", &[], Mode::Run, Repeat::Once, dir.path());
+    let root = chorefile::vars::display(dir.path());
+    assert_eq!(ran.printed(), [root.clone(), root]);
+}
+
+#[test]
+fn a_namespaced_name_echoes_unquoted() {
+    // `::` is not whitespace and not a quote, so the echo line reads as the
+    // command the author wrote.
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![run(cmd("libs::build", vec![lit("release")]))],
+        ),
+        task("libs::build", &[], vec![]),
+    ]);
+    assert_eq!(go(&f, "t", &[]).echoed(), ["$ libs::build release"]);
+}

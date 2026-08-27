@@ -194,15 +194,32 @@ fn list_json_has_the_documented_fields() {
     let run = chore(&dir, &["list", "--json"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert!(run.stdout.trim_start().starts_with('['), "{}", run.stdout);
+    // `chore` reports paths from the canonical working directory, which on
+    // macOS is `/private/var/...` where the temp dir is `/var/...`.
+    let chorefile = dir
+        .path()
+        .canonicalize()
+        .expect("canonical")
+        .join("chorefile");
     assert!(
-        run.stdout
-            .contains(r#"{"name": "greet", "description": null, "params": ["name"]}"#),
+        run.stdout.contains(&format!(
+            r#"{{"name": "greet", "description": null, "params": ["name"], "namespace": null, "file": "{}"}}"#,
+            chorefile.display()
+        )),
         "{}",
         run.stdout
     );
     assert!(
         run.stdout
             .contains(r#""name": "build", "description": "build the project""#),
+        "{}",
+        run.stdout
+    );
+    // Without an `include` there is one file and no namespace, and every task
+    // still says which file it came from.
+    assert_eq!(
+        run.stdout.matches(r#""namespace": null"#).count(),
+        3,
         "{}",
         run.stdout
     );

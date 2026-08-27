@@ -1,13 +1,20 @@
 //! `chore check` — diagnostics in the form editors already understand.
 //!
-//! One line per finding, `path:line:col: message`, plus an indented `help:`
-//! line when the library has a concrete suggestion. The analysis itself lives
-//! in `chorefile::check`; this only renders it.
+//! One line per finding, `path:line:col` plus the message, and an indented
+//! `help:` line when the library has a concrete suggestion. The analysis
+//! itself lives in `chorefile::check`; this only renders it.
+//!
+//! A finding can point into any file that contributed to the run, so the
+//! line and column come from [`Sources`], which holds the text of each one:
+//! resolving `line:col` against the top-level file's text would put an
+//! included file's finding at whatever line that offset happens to land on in
+//! a different file. With one source file the answer is identical, so this is
+//! the right rendering with or without includes.
 
 use std::io::{self, Write};
-use std::path::Path;
 
-use chorefile::check::{self, Severity};
+use chorefile::check::{Diagnostic, Severity};
+use chorefile::resolve::Sources;
 
 /// Print every finding. Returns how many were errors, so the caller can pick
 /// the exit code.
@@ -17,15 +24,16 @@ use chorefile::check::{self, Severity};
 /// about the machine rather than about the chorefile — a tool installed only
 /// in CI, or only on one platform. Failing on that would make `check`
 /// unusable as the CI gate it exists to be.
-pub fn report(out: &mut dyn Write, path: &Path, source: &str) -> io::Result<usize> {
-    // `check_source` parses for us, so a file too broken to parse still
-    // reports its syntax error as a diagnostic rather than as a crash.
-    let findings = check::check_source(source, path);
-    for finding in &findings {
+pub fn report(
+    out: &mut dyn Write,
+    findings: &[Diagnostic],
+    sources: &Sources,
+) -> io::Result<usize> {
+    for finding in findings {
         writeln!(
             out,
             "{}: {}",
-            finding.at.render(source),
+            sources.render(&finding.at),
             finding.message.trim_end()
         )?;
         if let Some(help) = &finding.help {

@@ -786,3 +786,281 @@ task diag {
         run.stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// include — a real second file on disk
+//
+// `include` is followed by `chorefile::resolve`, and `check` walks every file
+// that contributed through `chorefile::check::check_path`. Both landed, so
+// every test here runs.
+// ---------------------------------------------------------------------------
+
+/// A project with both kinds of include: one flat, one namespaced, and the
+/// namespaced file in a subdirectory so `$ROOT` has somewhere wrong to point.
+fn included_project() -> Dir {
+    let dir = Dir::new();
+    dir.chorefile(
+        "include tasks.chore\n\
+         include libs/chorefile as libs\n\
+         \n\
+         # build the project\n\
+         task build {\n\
+         \x20   echo top\n\
+         }\n",
+    );
+    dir.write(
+        "tasks.chore",
+        "# lint the sources\n\
+         task lint {\n\
+         \x20   echo linting\n\
+         }\n",
+    );
+    dir.write(
+        "libs/chorefile",
+        "# build the vendored library\n\
+         task build {\n\
+         \x20   echo lib building $1\n\
+         \x20   write $ROOT/where.txt here\n\
+         }\n",
+    );
+    dir
+}
+
+#[test]
+fn list_shows_flat_and_namespaced_tasks_from_the_included_files() {
+    let dir = included_project();
+    let run = chore(&dir, &["list"]).ok();
+    let names: Vec<&str> = run
+        .stdout
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    // Merge order: each include, then the including file's own tasks. A flat
+    // include keeps its bare name, `as libs` prefixes it.
+    assert_eq!(names, ["lint", "libs::build", "build"], "{}", run.stdout);
+    assert!(run.stdout.contains("lint the sources"), "{}", run.stdout);
+    assert!(
+        run.stdout.contains("build the vendored library"),
+        "{}",
+        run.stdout
+    );
+
+    // The descriptions line up in one column, sized by the longest name.
+    let columns: Vec<usize> = run
+        .stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            // Where the description starts: past the indent, past the name,
+            // past the padding.
+            let name_end = 2 + l.split_whitespace().next().unwrap_or("").len();
+            name_end + l[name_end..].chars().take_while(|c| *c == ' ').count()
+        })
+        .collect();
+    assert!(
+        columns.windows(2).all(|w| w[0] == w[1]),
+        "descriptions are not aligned:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn runs_a_task_from_a_flat_include() {
+    let dir = included_project();
+    let run = chore(&dir, &["lint"]).ok();
+    assert_eq!(run.printed("linting"), 1, "{}", run.stdout);
+}
+
+#[test]
+fn runs_a_namespaced_task_with_its_arguments_and_the_top_level_root() {
+    let dir = included_project();
+    let run = chore(&dir, &["libs::build", "sona"]).ok();
+    assert_eq!(run.printed("lib building sona"), 1, "{}", run.stdout);
+    // `$ROOT` is the top-level chorefile's directory in an included file too,
+    // so the write lands beside the top-level chorefile, not in `libs/`.
+    assert!(dir.exists("where.txt"), "{}", run.stdout);
+    assert!(!dir.exists("libs/where.txt"), "$ROOT followed the include");
+
+    // The bare name of a namespaced task is not a task.
+    let bare = chore(&dir, &["build"]).ok();
+    assert_eq!(bare.printed("top"), 1, "{}", bare.stdout);
+}
+
+#[test]
+fn list_json_names_the_file_and_namespace_each_task_came_from() {
+    let dir = included_project();
+    let run = chore(&dir, &["list", "--json"]).ok();
+    // Paths come back from the canonical working directory, which on macOS is
+    // `/private/var/...` where the temp dir is `/var/...`.
+    let root = dir.path().canonicalize().expect("canonical");
+    let included = root.join("tasks.chore");
+    let vendored = root.join("libs/chorefile");
+    let top = root.join("chorefile");
+    for (name, namespace, file) in [
+        ("lint", "null", &included),
+        ("libs::build", "\"libs\"", &vendored),
+        ("build", "null", &top),
+    ] {
+        let line = run
+            .stdout
+            .lines()
+            .find(|l| l.contains(&format!("\"name\": \"{name}\"")))
+            .unwrap_or_else(|| panic!("no `{name}` in\n{}", run.stdout));
+        assert!(
+            line.contains(&format!("\"namespace\": {namespace}")),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("\"file\": \"{}\"", file.display())),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn dry_and_force_still_hold_across_an_include() {
+    let dir = Dir::new();
+    dir.chorefile("include tasks.chore\n");
+    dir.write(
+        "tasks.chore",
+        "task once {\n\
+         \x20   write marker.txt x\n\
+         }\n\
+         \n\
+         task both {\n\
+         \x20   once\n\
+         \x20   once\n\
+         }\n",
+    );
+
+    // --dry echoes without touching the disk, in an included file too.
+    let dry = chore(&dir, &["once", "--dry"]).ok();
+    assert!(dry.stdout.contains("marker.txt"), "{}", dry.stdout);
+    assert!(!dir.exists("marker.txt"), "--dry wrote the file");
+
+    // run-once and --force survive the merge.
+    let plain = chore(&dir, &["both"]).ok();
+    assert_eq!(
+        plain.stdout.matches("$ write").count(),
+        1,
+        "{}",
+        plain.stdout
+    );
+    let forced = chore(&dir, &["both", "--force"]).ok();
+    assert_eq!(
+        forced.stdout.matches("$ write").count(),
+        2,
+        "{}",
+        forced.stdout
+    );
+}
+
+#[test]
+fn a_missing_include_is_a_clean_error_with_exit_two() {
+    let dir = Dir::new();
+    dir.chorefile("include vendor/tasks.chore\n\ntask build {\n    echo top\n}\n");
+    let run = chore(&dir, &["list"]);
+    assert_eq!(
+        run.code, 2,
+        "stdout:\n{}\nstderr:\n{}",
+        run.stdout, run.stderr
+    );
+    assert!(run.stderr.starts_with("chore: "), "{}", run.stderr);
+    // The path that could not be read is named, and nothing is debug-printed.
+    assert!(run.stderr.contains("vendor/tasks.chore"), "{}", run.stderr);
+    assert!(
+        !run.stderr.contains('{') && !run.stderr.contains("Error"),
+        "debug-printed error: {}",
+        run.stderr
+    );
+    assert_eq!(run.stderr.lines().count(), 1, "{}", run.stderr);
+}
+
+#[test]
+fn an_include_cycle_is_a_clean_error_with_exit_two() {
+    let dir = Dir::new();
+    dir.chorefile("include loop.chore\n");
+    dir.write("loop.chore", "include chorefile\n");
+    let run = chore(&dir, &["list"]);
+    assert_eq!(
+        run.code, 2,
+        "stdout:\n{}\nstderr:\n{}",
+        run.stdout, run.stderr
+    );
+    assert!(
+        run.stderr.to_lowercase().contains("cycle"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(run.stderr.lines().count(), 1, "{}", run.stderr);
+}
+
+#[test]
+fn a_missing_task_says_which_files_were_searched() {
+    let dir = included_project();
+    let run = chore(&dir, &["nope"]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("no task `nope`"), "{}", run.stderr);
+    assert!(run.stderr.contains("chorefile"), "{}", run.stderr);
+    // Naming only the top-level file would send the reader to the wrong place.
+    assert!(run.stderr.contains("includes"), "{}", run.stderr);
+}
+
+#[test]
+fn check_reports_a_finding_inside_the_included_file() {
+    let dir = Dir::new();
+    dir.chorefile("include tasks.chore\n\ntask build {\n    echo top\n}\n");
+    let source =
+        "# fetch the sdk\ntask sdk {\n    curl -L https://example.com/sdk.zip -o sdk.zip\n}\n";
+    dir.write("tasks.chore", source);
+
+    let run = chore(&dir, &["check"]);
+    assert_eq!(
+        run.code, 1,
+        "stdout:\n{}\nstderr:\n{}",
+        run.stdout, run.stderr
+    );
+
+    // The finding points into the file it lives in, at that file's line and
+    // column — not at the offset read against the top-level chorefile.
+    let offset = source.find("curl").expect("curl in the source");
+    let line = source[..offset].matches('\n').count() + 1;
+    let col = offset - source[..offset].rfind('\n').map_or(0, |i| i + 1) + 1;
+    let expected = format!("{}:{line}:{col}", dir.path().join("tasks.chore").display());
+    assert!(
+        run.stdout.contains(&expected),
+        "want {expected} in\n{}",
+        run.stdout
+    );
+    assert!(run.stdout.contains("download"), "{}", run.stdout);
+}
+
+#[test]
+fn check_reports_a_missing_include_as_a_finding_rather_than_giving_up() {
+    let dir = Dir::new();
+    dir.chorefile("include vendor/tasks.chore\n\ntask build {\n    echo top\n}\n");
+
+    // `check` is a gate: it says what is wrong and where, and exits 1 like any
+    // other error it finds. Running the same project is exit 2 instead, since
+    // there is nothing to run.
+    let checked = chore(&dir, &["check"]);
+    assert_eq!(checked.code, 1, "{}{}", checked.stdout, checked.stderr);
+    let at = format!(
+        "{}:1:1",
+        dir.path()
+            .canonicalize()
+            .expect("canonical")
+            .join("chorefile")
+            .display()
+    );
+    assert!(
+        checked.stdout.contains(&at),
+        "want {at} in\n{}",
+        checked.stdout
+    );
+    assert!(
+        checked.stdout.contains("vendor/tasks.chore"),
+        "{}",
+        checked.stdout
+    );
+}

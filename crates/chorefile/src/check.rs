@@ -12,6 +12,30 @@
 //! The one place platform matters is that `PATH` lookup, and it is skipped
 //! inside an `if` that this machine's `$OS`, `$ARCH` or `$ENV` decides against
 //! — see [`host_value`].
+//!
+//! # One file, or a whole include tree
+//!
+//! [`check`] and [`check_source`] check one file on its own: includes are
+//! recorded but not followed, so a name that could only come from an included
+//! file is taken on trust rather than reported.
+//!
+//! [`check_merged`] checks a [`Merged`] tree — a chorefile and everything its
+//! `include`s pulled in. Names resolve against the merged tables, so a task
+//! calling `libs::build` is checked for real, and every finding points into the
+//! file it actually came from rather than into the top-level one. Rendering
+//! such a finding needs *that* file's text: use
+//! [`Sources::render`](crate::resolve::Sources::render), never the top-level
+//! source.
+//!
+//! # What `check` does not report
+//!
+//! Anything [`resolve`](crate::resolve) rejects outright never reaches this
+//! module, because a rejected tree does not merge: an include cycle, a missing
+//! or unreadable included file, and a duplicate name across a flat merge are
+//! all `resolve` errors, reported by turning that error into a [`Diagnostic`]
+//! with [`Diagnostic::from_error`] — see [`check_path`]. The include findings
+//! here are the ones that survive a successful merge, plus everything
+//! [`check_source`] can still say when it is looking at a single file.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -20,7 +44,8 @@ use crate::ast::{
     Block, Chain, Command, CompareOp, Cond, File, If, PartKind, Stmt, Task, VarRef, Word,
 };
 use crate::error::{Error, Location, Span};
-use crate::{FILE_NAME, NAMESPACE_SEP, RESERVED_TASKS, builtins, parse, vars};
+use crate::resolve::Merged;
+use crate::{FILE_NAME, NAMESPACE_SEP, RESERVED_TASKS, builtins, parse, resolve, vars};
 
 /// How much a finding matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +111,9 @@ impl Diagnostic {
 /// Parse `source` and check it. A syntax error is reported as a diagnostic
 /// rather than returned, because nothing else can be checked once parsing
 /// fails and callers want one list either way.
+///
+/// One file only: `include` is recorded, not followed. Use [`check_path`] or
+/// [`check_merged`] to check a chorefile together with what it includes.
 pub fn check_source(source: &str, path: &Path) -> Vec<Diagnostic> {
     match parse::parse(source, path) {
         Ok(file) => check(&file, source, path),
@@ -96,46 +124,122 @@ pub fn check_source(source: &str, path: &Path) -> Vec<Diagnostic> {
 /// Check an already-parsed file. `source` is needed to sort findings into
 /// file order.
 pub fn check(file: &File, source: &str, path: &Path) -> Vec<Diagnostic> {
-    let mut checker = Checker {
-        path,
-        tasks: file.tasks.iter().map(|t| t.name.as_str()).collect(),
-        globals: file.globals.iter().map(|g| g.name.as_str()).collect(),
-        namespaces: file
-            .includes
-            .iter()
-            .filter_map(|i| i.namespace.as_deref())
-            .collect(),
-        on_path: HashMap::new(),
-        out: Vec::new(),
-    };
+    let names = Names::from_file(file);
+    let mut checker = Checker::new(path, names, None, false, file);
+    checker.run(file, source)
+}
 
-    checker.includes(file);
-    checker.names(file, source);
-
-    // Globals see only the globals written above them; a task body sees all
-    // of them, since every global is evaluated before the first task runs.
-    let mut scope = Scope {
-        task: None,
-        names: HashSet::new(),
-        off_platform: false,
-    };
-    for global in &file.globals {
-        checker.word(&global.value, &scope);
-        scope.names.insert(global.name.clone());
+/// Resolve the chorefile at `path` — following its `include`s — and check the
+/// whole tree.
+///
+/// The one entry point that can report *everything*: a failure to merge is a
+/// diagnostic like any other finding rather than an error the caller has to
+/// handle separately, so a missing included file, an unreadable one and an
+/// include cycle all come back in the same list as an undefined variable.
+///
+/// The [`Merged`] is returned alongside the findings because rendering them
+/// needs it: a finding may point into any file that contributed, and
+/// [`Sources::render`](crate::resolve::Sources::render) is what turns it into
+/// `path:line:col` using the text of *that* file.
+pub fn check_path(path: &Path) -> (Vec<Diagnostic>, Option<Merged>) {
+    match resolve::resolve(path) {
+        Ok(merged) => {
+            let found = check_merged(&merged);
+            (found, Some(merged))
+        }
+        Err(e) => (vec![Diagnostic::from_error(&e, path)], None),
     }
-    for task in &file.tasks {
-        let mut scope = Scope {
-            task: Some(task),
-            names: checker.globals.iter().map(|g| (*g).to_string()).collect(),
-            off_platform: false,
+}
+
+/// Check a chorefile and everything it included.
+///
+/// Every contributing file is checked in its own right — so a finding carries
+/// the path of the file it is really in — while every name is resolved against
+/// the merged tables, so a call to `libs::build` and a global defined two
+/// includes away are both checked for real.
+///
+/// The two halves of [`Merged`] are used for exactly what each is the
+/// authority on: `parts` for positions and per-file structure, `file` for
+/// names. Nothing here re-parses a source or re-derives a namespace — the
+/// resolver already did both, and a second implementation of the namespacing
+/// rule would be free to disagree with the one that actually ran.
+pub fn check_merged(merged: &Merged) -> Vec<Diagnostic> {
+    let names = Names::from_merged(&merged.file);
+    let mut out = Vec::new();
+    // One entry per *load*, so a file two includes both reach appears twice.
+    // Its findings are about its own text and would be identical both times,
+    // and the same message twice at the same `path:line:col` is noise, so the
+    // first arrival is the one that reports. Which arrival that is does not
+    // change what is found: a file's own names are in scope for it whatever
+    // prefix it was given (see [`Checker::own_tasks`]), and every namespace
+    // the run knows is in `names` either way.
+    let mut seen: HashSet<&Path> = HashSet::new();
+    for part in &merged.parts {
+        if !seen.insert(part.path.as_path()) {
+            continue;
+        }
+        let Some(source) = merged.sources.get(&part.path) else {
+            // `parts` and `sources` are filled in together, so this cannot
+            // happen; skipping beats unwrapping on a bookkeeping miss.
+            continue;
         };
-        checker.block(&task.body, &mut scope);
+        let mut checker = Checker::new(
+            &part.path,
+            names.clone(),
+            part.prefix.clone(),
+            true,
+            &part.file,
+        );
+        out.extend(checker.run(&part.file, source));
+    }
+    out
+}
+
+/// Every name a chorefile defines, as the merged tree spells them.
+///
+/// Owned rather than borrowed: in a merged tree the names outlive any one
+/// file's parse, and there is one of these per run, not per task.
+#[derive(Debug, Clone, Default)]
+struct Names {
+    tasks: HashSet<String>,
+    globals: HashSet<String>,
+    /// Every `as` namespace, from the merged names and from the `include`
+    /// directives themselves.
+    namespaces: HashSet<String>,
+}
+
+impl Names {
+    fn from_file(file: &File) -> Self {
+        let mut names = Self {
+            tasks: file.tasks.iter().map(|t| t.name.clone()).collect(),
+            globals: file.globals.iter().map(|g| g.name.clone()).collect(),
+            namespaces: HashSet::new(),
+        };
+        names.absorb_namespaces(file);
+        names
     }
 
-    checker
-        .out
-        .sort_by_key(|d| (d.at.line_col(source), d.at.span.start));
-    checker.out
+    /// The merged tree's own tables. Names are already namespaced here, so
+    /// `libs::build` is what `tasks` holds and the namespaces fall out of it.
+    fn from_merged(file: &File) -> Self {
+        let mut names = Self::from_file(file);
+        let qualified: Vec<String> = names
+            .tasks
+            .iter()
+            .chain(names.globals.iter())
+            .filter_map(|n| n.split_once(NAMESPACE_SEP).map(|(ns, _)| ns.to_string()))
+            .collect();
+        names.namespaces.extend(qualified);
+        names
+    }
+
+    fn absorb_namespaces(&mut self, file: &File) {
+        for include in &file.includes {
+            if let Some(ns) = &include.namespace {
+                self.namespaces.insert(ns.clone());
+            }
+        }
+    }
 }
 
 /// What is in scope at one point in a walk.
@@ -151,22 +255,148 @@ struct Scope<'a> {
 
 struct Checker<'a> {
     path: &'a Path,
-    tasks: HashSet<&'a str>,
-    globals: HashSet<&'a str>,
-    namespaces: HashSet<&'a str>,
+    /// Every name in scope for this file: the merged tables when includes were
+    /// followed, this file's own names when they were not.
+    names: Names,
+    /// The names this file defines itself, unprefixed and exactly as written.
+    ///
+    /// A task calling a sibling in its own file writes the bare name whatever
+    /// namespace the merge gave the file, so these are always in scope — and
+    /// they are what keeps a prefix this walk failed to recover from turning
+    /// a correct call into an invented "unknown command".
+    own_tasks: HashSet<String>,
+    own_globals: HashSet<String>,
+    /// The namespace prefix this file's names carry in the merged tree.
+    prefix: Option<String>,
+    /// Were includes followed? Decides whether a namespaced name that is not
+    /// in the tables is unknown or merely unknowable.
+    merged: bool,
     /// `PATH` lookups are filesystem hits; a chorefile calls `cargo` dozens of
     /// times and one answer is enough.
     on_path: HashMap<String, bool>,
     out: Vec<Diagnostic>,
 }
 
-impl Checker<'_> {
+impl<'a> Checker<'a> {
+    fn new(
+        path: &'a Path,
+        mut names: Names,
+        prefix: Option<String>,
+        merged: bool,
+        file: &File,
+    ) -> Self {
+        // This file's own `as` namespaces matter even in a merged tree: an
+        // include that pulled in nothing still names a namespace.
+        names.absorb_namespaces(file);
+        Self {
+            path,
+            names,
+            own_tasks: file.tasks.iter().map(|t| t.name.clone()).collect(),
+            own_globals: file.globals.iter().map(|g| g.name.clone()).collect(),
+            prefix,
+            merged,
+            on_path: HashMap::new(),
+            out: Vec::new(),
+        }
+    }
+
+    /// Everything checkable about one file, in source order.
+    fn run(&mut self, file: &File, source: &str) -> Vec<Diagnostic> {
+        self.includes(file);
+        self.declared_names(file, source);
+
+        // Globals see the globals written above them, plus every global that
+        // came from another file — the merge decides that order, not this
+        // file, so an included file's global is simply in scope. With no
+        // includes followed there are no such globals and the rule is the
+        // familiar one: assign before use.
+        let outside = self.outside_globals();
+        let mut scope = Scope {
+            task: None,
+            names: outside.clone(),
+            off_platform: false,
+        };
+        for global in &file.globals {
+            self.assignment(&global.name, global.span);
+            self.word(&global.value, &scope);
+            scope.names.insert(global.name.clone());
+        }
+
+        // A task body sees every global, since all of them are evaluated
+        // before the first task runs.
+        let mut visible = outside;
+        visible.extend(self.own_globals.iter().cloned());
+        for task in &file.tasks {
+            let mut scope = Scope {
+                task: Some(task),
+                names: visible.clone(),
+                off_platform: false,
+            };
+            self.block(&task.body, &mut scope);
+        }
+
+        let mut out = std::mem::take(&mut self.out);
+        out.sort_by_key(|d| (d.at.line_col(source), d.at.span.start));
+        out
+    }
+
+    /// The globals that reached this file from somewhere else, under both the
+    /// spelling the merge gave them and the bare one this file writes.
+    fn outside_globals(&self) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for global in &self.names.globals {
+            if self.own_globals.contains(global) {
+                continue;
+            }
+            if let Some(bare) = self.strip_prefix(global) {
+                // A global of this file's own, seen through its merged name.
+                if self.own_globals.contains(bare) {
+                    continue;
+                }
+                out.insert(bare.to_string());
+            }
+            out.insert(global.clone());
+        }
+        out
+    }
+
     fn at(&self, span: Span) -> Location {
         Location::new(self.path, span)
     }
 
     fn push(&mut self, d: Diagnostic) {
         self.out.push(d);
+    }
+
+    // -- merged name lookup ---------------------------------------------------
+
+    /// This name as the merged tree spells it, when this file is namespaced.
+    fn qualified(&self, name: &str) -> Option<String> {
+        self.prefix
+            .as_ref()
+            .map(|p| format!("{p}{NAMESPACE_SEP}{name}"))
+    }
+
+    /// The bare name behind a merged one, when it belongs to this file.
+    fn strip_prefix<'n>(&self, name: &'n str) -> Option<&'n str> {
+        let prefix = self.prefix.as_deref()?;
+        name.strip_prefix(prefix)?.strip_prefix(NAMESPACE_SEP)
+    }
+
+    fn is_task(&self, name: &str) -> bool {
+        self.own_tasks.contains(name)
+            || self.names.tasks.contains(name)
+            || self
+                .qualified(name)
+                .is_some_and(|q| self.names.tasks.contains(&q))
+    }
+
+    /// Every task name a call in this file could plausibly have meant.
+    fn candidate_tasks(&self) -> impl Iterator<Item = &str> {
+        self.own_tasks
+            .iter()
+            .chain(self.names.tasks.iter())
+            .map(String::as_str)
     }
 
     // -- names --------------------------------------------------------------
@@ -177,13 +407,16 @@ impl Checker<'_> {
     /// in opposite directions: `chore list` is always the subcommand, so that
     /// task is dead code, while a task named `write` wins over the builtin and
     /// takes the name away from it. The two messages say so separately.
-    fn names(&mut self, file: &File, source: &str) {
+    fn declared_names(&mut self, file: &File, source: &str) {
         let mut seen: HashMap<&str, Span> = HashMap::new();
         for task in &file.tasks {
             let name = task.name.as_str();
             let at = self.at(task.span);
 
-            if RESERVED_TASKS.contains(&name) {
+            // Only at the top level: `chore list` is the subcommand, but
+            // `chore libs::list` is not, so a namespaced task of that name is
+            // reachable and fine.
+            if RESERVED_TASKS.contains(&name) && self.prefix.is_none() {
                 self.push(
                     Diagnostic::error(
                         format!("task `{name}` can never run: `chore {name}` is a subcommand"),
@@ -272,10 +505,45 @@ impl Checker<'_> {
         }
     }
 
+    /// An assignment that the interpreter will not honour.
+    ///
+    /// `$ROOT` is answered from the run itself, not from the variable map, so
+    /// a chorefile that assigns it changes nothing — and would be reading a
+    /// different root from every builtin if it did. With includes that is
+    /// worse than a dead line: an included file could otherwise move the whole
+    /// project's root out from under `remove`'s "never delete `$ROOT`" guard.
+    ///
+    /// The read-only platform variables are deliberately not covered: the
+    /// interpreter does let a chorefile bind over `$OS` and friends, and
+    /// [`platform_var`] already stops trusting one that has been bound.
+    fn assignment(&mut self, name: &str, span: Span) {
+        if name != "ROOT" {
+            return;
+        }
+        self.push(
+            Diagnostic::error(
+                "assigning `ROOT` has no effect: `$ROOT` is the top-level chorefile's directory \
+                 and is answered by the run, not by this variable"
+                    .into(),
+                self.at(span),
+            )
+            .with_help(
+                "read `$ROOT` instead of setting it, and use a name of your own — `dist=$ROOT/dist` \
+                 — for a directory you want to move",
+            ),
+        );
+    }
+
     // -- includes -----------------------------------------------------------
 
-    /// What is knowable about `include` before includes are followed:
-    /// self-inclusion, a repeated path, and a broken or colliding namespace.
+    /// What `check` still has to say about `include` once the tree has merged.
+    ///
+    /// Deliberately not here: an include cycle, a missing or unreadable file,
+    /// and a duplicate name across a flat merge. Those stop `resolve` dead, so
+    /// there is no merged tree to check and no second wording of the same
+    /// finding — see the module docs. What remains is knowable from the
+    /// directives alone, which is also everything [`check_source`] can say
+    /// about a file it is looking at on its own.
     fn includes(&mut self, file: &File) {
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut namespaces: HashSet<&str> = HashSet::new();
@@ -319,7 +587,7 @@ impl Checker<'_> {
                         )),
                     );
                 }
-                if self.tasks.contains(ns.as_str()) {
+                if self.is_task(ns) {
                     self.push(
                         Diagnostic::error(
                             format!("include namespace `{ns}` is also the name of a task"),
@@ -358,6 +626,7 @@ impl Checker<'_> {
     fn stmt(&mut self, stmt: &Stmt, scope: &mut Scope) {
         match stmt {
             Stmt::Assign(a) => {
+                self.assignment(&a.name, a.span);
                 self.word(&a.value, scope);
                 scope.names.insert(a.name.clone());
             }
@@ -501,7 +770,7 @@ impl Checker<'_> {
         // Tasks matter as much as builtins here: `test` is among the most
         // common task names there is, and calling it from an aggregate task
         // is the most common thing to do with it.
-        if !cmd.force_path && (self.tasks.contains(name) || builtins::is_builtin(name)) {
+        if !cmd.force_path && (self.is_task(name) || builtins::is_builtin(name)) {
             return;
         }
         let called = if cmd.force_path {
@@ -527,13 +796,11 @@ impl Checker<'_> {
     /// `check`, so it is the only one a platform guard can silence.
     fn resolution(&mut self, name: &str, cmd: &Command, scope: &Scope) {
         if !cmd.force_path {
-            if name == "cd" || self.tasks.contains(name) || builtins::is_builtin(name) {
+            if name == "cd" || self.is_task(name) || builtins::is_builtin(name) {
                 return;
             }
-            // Includes are not followed, so a namespaced name is taken on
-            // trust rather than reported as unknown.
-            if let Some((ns, _)) = name.split_once(NAMESPACE_SEP) {
-                if self.namespaces.contains(ns) {
+            if let Some((ns, task)) = name.split_once(NAMESPACE_SEP) {
+                if self.namespaced(name, ns, task, cmd) {
                     return;
                 }
             }
@@ -571,14 +838,95 @@ impl Checker<'_> {
         );
     }
 
+    /// A call to `ns::task`, which no task answers to.
+    ///
+    /// Returns whether it was dealt with. Before includes were followed there
+    /// was nothing honest to say — the task was in a file `check` had not
+    /// read — so a known namespace was taken on trust. Once they are followed
+    /// the merged table is complete, and a name it does not hold is wrong.
+    ///
+    /// Never a `PATH` fallback: `::` is not a character a program on `PATH` is
+    /// spelled with, so "not found on `PATH`" would be a misleading way to
+    /// report a name that was only ever going to be a task.
+    fn namespaced(&mut self, name: &str, ns: &str, task: &str, cmd: &Command) -> bool {
+        let known = self.names.namespaces.contains(ns)
+            || self
+                .names
+                .tasks
+                .iter()
+                .any(|t| t.starts_with(&format!("{ns}{NAMESPACE_SEP}")));
+        if !self.merged {
+            // Includes were not followed. A namespace this file declares is
+            // taken on trust; one it does not falls through to the ordinary
+            // unknown-command path.
+            return known;
+        }
+        let d = if known {
+            let mut d = Diagnostic::error(
+                format!("`{name}` is not a task: namespace `{ns}` has no task `{task}`"),
+                self.at(cmd.span),
+            );
+            if let Some(similar) = self.in_namespace(ns, task) {
+                d = d.with_help(format!("did you mean `{similar}`?"));
+            }
+            d
+        } else {
+            let d = Diagnostic::error(
+                format!("`{name}` names the namespace `{ns}`, which no `include` defines"),
+                self.at(cmd.span),
+            );
+            // The namespace itself is the likeliest typo here, and
+            // `suggestion` will only offer one whose task half already
+            // matches exactly.
+            match self.suggestion(name) {
+                Some(similar) => d.with_help(format!("did you mean `{similar}`?")),
+                None => d.with_help(format!(
+                    "add `as {ns}` to the include that should provide it, or drop the \
+                     `{ns}{NAMESPACE_SEP}` prefix if the task is in this file"
+                )),
+            }
+        };
+        self.push(d);
+        true
+    }
+
     /// The nearest task or builtin name, when the difference looks like a typo.
+    ///
+    /// Namespace-aware, because a merged tree has several tasks called
+    /// `build`. A typo in the task half is answered from that namespace and
+    /// nowhere else: suggesting `tools::build` for `libs::buidl` names the
+    /// right word and the wrong project, which is worse than saying nothing.
+    /// A typo in the namespace half is answered only by a candidate whose task
+    /// half already matches exactly, so `lib::build` still finds
+    /// `libs::build`. A bare call is answered only by bare candidates, since a
+    /// namespaced task is not something the author mistyped their way into.
     fn suggestion(&self, name: &str) -> Option<String> {
-        let candidates = self
-            .tasks
-            .iter()
-            .copied()
-            .chain(builtins::NAMES.iter().copied());
-        nearest(name, candidates)
+        let Some((ns, task)) = name.split_once(NAMESPACE_SEP) else {
+            let flat = self
+                .candidate_tasks()
+                .filter(|c| !c.contains(NAMESPACE_SEP))
+                .chain(builtins::NAMES.iter().copied());
+            return nearest(name, flat);
+        };
+        if let Some(similar) = self.in_namespace(ns, task) {
+            return Some(similar);
+        }
+        // The task half is right and the namespace half is not.
+        let suffix = format!("{NAMESPACE_SEP}{task}");
+        nearest(
+            name,
+            self.candidate_tasks().filter(|c| c.ends_with(&suffix)),
+        )
+    }
+
+    /// The nearest task to `task` inside namespace `ns`, fully qualified.
+    fn in_namespace(&self, ns: &str, task: &str) -> Option<String> {
+        let prefix = format!("{ns}{NAMESPACE_SEP}");
+        let tails: Vec<&str> = self
+            .candidate_tasks()
+            .filter_map(|c| c.strip_prefix(&prefix))
+            .collect();
+        nearest(task, tails.into_iter()).map(|t| format!("{ns}{NAMESPACE_SEP}{t}"))
     }
 
     fn lookup_path(&mut self, name: &str) -> bool {

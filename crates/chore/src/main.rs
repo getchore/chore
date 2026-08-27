@@ -1,9 +1,9 @@
 //! `chore` — run project tasks from a chorefile.
 //!
 //! The binary is a thin shell around the `chorefile` crate: it finds the file,
-//! parses it, and hands the tree to the interpreter. Everything the CLI prints
-//! about the language itself comes from `chorefile::spec`, so the reference
-//! lives in exactly one place.
+//! resolves its `include`s into one tree, and hands that to the interpreter.
+//! Everything the CLI prints about the language itself comes from
+//! `chorefile::spec`, so the reference lives in exactly one place.
 
 mod args;
 mod help;
@@ -14,9 +14,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use chorefile::ast::File;
 use chorefile::interp::{Interpreter, Mode, Repeat};
-use chorefile::{Error, parse};
+use chorefile::resolve::{Merged, Sources};
+use chorefile::{Error, parse, resolve};
 
 use args::{Command, Invocation, UsageError};
 
@@ -122,84 +122,140 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write) -> Result<u8, Exit> {
         }
         Command::Usage => {
             writeln!(out, "{USAGE_TEXT}")?;
-            let source = Source::discover()?;
-            let file = source.parse()?;
+            let loaded = Loaded::discover()?;
             writeln!(out, "\ntasks:")?;
-            list::text(out, &file.tasks)?;
+            list::text(out, &loaded.merged)?;
             Ok(OK)
         }
         Command::List { json } => {
-            let source = Source::discover()?;
-            let file = source.parse()?;
+            let loaded = Loaded::discover()?;
             if json {
-                list::json(out, &file.tasks)?;
+                list::json(out, &loaded.merged)?;
             } else {
-                list::text(out, &file.tasks)?;
+                list::text(out, &loaded.merged)?;
             }
             Ok(OK)
         }
         Command::Check => {
-            let source = Source::discover()?;
-            let errors = lint::report(out, &source.path, &source.text)?;
+            // `check` resolves for itself rather than going through `Loaded`:
+            // `check_path` turns a failure to merge — a missing included file,
+            // a cycle — into a finding in the list instead of an error that
+            // ends the run, which is what a CI gate wants. A chorefile too
+            // broken to load still gets a full report.
+            let path = discover()?;
+            let (findings, merged) = chorefile::check::check_path(&path);
+            let fallback;
+            let sources = match &merged {
+                Some(merged) => &merged.sources,
+                // Nothing merged, so nothing knows the text of the file the
+                // findings point into. Supply the one file we do have, and
+                // its findings keep their line and column.
+                None => {
+                    fallback = one_source(&path);
+                    &fallback
+                }
+            };
+            let errors = lint::report(out, &findings, sources)?;
             Ok(if errors == 0 { OK } else { FAILED })
         }
         Command::Run { task, args } => {
-            let source = Source::discover()?;
-            let file = source.parse()?;
-            run(&file, &source.root(), &task, &args, mode, repeat)
+            let loaded = Loaded::discover()?;
+            run(&loaded, &task, &args, mode, repeat)
         }
     }
 }
 
-/// The chorefile that governs the working directory, and its text.
-struct Source {
+/// The chorefile that governs the working directory, with its includes
+/// followed and merged.
+struct Loaded {
+    /// The top-level chorefile itself. `Merged::root` is its *directory*, and
+    /// the message for a task that does not exist names the file.
     path: PathBuf,
-    text: String,
+    merged: Merged,
 }
 
-impl Source {
+impl Loaded {
     fn discover() -> Result<Self, Exit> {
-        let cwd = std::env::current_dir().map_err(|e| Exit::usage(e.to_string()))?;
-        let path = chorefile::find(&cwd)?;
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| Exit::failed(format!("{}: {e}", path.display())))?;
-        Ok(Self { path, text })
+        let path = discover()?;
+        let merged = resolve::resolve(&path).map_err(|e| unresolved(&path, e))?;
+        Ok(Self { path, merged })
     }
 
-    fn parse(&self) -> Result<File, Exit> {
-        Ok(parse::parse(&self.text, &self.path)?)
+    /// What was searched for a task, for the message when one is missing.
+    fn searched(&self) -> String {
+        let path = self.path.display();
+        match self.merged.sources.files().count() {
+            0 | 1 => format!("{path}"),
+            2 => format!("{path} or the file it includes"),
+            n => format!("{path} or the {} files it includes", n - 1),
+        }
     }
+}
 
-    /// `$ROOT`: the directory holding the chorefile.
-    fn root(&self) -> PathBuf {
-        self.path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf()
+/// The chorefile governing the working directory: the nearest one at or above
+/// it. Every subcommand that needs a project starts here.
+fn discover() -> Result<PathBuf, Exit> {
+    let cwd = std::env::current_dir().map_err(|e| Exit::usage(e.to_string()))?;
+    Ok(chorefile::find(&cwd)?)
+}
+
+/// One file's text as a [`Sources`], for rendering diagnostics when no merge
+/// succeeded and there is nothing else that knows the text.
+fn one_source(path: &Path) -> Sources {
+    let mut sources = Sources::default();
+    if let Ok(text) = std::fs::read_to_string(path) {
+        sources.insert(path, text);
     }
+    sources
+}
+
+/// Whether the file we found parses on its own — that is, whether a failure to
+/// resolve was about *this* file or about something it included.
+fn parses(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|text| parse::parse(&text, path).is_ok())
+}
+
+/// A chorefile that could not be assembled: a missing include, a cycle, a
+/// name two files both define, or a file that does not parse.
+///
+/// The resolver reports all of these as `Syntax`, so the exit code is decided
+/// by asking which kind of failure it was: the file we found not parsing is
+/// exit 1, exactly as it was before includes existed, and anything the
+/// resolver could only have found by following an `include` is exit 2 — like
+/// a missing chorefile, the project never assembled, so nothing about the
+/// request was runnable. Re-parsing to ask that question costs nothing: we
+/// are already on the way out.
+///
+/// An `Io` error carries no path of its own — "No such file or directory (os
+/// error 2)" on its own line is useless — so the chorefile is named for it.
+fn unresolved(path: &Path, e: Error) -> Exit {
+    let message = match &e {
+        Error::Io(io) => format!("{}: {io}", path.display()),
+        _ => e.to_string(),
+    };
+    let code = if parses(path) { USAGE } else { FAILED };
+    Exit { message, code }
 }
 
 fn run(
-    file: &File,
-    root: &Path,
+    loaded: &Loaded,
     task: &str,
     args: &[String],
     mode: Mode,
     repeat: Repeat,
 ) -> Result<u8, Exit> {
-    let mut interp = Interpreter::new(file, root, mode, repeat).with_output(Box::new(io::stdout()));
+    // `Interpreter::merged` takes `$ROOT` from the merged tree, so an included
+    // file's directory can never be handed in by mistake.
+    let mut interp =
+        Interpreter::merged(&loaded.merged, mode, repeat).with_output(Box::new(io::stdout()));
     if interp.task(task).is_none() {
         return Err(Exit::usage(format!(
             "no task `{task}` in {} (try `chore list`)",
-            file_label(root)
+            loaded.searched()
         )));
     }
     let code = interp.run_task(task, args)?;
     // A task's own `exit 3` is a verdict worth keeping, so the process exit
     // code is the run's, not a flat 1.
     Ok(u8::try_from(code).unwrap_or(FAILED))
-}
-
-fn file_label(root: &Path) -> String {
-    root.join(chorefile::FILE_NAME).display().to_string()
 }

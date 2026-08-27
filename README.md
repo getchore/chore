@@ -87,9 +87,8 @@ and `chore ci` is the gate CI runs.
 
 ## Status
 
-v1. `include` is parsed but not yet followed — the included file is ignored, and
-it lands in v1.1. `x86_64-pc-windows-gnu` is built on every PR in CI but is not
-shipped as a release artifact; Windows users get msvc.
+v1. `x86_64-pc-windows-gnu` is built on every PR in CI but is not shipped as a
+release artifact; Windows users get msvc.
 
 ## License
 

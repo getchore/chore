@@ -9,6 +9,7 @@ use chorefile::ast;
 use chorefile::check::{self, Diagnostic, Severity};
 use chorefile::error::Span;
 use chorefile::parse;
+use chorefile::resolve::{Merged, Part, Sources};
 use chorefile::vars;
 
 fn file_path() -> PathBuf {
@@ -842,4 +843,637 @@ task fetch url {
     parse::parse(source, &file_path()).expect("README example must parse");
     let found = errors(source);
     assert!(found.is_empty(), "{found:#?}");
+}
+
+// --- 9. include trees ------------------------------------------------------
+//
+// `check_merged` checks a chorefile together with everything it included.
+// The trees below are built by hand rather than by `resolve::resolve`, which
+// keeps these tests honest about what they cover: the merging is the contract
+// `resolve` implements — each file's tasks and globals renamed with the
+// namespace it was included under, all in one `ast::File`, every contributing
+// file's text in `Sources` — and what is being tested is `check`'s behaviour
+// given such a tree, not `resolve`'s ability to produce one.
+//
+// The handful of cases that genuinely need `resolve` — a cycle, a missing
+// file, a duplicate across a flat merge — are at the end, `#[ignore]`d, and
+// they assert `resolve` owns the finding rather than `check`.
+
+/// One contributing file: path, the namespace it was included under, source.
+type Contribution<'a> = (&'a str, Option<&'a str>, &'a str);
+
+/// Merge as `resolve` will: the first entry is the top-level chorefile.
+fn merge(files: &[Contribution]) -> Merged {
+    let mut sources = Sources::default();
+    let mut merged = ast::File::default();
+    let mut parts = Vec::new();
+    for (path, namespace, source) in files {
+        sources.insert(PathBuf::from(path), (*source).to_string());
+        let parsed = parse::parse(source, Path::new(path)).expect("test source must parse");
+        for task in parsed.tasks {
+            merged.tasks.push(ast::Task {
+                name: qualify(*namespace, &task.name),
+                ..task
+            });
+        }
+        for global in parsed.globals {
+            merged.globals.push(ast::Assign {
+                name: qualify(*namespace, &global.name),
+                ..global
+            });
+        }
+        // The merged tree's own `includes` stay empty, exactly as `resolve`
+        // leaves them: they have been followed, and `parts` is where a
+        // per-file include finding has to come from now.
+        parts.push(Part {
+            path: PathBuf::from(path),
+            // The file as written — un-namespaced, spans into its own text.
+            // Parsed a second time rather than shared with the merge above,
+            // since that one was consumed to build the namespaced names.
+            file: parse::parse(source, Path::new(path)).expect("test source must parse"),
+            prefix: namespace.map(str::to_string),
+        });
+    }
+    Merged {
+        file: merged,
+        parts,
+        // The directory of the top-level file, which the tests write as a
+        // bare `chorefile`.
+        root: PathBuf::new(),
+        sources,
+    }
+}
+
+fn qualify(namespace: Option<&str>, name: &str) -> String {
+    match namespace {
+        Some(ns) => format!("{ns}::{name}"),
+        None => name.to_string(),
+    }
+}
+
+fn merged_messages(files: &[Contribution]) -> Vec<String> {
+    check::check_merged(&merge(files))
+        .into_iter()
+        .map(|d| d.message)
+        .collect()
+}
+
+fn merged_errors(files: &[Contribution]) -> Vec<Diagnostic> {
+    check::check_merged(&merge(files))
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect()
+}
+
+/// The whole point of the merged entry point: a finding in an included file
+/// must say so, because `line:col` against the top-level file's text points at
+/// an unrelated line — or at no line at all.
+#[test]
+fn a_finding_in_an_included_file_carries_that_file() {
+    let libs = "task build {\n    echo $missing\n}\n";
+    let found = merged_errors(&[
+        ("chorefile", None, "include libs.chore as libs\n"),
+        ("libs.chore", Some("libs"), libs),
+    ]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("$missing"), "{found:#?}");
+    assert_eq!(found[0].at.file, Path::new("libs.chore"));
+    assert_eq!(found[0].at.line_col(libs), (2, 10));
+}
+
+/// And rendering it uses that file's text, which is the reason `Sources`
+/// exists at all.
+#[test]
+fn a_finding_renders_against_the_file_it_points_into() {
+    let files: &[Contribution] = &[
+        ("chorefile", None, "include libs.chore as libs\n"),
+        (
+            "libs.chore",
+            Some("libs"),
+            "# a comment\n# another\ntask build {\n    echo $missing\n}\n",
+        ),
+    ];
+    let tree = merge(files);
+    let found = check::check_merged(&tree);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(tree.sources.render(&found[0].at), "libs.chore:4:10");
+}
+
+#[test]
+fn a_namespaced_call_resolves_against_the_merged_tasks() {
+    let found = merged_messages(&[
+        (
+            "chorefile",
+            None,
+            "include libs.chore as libs\n\ntask all {\n    libs::build\n}\n",
+        ),
+        ("libs.chore", Some("libs"), "task build {\n    echo hi\n}\n"),
+    ]);
+    assert_eq!(found, Vec::<String>::new());
+}
+
+#[test]
+fn a_namespaced_call_to_a_task_that_is_not_there() {
+    let found = merged_errors(&[
+        (
+            "chorefile",
+            None,
+            "include libs.chore as libs\n\ntask all {\n    libs::package\n}\n",
+        ),
+        ("libs.chore", Some("libs"), "task build {\n    echo hi\n}\n"),
+    ]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0]
+            .message
+            .contains("namespace `libs` has no task `package`"),
+        "{found:#?}"
+    );
+    assert_eq!(found[0].at.file, Path::new("chorefile"));
+}
+
+/// The message has to be about the namespace, not about `PATH`: `::` is not
+/// how any program on `PATH` is spelled.
+#[test]
+fn a_namespace_no_include_defines() {
+    let found = merged_errors(&[
+        ("chorefile", None, "task all {\n    libs::build\n}\n"),
+        ("libs.chore", None, "task build {\n    echo hi\n}\n"),
+    ]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0].message.contains("no `include` defines"),
+        "{found:#?}"
+    );
+    assert!(!found[0].message.contains("PATH"), "{found:#?}");
+}
+
+/// A task in an included file calls its neighbours by their bare names — the
+/// namespace is how the *outside* reaches them.
+#[test]
+fn a_bare_sibling_call_inside_an_included_file() {
+    let found = merged_messages(&[
+        ("chorefile", None, "include libs.chore as libs\n"),
+        (
+            "libs.chore",
+            Some("libs"),
+            "task build {\n    echo hi\n}\n\ntask all {\n    build\n}\n",
+        ),
+    ]);
+    assert_eq!(found, Vec::<String>::new());
+}
+
+/// Without `as`, everything merges flat and the top level calls it by name.
+#[test]
+fn a_flat_include_merges_its_tasks_into_scope() {
+    let found = merged_messages(&[
+        (
+            "chorefile",
+            None,
+            "include libs.chore\n\ntask all {\n    helper\n}\n",
+        ),
+        ("libs.chore", None, "task helper {\n    echo hi\n}\n"),
+    ]);
+    assert_eq!(found, Vec::<String>::new());
+}
+
+#[test]
+fn a_global_from_a_flat_include_is_defined() {
+    let found = merged_messages(&[
+        (
+            "chorefile",
+            None,
+            "include libs.chore\n\ntask build {\n    echo $dist\n}\n",
+        ),
+        ("libs.chore", None, "dist=dist\n"),
+    ]);
+    assert_eq!(found, Vec::<String>::new());
+}
+
+/// A namespaced file's own global is `libs::dist` after the merge, and `$dist`
+/// inside that file still means it.
+#[test]
+fn a_namespaced_file_still_sees_its_own_globals() {
+    let found = merged_messages(&[
+        ("chorefile", None, "include libs.chore as libs\n"),
+        (
+            "libs.chore",
+            Some("libs"),
+            "dist=dist\n\ntask build {\n    mkdir $dist\n}\n",
+        ),
+    ]);
+    assert_eq!(found, Vec::<String>::new());
+}
+
+/// Cross-file globals are in scope everywhere, but a file that assigns its own
+/// global below the line that reads it is still wrong.
+#[test]
+fn use_before_assignment_survives_the_merge() {
+    let found = merged_errors(&[
+        (
+            "chorefile",
+            None,
+            "include libs.chore\n\nout=$dist/x\ndist=dist\n",
+        ),
+        ("libs.chore", None, "task helper {\n    echo hi\n}\n"),
+    ]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("$dist"), "{found:#?}");
+}
+
+/// A variable that is nowhere in the merged tree is still undefined — the
+/// cross-file scope must not become a blanket amnesty.
+#[test]
+fn an_undefined_variable_is_still_undefined_across_files() {
+    let found = merged_errors(&[
+        ("chorefile", None, "include libs.chore\n"),
+        ("libs.chore", None, "task helper {\n    echo $nowhere\n}\n"),
+    ]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("$nowhere"), "{found:#?}");
+}
+
+#[test]
+fn a_non_portable_command_in_an_included_file_is_reported_there() {
+    let found = merged_errors(&[
+        ("chorefile", None, "include libs.chore as libs\n"),
+        (
+            "libs.chore",
+            Some("libs"),
+            "task fetch {\n    curl -L https://example.com/x -o x\n}\n",
+        ),
+    ]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("not portable"), "{found:#?}");
+    assert_eq!(found[0].at.file, Path::new("libs.chore"));
+    assert!(found[0].help.as_ref().unwrap().contains("download"));
+}
+
+/// The guard analysis is per-statement and cares nothing for which file it is
+/// in, but the merged walk is a new caller of it, so it gets a test.
+#[test]
+fn a_platform_guard_still_silences_a_lookup_in_an_included_file() {
+    let source = format!(
+        "task dylib {{\n    if $OS == {} {{\n        definitely-not-a-real-program\n    }}\n}}\n",
+        other_os()
+    );
+    let found = merged_messages(&[
+        ("chorefile", None, "include libs.chore as libs\n"),
+        ("libs.chore", Some("libs"), &source),
+    ]);
+    assert_eq!(found, Vec::<String>::new());
+
+    // The same body without the guard is reported, so the test above is not
+    // passing for the wrong reason.
+    let unguarded = "task dylib {\n    definitely-not-a-real-program\n}\n";
+    let found = merged_messages(&[
+        ("chorefile", None, "include libs.chore as libs\n"),
+        ("libs.chore", Some("libs"), unguarded),
+    ]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+}
+
+/// `chore list` is the subcommand, but `chore libs::list` is not — so the
+/// name is only dead at the top level.
+#[test]
+fn a_subcommand_name_is_reachable_inside_a_namespace() {
+    let found = merged_messages(&[
+        ("chorefile", None, "include libs.chore as libs\n"),
+        ("libs.chore", Some("libs"), "task list {\n    echo hi\n}\n"),
+    ]);
+    assert_eq!(found, Vec::<String>::new());
+
+    let found = merged_errors(&[("chorefile", None, "task list {\n    echo hi\n}\n")]);
+    assert!(
+        found.iter().any(|d| d.message.contains("subcommand")),
+        "{found:#?}"
+    );
+}
+
+/// A task named after a builtin still shadows it inside an included file: the
+/// file's own bare calls reach the task, and there is no spelling left that
+/// reaches the builtin.
+#[test]
+fn a_builtin_name_is_still_shadowed_inside_a_namespace() {
+    let found = merged_errors(&[
+        ("chorefile", None, "include libs.chore as libs\n"),
+        ("libs.chore", Some("libs"), "task write {\n    echo hi\n}\n"),
+    ]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("shadows"), "{found:#?}");
+}
+
+#[test]
+fn findings_are_grouped_by_file() {
+    let found = check::check_merged(&merge(&[
+        (
+            "chorefile",
+            None,
+            "include libs.chore as libs\n\ntask a {\n    echo $one\n}\n",
+        ),
+        ("libs.chore", Some("libs"), "task b {\n    echo $two\n}\n"),
+    ]));
+    let files: Vec<&Path> = found.iter().map(|d| d.at.file.as_path()).collect();
+    assert_eq!(files, vec![Path::new("chorefile"), Path::new("libs.chore")]);
+}
+
+// --- 9a. did-you-mean across namespaces ------------------------------------
+
+const TWO_NAMESPACES: &str = "\
+include libs.chore as libs
+include tools.chore as tools
+";
+
+/// The wrong project's `build` is the wrong answer, however short the edit
+/// distance: several namespaces holding a `build` is the normal shape of a
+/// monorepo, not a corner case.
+#[test]
+fn a_typo_is_answered_from_its_own_namespace() {
+    let found = merged_errors(&[
+        (
+            "chorefile",
+            None,
+            &format!("{TWO_NAMESPACES}\ntask all {{\n    libs::buld\n}}\n"),
+        ),
+        ("libs.chore", Some("libs"), "task build {\n    echo hi\n}\n"),
+        (
+            "tools.chore",
+            Some("tools"),
+            "task build {\n    echo hi\n}\n",
+        ),
+    ]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    let help = found[0].help.as_ref().unwrap();
+    assert!(help.contains("libs::build"), "{help}");
+    assert!(!help.contains("tools::build"), "{help}");
+}
+
+/// The other half of the same rule: when the namespace is the typo and the
+/// task name is exact, the namespace is what gets corrected.
+#[test]
+fn a_misspelled_namespace_is_corrected() {
+    let found = merged_errors(&[
+        (
+            "chorefile",
+            None,
+            "include libs.chore as libs\n\ntask all {\n    lib::build\n}\n",
+        ),
+        ("libs.chore", Some("libs"), "task build {\n    echo hi\n}\n"),
+    ]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0].help.as_ref().unwrap().contains("libs::build"),
+        "{found:#?}"
+    );
+}
+
+/// A bare call is answered by a bare task. `libs::build` is not something an
+/// author mistypes their way into from `biuld`.
+#[test]
+fn a_bare_typo_is_not_answered_with_a_namespaced_task() {
+    let found = merged_errors(&[
+        (
+            "chorefile",
+            None,
+            "include libs.chore as libs\n\ntask all {\n    biuld\n}\n",
+        ),
+        ("libs.chore", Some("libs"), "task build {\n    echo hi\n}\n"),
+    ]);
+    // Not a task and not a builtin, so this is the `PATH` warning rather than
+    // an error — but whatever it says, it must not name another project's task.
+    assert!(found.is_empty(), "{found:#?}");
+    let all = check::check_merged(&merge(&[
+        (
+            "chorefile",
+            None,
+            "include libs.chore as libs\n\ntask all {\n    biuld\n}\n",
+        ),
+        ("libs.chore", Some("libs"), "task build {\n    echo hi\n}\n"),
+    ]));
+    assert_eq!(all.len(), 1, "{all:#?}");
+    assert_eq!(all[0].severity, Severity::Warning);
+    assert!(
+        !all[0].help.as_ref().unwrap().contains("libs::build"),
+        "{all:#?}"
+    );
+}
+
+// --- 9b. `$ROOT` -----------------------------------------------------------
+
+/// The interpreter answers `$ROOT` from the run, not from the variable map, so
+/// assigning it changes nothing — and an included file that could move the
+/// project root would put every builtin's idea of it out of step with the
+/// chorefile's.
+#[test]
+fn assigning_root_has_no_effect_and_is_reported() {
+    let found = matching("ROOT=/tmp\n", "assigning `ROOT`");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Error);
+
+    let inside = matching("task build {\n    ROOT=/tmp\n}\n", "assigning `ROOT`");
+    assert_eq!(inside.len(), 1, "{inside:#?}");
+}
+
+#[test]
+fn reading_root_is_fine() {
+    assert_eq!(
+        messages("task build {\n    mkdir $ROOT/dist\n}\n"),
+        Vec::<String>::new()
+    );
+}
+
+/// Every other read-only name stays assignable: the interpreter allows it, and
+/// the platform-guard analysis is built around a chorefile that does.
+#[test]
+fn the_platform_variables_are_still_assignable() {
+    let found = matching("OS=windows\nPLATFORM=x\nEXE=.exe\n", "no effect");
+    assert!(found.is_empty(), "{found:#?}");
+}
+
+// --- 9c. through the real resolver -----------------------------------------
+//
+// The tests above hand `check` a tree; these hand it a directory and let
+// `resolve` build one, which is the only way to test the division of labour
+// between the two. Each of the last three asserts that `check` says *nothing*,
+// because `resolve` refuses to produce a merged tree at all: an include cycle,
+// a missing or unreadable included file, and a duplicate name across a flat
+// merge are errors there, not findings here.
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("chore-check-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+/// End to end: a real include, a real merge, and a finding that has to come
+/// back pointing into the included file and rendering against its text.
+#[test]
+fn a_resolved_tree_reports_into_the_file_the_finding_is_in() {
+    let dir = scratch("resolved");
+    std::fs::write(
+        dir.join("chorefile"),
+        "include libs.chore as libs\n\ntask all {\n    libs::build\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("libs.chore"),
+        "task build {\n    echo $missing\n}\n",
+    )
+    .unwrap();
+
+    let (found, merged) = check::check_path(&dir.join("chorefile"));
+    let merged = merged.expect("the tree merges");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("$missing"), "{found:#?}");
+    assert_eq!(found[0].at.file, dir.join("libs.chore"));
+    assert!(
+        merged
+            .sources
+            .render(&found[0].at)
+            .ends_with("libs.chore:2:10"),
+        "{}",
+        merged.sources.render(&found[0].at)
+    );
+}
+
+/// The same tree without the mistake: a namespaced call, a bare sibling call
+/// and a shared global all have to survive the round trip in silence.
+#[test]
+fn a_resolved_tree_with_nothing_wrong_is_silent() {
+    let dir = scratch("clean");
+    std::fs::write(
+        dir.join("chorefile"),
+        "dist=dist\n\ninclude libs.chore as libs\n\ntask all {\n    libs::package\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("libs.chore"),
+        "out=out\n\ntask build {\n    mkdir $out\n}\n\ntask package {\n    build\n    archive $out \
+         $dist/p.zip\n}\n",
+    )
+    .unwrap();
+
+    let (found, merged) = check::check_path(&dir.join("chorefile"));
+    assert!(merged.is_some());
+    let messages: Vec<&str> = found.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages, Vec::<&str>::new());
+}
+
+/// A diamond: one file two includes both reach. `resolve` loads it twice —
+/// once per arrival, with the prefix each one gave it — and its own mistakes
+/// are the same mistakes both times, so they are reported once.
+#[test]
+fn a_file_reached_twice_is_reported_once() {
+    let dir = scratch("diamond");
+    std::fs::write(
+        dir.join("chorefile"),
+        "include a.chore as a
+include b.chore as b
+",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("a.chore"),
+        "include common.chore
+",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.chore"),
+        "include common.chore
+",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("common.chore"),
+        "task helper {\n    echo $missing\n}\n",
+    )
+    .unwrap();
+
+    let (found, merged) = check::check_path(&dir.join("chorefile"));
+    let merged = merged.expect("two namespaces, so no duplicate");
+    assert!(
+        merged.parts.len() > merged.sources.files().count(),
+        "the fixture must actually load a file twice"
+    );
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].at.file, dir.join("common.chore"));
+}
+
+/// An include finding in an included file: `merged.file.includes` is empty, so
+/// this can only come from that file's own parse.
+#[test]
+fn an_include_finding_inside_an_included_file() {
+    let dir = scratch("nested-include");
+    std::fs::write(
+        dir.join("chorefile"),
+        "include a.chore as a
+",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("a.chore"),
+        "include c.chore as build
+
+task build {\n    echo hi\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("c.chore"), "task inner {\n    echo hi\n}\n").unwrap();
+
+    let (found, _) = check::check_path(&dir.join("chorefile"));
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0].message.contains("also the name of a task"),
+        "{found:#?}"
+    );
+    assert_eq!(found[0].at.file, dir.join("a.chore"));
+}
+
+#[test]
+fn a_missing_included_file_is_a_diagnostic_not_a_panic() {
+    let dir = scratch("missing");
+    let top = dir.join("chorefile");
+    std::fs::write(&top, "include nope.chore\n").unwrap();
+
+    let (found, merged) = check::check_path(&top);
+    assert!(
+        merged.is_none(),
+        "a tree that cannot be read must not merge"
+    );
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Error);
+    assert!(found[0].message.contains("nope.chore"), "{found:#?}");
+}
+
+#[test]
+fn an_include_cycle_is_reported_once() {
+    let dir = scratch("cycle");
+    std::fs::write(dir.join("chorefile"), "include a.chore\n").unwrap();
+    std::fs::write(dir.join("a.chore"), "include chorefile\n").unwrap();
+
+    let (found, _) = check::check_path(&dir.join("chorefile"));
+    assert_eq!(found.len(), 1, "a cycle is one finding, not one per file");
+    assert!(
+        found[0].message.contains("cycle") || found[0].message.contains("itself"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn a_duplicate_across_a_flat_merge_is_resolves_error() {
+    let dir = scratch("duplicate");
+    std::fs::write(
+        dir.join("chorefile"),
+        "include a.chore\ntask build {\n    echo hi\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("a.chore"), "task build {\n    echo hi\n}\n").unwrap();
+
+    let (found, merged) = check::check_path(&dir.join("chorefile"));
+    assert!(
+        merged.is_none(),
+        "a tree with a duplicate name must not merge"
+    );
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("build"), "{found:#?}");
 }

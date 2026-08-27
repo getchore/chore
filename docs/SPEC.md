@@ -253,17 +253,74 @@ missing.
 
 ## include
 
-Deferred to v1.1; sona's port does not need it. Settled semantics, so adding
-it later is not a breaking change:
+```sh
+include ffmpeg.chore
+include libs/chorefile as libs     # its tasks become libs::build
+```
 
 - Paths resolve relative to the **including file**, not the working directory.
   A directory argument means the `chorefile` inside it.
 - `$ROOT` stays the top-level chorefile's directory in included files. One
-  root per invocation.
+  root per invocation, so a `download ... third_party/` in an included file
+  lands where the project's author expects rather than beside that file.
 - `as` namespaces **both tasks and globals** (`libs::build`). Without `as`
-  everything merges flat, and any duplicate name — task or global — is a
-  `check` error.
-- `::` is reserved in task names. Include cycles are a `check` error.
+  everything merges flat, and a duplicate name — task or global — across two
+  files is an error.
+- `::` is reserved in task names. A cycle names the whole loop and is an
+  error.
+
+### What `as` renames, and what it leaves alone
+
+`as ns` is applied to a whole subtree — the included file and everything it
+included — once that subtree has resolved. It renames the definitions, and
+inside that subtree's own bodies it renames every reference that **resolved
+within it**: a command whose name is a single literal word naming one of the
+subtree's tasks, and a `$x` naming one of its globals, wherever they appear.
+
+Everything else is left bare, which is what lets an included file still reach a
+builtin, a program on `PATH`, or — under a flat merge — a name its includer
+defines. Bare names are resolved late, against the merged table.
+
+Two consequences worth stating:
+
+- **A computed command name is not rewritten.** `$cmd` or `"$prefix-build"` is
+  not a literal, so there is nothing in the tree to rename; the interpreter
+  expands the word before it looks a task up. A namespaced file that dispatches
+  through a variable has to spell its own namespace.
+- **A name a task assigns anywhere in its body is local for the whole body**,
+  and is never rewritten to a global. This matches the interpreter, where an
+  assignment inside a task writes a frame-local. The cost is that a task which
+  reads a namespaced global and *later* assigns the same name reads its own
+  local throughout. The alternative would make the meaning of `$x` depend on a
+  line further down, which is worse.
+
+Because `as` namespaces globals too, `$libs::dist` is a variable name that no
+chorefile can write — only an include can construct it.
+
+### Order of included globals
+
+Includes are followed depth-first in source order, and each file's own
+assignments are evaluated **after** everything it included. An including file
+can therefore build on what it pulled in (`toolchain=$libs::default`), while an
+included file cannot name its includer and has nothing to gain from running
+later.
+
+Shadowing is not a concern in either order: a flat merge makes a duplicate
+global an error, and `as` gives it a different name. The order only decides
+what a global can read.
+
+### Paths, twice-included files, and cycles
+
+An include path is taken literally: `include libs` names a file or directory
+called `libs`, and no `.chore` is guessed, so what a chorefile means cannot
+change with what happens to exist on disk. A directory means the `chorefile`
+inside it.
+
+Including the same file twice on different branches is not a cycle and is not
+deduplicated. Flat, it fails as a duplicate name; under two different `as`
+namespaces, its tasks exist twice under two prefixes, which is what asking for
+them twice means. A true cycle — a file that includes itself, directly or
+through others — is an error naming the whole loop.
 
 ## check
 
