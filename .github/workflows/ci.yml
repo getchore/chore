@@ -68,9 +68,11 @@ jobs:
             runner: macos-latest
           # The least-exercised target in the tree: the only one where both C
           # dependencies, ring and zstd-sys, build against mingw rather than
-          # msvc or a system compiler.
+          # msvc or a system compiler. Cross-compiled from Linux, where the
+          # toolchain is one apt package at a known path -- the Windows images
+          # move their mingw around between releases.
           - target: x86_64-pc-windows-gnu
-            runner: windows-latest
+            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - run: |
@@ -79,39 +81,47 @@ jobs:
       - if: endsWith(matrix.target, '-linux-musl')
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
       # rustup's rust-mingw component supplies the import libraries, but ring
-      # and zstd-sys compile real C, so the build needs gcc too. It ships with
-      # the runner image; putting it on PATH is all that is required.
+      # and zstd-sys compile real C, so the build needs a mingw gcc too.
       - if: endsWith(matrix.target, '-windows-gnu')
-        shell: pwsh
         run: |
-          'C:\msys64\mingw64\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          & 'C:\msys64\mingw64\bin\gcc.exe' --version
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+          x86_64-w64-mingw32-gcc --version
       - env:
           CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
+          AR_x86_64_pc_windows_gnu: x86_64-w64-mingw32-ar
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
         run: cargo build --release --locked --target ${{ matrix.target }} --bin chore
       - if: endsWith(matrix.target, '-linux-musl')
         run: |
-          file target/${{ matrix.target }}/release/chore
+          bin=target/${{ matrix.target }}/release/chore
+          file "$bin"
           # The whole point of musl here: no interpreter, no shared objects.
-          if ldd target/${{ matrix.target }}/release/chore 2>&1 | grep -qv 'not a dynamic executable'; then
+          # `ldd` says "statically linked" for a static binary and "not a
+          # dynamic executable" for a static-pie one, depending on which libc
+          # provides it -- both are the answer we want. A real dependency
+          # shows up as a `lib... => ...` mapping line.
+          out=$(ldd "$bin" 2>&1 || true)
+          echo "$out"
+          if printf '%s\n' "$out" | grep -q '=>'; then
             echo "::error::binary is dynamically linked"
-            ldd target/${{ matrix.target }}/release/chore
             exit 1
           fi
       # Nothing links against a system library here, so the .exe should stand
       # alone apart from the Windows API DLLs every process loads.
       - if: endsWith(matrix.target, '-windows-gnu')
-        shell: pwsh
         run: |
-          $exe = "target/${{ matrix.target }}/release/chore.exe"
-          if (-not (Test-Path $exe)) { throw "no binary at $exe" }
-          $deps = & 'C:\msys64\mingw64\bin\objdump.exe' -p $exe |
-            Select-String 'DLL Name:' | ForEach-Object { ($_ -split ':')[1].Trim() }
-          $deps
+          exe=target/${{ matrix.target }}/release/chore.exe
+          test -f "$exe" || { echo "::error::no binary at $exe"; exit 1; }
+          deps=$(x86_64-w64-mingw32-objdump -p "$exe" | sed -n 's/.*DLL Name: *//p')
+          echo "$deps"
           # libgcc / libstdc++ / libwinpthread would mean the binary needs the
           # mingw runtime installed on the user's machine, which it must not.
-          $bad = $deps | Where-Object { $_ -match '^(libgcc|libstdc|libwinpthread)' }
-          if ($bad) { throw "binary depends on the mingw runtime: $bad" }
+          if printf '%s\n' "$deps" | grep -qiE '^(libgcc|libstdc|libwinpthread)'; then
+            echo "::error::binary depends on the mingw runtime"
+            exit 1
+          fi
 
   # The installers are shipped from main, not from a release asset, so a
   # broken one is live the moment it merges.
