@@ -8,3 +8,6 @@ target/
 node_modules/
 website/dist/
 .DS_Store
+
+# A checkout of another project someone left here; not part of this repo.
+/vibe
