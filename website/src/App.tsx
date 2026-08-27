@@ -5,8 +5,11 @@ import { Nav } from './components/Nav'
 import { Reference } from './components/Reference'
 import { Replaces } from './components/Replaces'
 import { Showcase } from './components/Showcase'
+import { useHashScroll } from './lib/useHashScroll'
 
 export function App() {
+  useHashScroll()
+
   return (
     <div id="top">
       <Nav />

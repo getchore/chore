@@ -18,7 +18,10 @@ export function Section({
   className?: string
 }) {
   return (
-    <section id={id} className={cx(container, css({ py: { base: '20', md: '28' } }), className)}>
+    <section
+      id={id}
+      className={cx(container, css({ py: { base: '20', md: '28' }, scrollMarginTop: '80px' }), className)}
+    >
       {children}
     </section>
   )
