@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { css, cx } from 'styled-system/css'
 import { Code } from './Code'
-import { Eyebrow, Heading, Section } from './ui'
+import { Band, Eyebrow, Heading } from './ui'
 
 const CHOREFILE = `VERSION=0.4.2
 DIST=$ROOT/dist/$PLATFORM
@@ -68,8 +68,7 @@ export function Showcase() {
   const active = TABS.find((t) => t.id === tab)!
 
   return (
-    <div>
-      <Section id="example">
+    <Band id="example" ambient="dots">
         <div
           className={css({
             display: 'flex',
@@ -200,7 +199,6 @@ export function Showcase() {
             </div>
           </div>
         </div>
-      </Section>
-    </div>
+    </Band>
   )
 }

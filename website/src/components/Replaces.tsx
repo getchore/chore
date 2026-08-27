@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { css, cx } from 'styled-system/css'
 import { Code, type Lang } from './Code'
-import { Eyebrow, Heading, Section } from './ui'
+import { Band, Eyebrow, Heading } from './ui'
 
 type Case = {
   id: string
@@ -199,8 +199,7 @@ export function Replaces() {
   const c = CASES.find((x) => x.id === id)!
 
   return (
-    <div className={css({ bg: 'bg.subtle', borderY: '1px solid token(colors.border.default)' })}>
-      <Section id="replaces">
+    <Band id="replaces" ambient="rail" surface>
         <div
           className={css({
             display: 'flex',
@@ -297,7 +296,6 @@ export function Replaces() {
         </div>
 
         <p className={css({ mt: '6', fontSize: '14px', color: 'fg.faint' })}>{c.note}</p>
-      </Section>
-    </div>
+    </Band>
   )
 }

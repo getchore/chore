@@ -1,5 +1,5 @@
 import { css } from 'styled-system/css'
-import { Eyebrow, Heading, Section } from './ui'
+import { Band, Eyebrow, Heading } from './ui'
 
 const FEATURES: { tag: string; title: string; body: string }[] = [
   { tag: 'portable', title: 'The shell is inside the binary', body: 'No bash. No PowerShell quoting. No surprises.' },
@@ -12,7 +12,7 @@ const FEATURES: { tag: string; title: string; body: string }[] = [
 
 export function Features() {
   return (
-    <Section id="features">
+    <Band id="features" ambient="grid">
       <Eyebrow>why chore</Eyebrow>
       <Heading>Task runners break at the shell. This one has no shell.</Heading>
 
@@ -65,6 +65,6 @@ export function Features() {
           </div>
         ))}
       </div>
-    </Section>
+    </Band>
   )
 }

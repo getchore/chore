@@ -112,3 +112,120 @@ export function GitHubIcon() {
 /// the referrer. Anchors within the page must not use it — sending a reader
 /// to a new tab to read the next section would be hostile.
 export const EXTERNAL = { target: '_blank', rel: 'noopener noreferrer' } as const
+
+export type AmbientVariant = 'grid' | 'dots' | 'rail' | 'corner'
+
+/**
+ * Ambient background for a section. In dark, a flat #08090c band reads as a
+ * hole in the page — the hero has a grid and a glow, and everything below it
+ * looked unfinished by comparison. Each variant pairs one texture with one
+ * light source in a different place, so the sections feel related without
+ * repeating. Deliberately near-invisible: it should register as depth, not
+ * decoration, and it stays out of the way in light mode.
+ *
+ * Must sit inside a `position: relative; overflow: hidden` parent.
+ */
+export function Ambient({ variant }: { variant: AmbientVariant }) {
+  const texture =
+    variant === 'dots'
+      ? css({
+          backgroundImage: 'radial-gradient(circle at 1px 1px, token(colors.fg.faint) 1px, transparent 0)',
+          backgroundSize: '24px 24px',
+          maskImage: 'radial-gradient(ellipse 65% 75% at 50% 40%, #000, transparent 72%)',
+          opacity: { base: 0.28, _dark: 0.4 },
+        })
+      : variant === 'rail'
+        ? css({
+            backgroundImage:
+              'linear-gradient(to right, token(colors.border.default) 1px, transparent 1px)',
+            backgroundSize: '128px 100%',
+            maskImage: 'linear-gradient(to bottom, transparent, #000 30%, #000 70%, transparent)',
+            opacity: { base: 0.4, _dark: 0.4 },
+          })
+        : variant === 'grid'
+          ? css({
+              backgroundImage:
+                'linear-gradient(to right, token(colors.border.default) 1px, transparent 1px), linear-gradient(to bottom, token(colors.border.default) 1px, transparent 1px)',
+              backgroundSize: '64px 64px',
+              maskImage: 'radial-gradient(ellipse 70% 60% at 15% 0%, #000 20%, transparent 70%)',
+              opacity: { base: 0.35, _dark: 0.35 },
+            })
+          : css({
+              backgroundImage:
+                'linear-gradient(to bottom, token(colors.border.default) 1px, transparent 1px)',
+              backgroundSize: '100% 96px',
+              maskImage: 'radial-gradient(ellipse 70% 70% at 85% 100%, #000, transparent 70%)',
+              opacity: { base: 0.35, _dark: 0.32 },
+            })
+
+  // where the light comes from, per variant
+  const glowPos: Record<AmbientVariant, string> = {
+    grid: 'top:-220px; left:-120px;',
+    dots: 'top:-260px; left:50%; margin-left:-450px;',
+    rail: 'top:-180px; right:-160px;',
+    corner: 'bottom:-280px; right:-140px;',
+  }
+  const style = Object.fromEntries(
+    glowPos[variant]
+      .split(';')
+      .filter(Boolean)
+      .map((d) => {
+        const [k, v] = d.split(':')
+        return [k.trim().replace(/-([a-z])/g, (_, c) => c.toUpperCase()), v.trim()]
+      }),
+  )
+
+  return (
+    <>
+      <div aria-hidden className={cx(css({ position: 'absolute', inset: '0', pointerEvents: 'none' }), texture)} />
+      <div
+        aria-hidden
+        style={style}
+        className={css({
+          position: 'absolute',
+          w: '900px',
+          h: '560px',
+          pointerEvents: 'none',
+          background: 'radial-gradient(closest-side, token(colors.accent.soft), transparent)',
+          filter: 'blur(20px)',
+          // light mode needs far less of it, or the wash reads as a smudge
+          opacity: { base: 0.4, _dark: 1 },
+        })}
+      />
+    </>
+  )
+}
+
+/** A full-width band: optional raised surface, an ambient layer, and a Section. */
+export function Band({
+  id,
+  ambient,
+  surface = false,
+  children,
+}: {
+  id?: string
+  ambient: AmbientVariant
+  surface?: boolean
+  children: ReactNode
+}) {
+  return (
+    <div
+      className={cx(
+        css({ position: 'relative', overflow: 'hidden' }),
+        surface &&
+          css({
+            bg: 'bg.subtle',
+            borderY: '1px solid token(colors.border.default)',
+            // the border alone barely reads in dark; a hairline of light gives
+            // the band an edge, the way a raised panel catches it
+            boxShadow: { _dark: 'inset 0 1px 0 rgba(255,255,255,0.05)' },
+          }),
+      )}
+    >
+      <Ambient variant={ambient} />
+      <Section id={id} className={css({ position: 'relative' })}>
+        {children}
+      </Section>
+    </div>
+  )
+}

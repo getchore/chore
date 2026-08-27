@@ -1,5 +1,5 @@
 import { css } from 'styled-system/css'
-import { Eyebrow, Heading, Section } from './ui'
+import { Band, Eyebrow, Heading } from './ui'
 
 const BUILTINS = [
   'download', 'extract', 'archive', 'copy', 'move', 'remove',
@@ -22,7 +22,7 @@ const VARS: [string, string][] = [
 
 export function Reference() {
   return (
-    <Section id="reference">
+    <Band id="reference" ambient="corner">
       <div
         className={css({
           display: 'flex',
@@ -111,6 +111,6 @@ export function Reference() {
           </div>
         </div>
       </div>
-    </Section>
+    </Band>
   )
 }
