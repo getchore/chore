@@ -14,7 +14,7 @@ export function Features() {
   return (
     <Band id="features" ambient="grid">
       <Eyebrow>why chore</Eyebrow>
-      <Heading>Task runners break at the shell. This one has no shell.</Heading>
+      <Heading>Task runners break at the shell. This one brings its own.</Heading>
 
       <div
         className={css({
