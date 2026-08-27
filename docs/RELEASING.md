@@ -46,6 +46,13 @@ The tag triggers `.github/workflows/release.yml`, which refuses to build if
 the tag and `Cargo.toml` disagree. It builds all six targets, smoke-tests
 each one it can execute, then creates the release with generated notes.
 
+The smoke test writes a one-task chorefile and runs `--version`, `list`,
+`list --json`, `check` and the task itself. `x86_64-apple-darwin` is skipped:
+it is the one cross-built target and Rosetta may not be on the runner, so a
+failure there would say nothing about the binary. `chore check` exits nonzero
+only for errors — a command missing from the runner's `PATH` is a warning — so
+the smoke test does not depend on what happens to be installed there.
+
 A tag containing `-alpha`, `-beta` or `-rc` is published as a prerelease.
 
 To rehearse without tagging, run the workflow manually with a tag name — it

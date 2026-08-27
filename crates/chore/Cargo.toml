@@ -1,0 +1,15 @@
+[package]
+name = "chore"
+description = "Run project tasks from a chorefile, without a shell"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "chore"
+path = "src/main.rs"
+
+[dependencies]
+chorefile.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "chorefile"
+description = "Parser and interpreter for the chorefile task language"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ureq.workspace = true
+zip.workspace = true
+tar.workspace = true
+flate2.workspace = true
+lzma-rs.workspace = true
+zstd.workspace = true
+sha2.workspace = true
+tempfile.workspace = true

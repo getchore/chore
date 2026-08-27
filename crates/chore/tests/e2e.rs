@@ -1,0 +1,788 @@
+//! End-to-end tests that prove `chore` *runs* things.
+//!
+//! `cli.rs` covers the command line and the previews; everything here builds a
+//! real chorefile in a temp directory, runs the compiled binary against it, and
+//! then looks at the bytes on disk. A test that only checked the exit code
+//! would prove almost nothing about an interpreter.
+//!
+//! No test here touches the network, so `download` is not exercised.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// ---------------------------------------------------------------------------
+// harness — same shape as `cli.rs`: a hand-rolled temp dir that removes itself
+// ---------------------------------------------------------------------------
+
+struct Dir(PathBuf);
+
+impl Dir {
+    fn new() -> Self {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "chore-e2e-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("temp dir");
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn write(&self, name: &str, text: &str) -> PathBuf {
+        let path = self.0.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("parent");
+        }
+        std::fs::write(&path, text).expect("write");
+        path
+    }
+
+    fn chorefile(&self, text: &str) -> &Self {
+        self.write("chorefile", text);
+        self
+    }
+
+    fn exists(&self, name: &str) -> bool {
+        self.0.join(name).exists()
+    }
+
+    /// The file's contents, or a panic naming the file — a missing file in the
+    /// middle of a pipeline is the failure worth reading about.
+    fn read(&self, name: &str) -> String {
+        let path = self.0.join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    fn bytes(&self, name: &str) -> Vec<u8> {
+        let path = self.0.join(name);
+        std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct Run {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl Run {
+    fn of(output: Output) -> Self {
+        Self {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    /// Panic unless the run succeeded, showing both streams.
+    fn ok(self) -> Self {
+        assert_eq!(
+            self.code, 0,
+            "stdout:\n{}\nstderr:\n{}",
+            self.stdout, self.stderr
+        );
+        self
+    }
+
+    /// How many times a line was *printed*. Substring counting would also
+    /// match the `$ echo once` the interpreter echoes before running it.
+    fn printed(&self, line: &str) -> usize {
+        self.stdout.lines().filter(|l| l.trim() == line).count()
+    }
+}
+
+fn chore_in(dir: &Path, args: &[&str]) -> Run {
+    let output = Command::new(env!("CARGO_BIN_EXE_chore"))
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("run chore");
+    Run::of(output)
+}
+
+fn chore(dir: &Dir, args: &[&str]) -> Run {
+    chore_in(dir.path(), args)
+}
+
+// ---------------------------------------------------------------------------
+// 1. a real build pipeline
+// ---------------------------------------------------------------------------
+
+/// The flagship: stage sources, copy a tree, archive it, hash it, unpack it
+/// again and check the digest — all through builtins, all asserted on bytes.
+const PIPELINE: &str = r#"
+# stage the sources
+task stage {
+    mkdir build/demo
+    write build/demo/main.txt "fn main"
+    write build/demo/docs/README "read me"
+    copy build/demo build/staged
+}
+
+# package the staged tree
+task package {
+    stage
+    mkdir dist
+    archive build/staged dist/demo.tar.gz
+    write dist/demo.tar.gz.sha256 $(sha256 dist/demo.tar.gz)
+}
+
+# unpack the package and check it against its digest
+task verify {
+    package
+    extract dist/demo.tar.gz check
+    want=$(read dist/demo.tar.gz.sha256)
+    got=$(sha256 dist/demo.tar.gz)
+    if $want != $got { fail digest mismatch }
+    echo verified $got
+}
+"#;
+
+#[test]
+fn a_build_pipeline_stages_packages_and_verifies_real_files() {
+    let dir = Dir::new();
+    dir.chorefile(PIPELINE);
+
+    let run = chore(&dir, &["verify"]).ok();
+
+    // The staged tree is a real recursive copy, not just the top directory.
+    assert_eq!(dir.read("build/demo/main.txt"), "fn main\n");
+    assert_eq!(dir.read("build/staged/main.txt"), "fn main\n");
+    assert_eq!(dir.read("build/staged/docs/README"), "read me\n");
+
+    // `archive` names the top-level entry after the source, so the archive
+    // unpacks as `check/staged/...` rather than spilling into `check/`.
+    assert_eq!(dir.read("check/staged/main.txt"), "fn main\n");
+    assert_eq!(dir.read("check/staged/docs/README"), "read me\n");
+
+    let digest = dir.read("dist/demo.tar.gz.sha256");
+    let digest = digest.trim();
+    assert_eq!(digest.len(), 64, "digest was {digest:?}");
+    assert!(
+        digest
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "digest was {digest:?}"
+    );
+    assert!(
+        run.stdout.contains(&format!("verified {digest}")),
+        "{}",
+        run.stdout
+    );
+
+    // The archive is a real file with gzip's magic bytes, not an empty stub.
+    let archive = dir.bytes("dist/demo.tar.gz");
+    assert_eq!(&archive[..2], &[0x1f, 0x8b], "not a gzip stream");
+}
+
+#[test]
+fn archiving_the_same_tree_twice_produces_identical_bytes() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+task twice {
+    mkdir tree/sub
+    write tree/a.txt a
+    write tree/sub/b.txt b
+    archive tree one.tar.gz
+    archive tree two.tar.gz
+}
+"#,
+    );
+
+    chore(&dir, &["twice"]).ok();
+    assert_eq!(
+        dir.bytes("one.tar.gz"),
+        dir.bytes("two.tar.gz"),
+        "archive is not reproducible"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 2. run-once semantics
+// ---------------------------------------------------------------------------
+
+const DIAMOND: &str = r#"
+task d {
+    echo tick >> log.txt
+}
+
+task b {
+    d
+}
+
+task c {
+    d
+}
+
+task a {
+    b
+    c
+    d
+}
+"#;
+
+#[test]
+fn a_task_reached_three_ways_in_a_diamond_runs_once() {
+    let dir = Dir::new();
+    dir.chorefile(DIAMOND);
+
+    chore(&dir, &["a"]).ok();
+    assert_eq!(dir.read("log.txt"), "tick\n");
+}
+
+#[test]
+fn force_makes_every_reach_of_a_diamond_run_the_task_again() {
+    let dir = Dir::new();
+    dir.chorefile(DIAMOND);
+
+    chore(&dir, &["a", "--force"]).ok();
+    assert_eq!(dir.read("log.txt"), "tick\ntick\ntick\n");
+}
+
+#[test]
+fn run_once_is_keyed_on_arguments_as_well_as_name() {
+    let dir = Dir::new();
+    // Keyed on name *and* arguments: a parameterised task called with
+    // different arguments has different work to do, so skipping it would be a
+    // silently wrong build.
+    dir.chorefile(
+        r#"
+task target name {
+    echo $1 >> built.txt
+}
+
+task all {
+    target linux
+    target windows
+    target linux
+}
+"#,
+    );
+
+    chore(&dir, &["all"]).ok();
+    assert_eq!(dir.read("built.txt"), "linux\nwindows\n");
+}
+
+// ---------------------------------------------------------------------------
+// 3. cd isolation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_cd_dies_with_the_task_that_made_it() {
+    let dir = Dir::new();
+    std::fs::create_dir_all(dir.path().join("sub")).expect("sub");
+    dir.chorefile(
+        r#"
+task inner {
+    cd sub
+    write inside.txt here
+}
+
+task outer {
+    inner
+    write after.txt back
+}
+"#,
+    );
+
+    chore(&dir, &["outer"]).ok();
+    assert_eq!(dir.read("sub/inside.txt"), "here\n");
+    // The sibling wrote a relative path and must land at $ROOT, not in `sub`.
+    assert_eq!(dir.read("after.txt"), "back\n");
+    assert!(!dir.exists("sub/after.txt"), "cd leaked out of the callee");
+}
+
+// ---------------------------------------------------------------------------
+// 4. word splitting
+// ---------------------------------------------------------------------------
+
+const SPLITTING: &str = r#"
+task record {
+    write count.txt $#
+    write first.txt "$1"
+}
+
+task quoted {
+    record "two words"
+}
+
+task unquoted {
+    v="two words"
+    record $v
+}
+
+task requoted {
+    v="two words"
+    record "$v"
+}
+
+task star {
+    record *
+}
+"#;
+
+#[test]
+fn a_quoted_word_reaches_the_command_as_one_argument() {
+    let dir = Dir::new();
+    dir.chorefile(SPLITTING);
+
+    chore(&dir, &["quoted"]).ok();
+    assert_eq!(dir.read("count.txt"), "1\n");
+    assert_eq!(dir.read("first.txt"), "two words\n");
+}
+
+#[test]
+fn an_unquoted_variable_holding_two_words_arrives_as_two_arguments() {
+    let dir = Dir::new();
+    dir.chorefile(SPLITTING);
+
+    chore(&dir, &["unquoted"]).ok();
+    assert_eq!(dir.read("count.txt"), "2\n");
+    assert_eq!(dir.read("first.txt"), "two\n");
+}
+
+#[test]
+fn quoting_a_variable_at_the_call_site_puts_it_back_together() {
+    let dir = Dir::new();
+    dir.chorefile(SPLITTING);
+
+    chore(&dir, &["requoted"]).ok();
+    assert_eq!(dir.read("count.txt"), "1\n");
+    assert_eq!(dir.read("first.txt"), "two words\n");
+}
+
+#[test]
+fn a_glob_character_reaches_the_command_unexpanded() {
+    let dir = Dir::new();
+    dir.chorefile(SPLITTING);
+
+    // argv goes to the OS directly, so nothing re-expands `*` on the way out.
+    chore(&dir, &["star"]).ok();
+    assert_eq!(dir.read("count.txt"), "1\n");
+    assert_eq!(dir.read("first.txt"), "*\n");
+}
+
+// ---------------------------------------------------------------------------
+// 5. chains and redirects
+// ---------------------------------------------------------------------------
+
+#[test]
+fn and_runs_the_right_side_only_when_the_left_side_succeeded() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+task chain {
+    try exists nothing-here && write skipped.txt x
+    exists chorefile && write ran.txt x
+}
+"#,
+    );
+
+    chore(&dir, &["chain"]).ok();
+    assert!(!dir.exists("skipped.txt"), "&& ran after a failure");
+    assert_eq!(dir.read("ran.txt"), "x\n");
+}
+
+#[test]
+fn or_runs_the_right_side_only_when_the_left_side_failed() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+task chain {
+    exists nothing-here || write fallback.txt used
+    try exists chorefile || write unused.txt no
+}
+"#,
+    );
+
+    chore(&dir, &["chain"]).ok();
+    assert_eq!(dir.read("fallback.txt"), "used\n");
+    assert!(!dir.exists("unused.txt"), "|| ran after a success");
+}
+
+#[test]
+fn a_pipe_keeps_only_the_right_hand_sides_output() {
+    let dir = Dir::new();
+    dir.chorefile("task piped {\n    echo left | echo right > out.txt\n}\n");
+
+    chore(&dir, &["piped"]).ok();
+    // As in sh, the pipeline's stdout — and its status — are the last
+    // command's; the left side's bytes went into the pipe and no further.
+    assert_eq!(dir.read("out.txt"), "right\n");
+}
+
+#[test]
+fn redirects_truncate_and_append() {
+    let dir = Dir::new();
+    dir.write("kept.txt", "old\n");
+    dir.chorefile(
+        r#"
+task redirect {
+    echo first > kept.txt
+    echo second > kept.txt
+    echo one > stack.txt
+    echo two >> stack.txt
+    echo three >> stack.txt
+}
+"#,
+    );
+
+    chore(&dir, &["redirect"]).ok();
+    assert_eq!(dir.read("kept.txt"), "second\n");
+    assert_eq!(dir.read("stack.txt"), "one\ntwo\nthree\n");
+}
+
+#[test]
+fn a_redirected_builtin_leaves_nothing_for_the_next_command_to_print() {
+    let dir = Dir::new();
+    dir.chorefile("task chain {\n    echo hidden > cap.txt && echo after\n}\n");
+
+    let run = chore(&dir, &["chain"]).ok();
+    assert_eq!(dir.read("cap.txt"), "hidden\n");
+    // The bytes went to the file and nowhere else: leaving them in the
+    // command's output would let `&&` splice them back into stdout.
+    assert_eq!(run.printed("hidden"), 0, "{}", run.stdout);
+    assert_eq!(run.printed("after"), 1, "{}", run.stdout);
+}
+
+#[test]
+fn a_stderr_redirect_catches_a_builtins_diagnostic() {
+    let dir = Dir::new();
+    // `env <NAME>` reports a miss as exit 1 plus a diagnostic, so `try` keeps
+    // fail-fast out of the way while the redirect does its job.
+    dir.chorefile(
+        r#"
+task diag {
+    try env CHORE_E2E_DEFINITELY_UNSET 2> err.txt
+    echo done
+}
+"#,
+    );
+
+    let run = chore(&dir, &["diag"]).ok();
+    assert!(
+        dir.read("err.txt").contains("CHORE_E2E_DEFINITELY_UNSET"),
+        "err.txt was {:?}",
+        dir.read("err.txt")
+    );
+    assert!(
+        !run.stderr.contains("CHORE_E2E_DEFINITELY_UNSET"),
+        "the diagnostic also reached the terminal: {}",
+        run.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. fail-fast and `try`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_failing_command_stops_the_task_where_it_stood() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+task risky {
+    write before.txt ok
+    fail nope
+    write after.txt never
+}
+"#,
+    );
+
+    let run = chore(&dir, &["risky"]);
+    assert_eq!(run.code, 1, "{}{}", run.stdout, run.stderr);
+    assert_eq!(dir.read("before.txt"), "ok\n");
+    assert!(!dir.exists("after.txt"), "the run continued past a failure");
+    assert!(run.stderr.contains("nope"), "{}", run.stderr);
+}
+
+#[test]
+fn an_unknown_program_fails_the_task_like_any_other_command() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+task risky {
+    write before.txt ok
+    ^chore-e2e-no-such-program
+    write after.txt never
+}
+"#,
+    );
+
+    let run = chore(&dir, &["risky"]);
+    assert_eq!(run.code, 1, "{}{}", run.stdout, run.stderr);
+    assert!(!dir.exists("after.txt"));
+    assert!(
+        run.stderr.contains("chore-e2e-no-such-program"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn try_lets_the_task_carry_on_past_a_failure() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+task risky {
+    write before.txt ok
+    try fail nope
+    try ^chore-e2e-no-such-program
+    write after.txt reached
+}
+"#,
+    );
+
+    chore(&dir, &["risky"]).ok();
+    assert_eq!(dir.read("before.txt"), "ok\n");
+    assert_eq!(dir.read("after.txt"), "reached\n");
+}
+
+// ---------------------------------------------------------------------------
+// 7. `--dry` has no effects
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dry_changes_nothing_in_a_populated_tree() {
+    let dir = Dir::new();
+    dir.write("top.txt", "top\n");
+    dir.write("keep/data.txt", "precious\n");
+    dir.chorefile(
+        r#"
+task destroy {
+    stamp=$(read top.txt)
+    remove keep
+    remove top.txt
+    mkdir fresh
+    write fresh/new.txt $stamp
+    copy chorefile backup
+    archive fresh fresh.zip
+}
+"#,
+    );
+
+    let run = chore(&dir, &["destroy", "--dry"]).ok();
+
+    assert_eq!(dir.read("top.txt"), "top\n");
+    assert_eq!(dir.read("keep/data.txt"), "precious\n");
+    for created in ["fresh", "backup", "fresh.zip"] {
+        assert!(!dir.exists(created), "--dry created {created}");
+    }
+
+    // Every command is still shown...
+    for shown in [
+        "$ remove keep",
+        "$ mkdir fresh",
+        "$ archive fresh fresh.zip",
+    ] {
+        assert!(run.stdout.contains(shown), "{}", run.stdout);
+    }
+    // ...and the capture really ran: a `$(...)` that was skipped would leave
+    // every interpolated value downstream empty, and the preview would
+    // describe a run that could never happen.
+    assert!(
+        run.stdout.contains("$ write fresh/new.txt top"),
+        "the capture did not run: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn dry_still_stops_at_a_hard_failure() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+task boom {
+    echo before
+    fail nope
+    write after.txt never
+}
+"#,
+    );
+
+    // A preview that swallowed `fail` would describe a run that cannot happen.
+    let run = chore(&dir, &["boom", "--dry"]);
+    assert_eq!(run.code, 1, "{}{}", run.stdout, run.stderr);
+    assert!(!dir.exists("after.txt"));
+}
+
+// ---------------------------------------------------------------------------
+// 8. discovery
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_run_from_a_nested_subdirectory_works_from_the_chorefiles_directory() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+task where {
+    write $ROOT/absolute.txt marker
+    write relative.txt marker
+}
+"#,
+    );
+    let nested = dir.path().join("a/b/c");
+    std::fs::create_dir_all(&nested).expect("nested");
+
+    let run = chore_in(&nested, &["where"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+
+    assert_eq!(dir.read("absolute.txt"), "marker\n");
+    // Commands start at $ROOT, not at the directory `chore` was invoked from.
+    assert_eq!(dir.read("relative.txt"), "marker\n");
+    assert!(!nested.join("relative.txt").exists());
+}
+
+// ---------------------------------------------------------------------------
+// 9. exit codes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_finished_run_exits_zero_and_leaves_its_work_behind() {
+    let dir = Dir::new();
+    dir.chorefile("task work {\n    write done.txt yes\n}\n");
+
+    chore(&dir, &["work"]).ok();
+    assert_eq!(dir.read("done.txt"), "yes\n");
+}
+
+#[test]
+fn an_exit_inside_a_called_task_unwinds_the_whole_run_with_its_code() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+task inner {
+    write inner.txt ok
+    exit 3
+    write inner-after.txt never
+}
+
+task outer {
+    inner
+    write outer-after.txt never
+}
+"#,
+    );
+
+    let run = chore(&dir, &["outer"]);
+    assert_eq!(run.code, 3, "{}{}", run.stdout, run.stderr);
+    assert_eq!(dir.read("inner.txt"), "ok\n");
+    assert!(!dir.exists("inner-after.txt"));
+    assert!(!dir.exists("outer-after.txt"), "the caller kept going");
+}
+
+#[test]
+fn a_malformed_subcommand_is_a_usage_error_that_touches_nothing() {
+    let dir = Dir::new();
+    dir.chorefile("task work {\n    write done.txt yes\n}\n");
+
+    let run = chore(&dir, &["list", "--bogus"]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("usage"), "{}", run.stderr);
+    assert!(!dir.exists("done.txt"));
+}
+
+// ---------------------------------------------------------------------------
+// top-level statements
+// ---------------------------------------------------------------------------
+
+#[test]
+fn list_needs_no_io_but_a_run_evaluates_the_globals() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+version=$(read version.txt)
+
+# show the version
+task show {
+    echo v $version
+}
+"#,
+    );
+
+    // `list` only needs the parse tree, so it works even though the file the
+    // global reads is missing.
+    let listed = chore(&dir, &["list"]).ok();
+    assert!(listed.stdout.contains("show"), "{}", listed.stdout);
+
+    let failed = chore(&dir, &["show"]);
+    assert_eq!(failed.code, 1, "{}{}", failed.stdout, failed.stderr);
+    assert!(failed.stderr.contains("version.txt"), "{}", failed.stderr);
+
+    dir.write("version.txt", "1.2.3\n");
+    let run = chore(&dir, &["show"]).ok();
+    assert_eq!(run.printed("v 1.2.3"), 1, "{}", run.stdout);
+}
+
+#[test]
+fn a_task_wins_over_the_builtin_it_shadows() {
+    let dir = Dir::new();
+    // SPEC: at runtime a task wins over a builtin of the same name, and it is
+    // `check` that reports the shadowing.
+    dir.chorefile(
+        r#"
+task write {
+    echo TASKWINS
+}
+
+task go {
+    write a b
+}
+"#,
+    );
+
+    let run = chore(&dir, &["go"]).ok();
+    assert_eq!(run.printed("TASKWINS"), 1, "{}", run.stdout);
+    assert!(!dir.exists("a"), "the builtin ran instead of the task");
+
+    let checked = chore(&dir, &["check"]);
+    assert_eq!(checked.code, 1, "{}{}", checked.stdout, checked.stderr);
+    assert!(checked.stdout.contains("write"), "{}", checked.stdout);
+}
+
+// ---------------------------------------------------------------------------
+// bugs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_stderr_redirect_catches_the_message_from_a_builtin_that_fails() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+task diag {
+    try read missing.txt 2> err.txt
+    echo done
+}
+"#,
+    );
+
+    let run = chore(&dir, &["diag"]).ok();
+    // A `2>` on a program on PATH always creates the file, because the file is
+    // opened before the child is spawned. A builtin returns its failure as an
+    // error that unwinds past the code writing the file, so the redirect
+    // catches nothing at exactly the moment there is something to catch.
+    assert!(dir.exists("err.txt"), "2> created no file: {}", run.stdout);
+    assert!(
+        dir.read("err.txt").contains("missing.txt"),
+        "err.txt was {:?}",
+        dir.read("err.txt")
+    );
+    assert!(
+        !run.stderr.contains("missing.txt"),
+        "the diagnostic escaped the redirect: {}",
+        run.stderr
+    );
+}
