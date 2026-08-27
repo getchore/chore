@@ -1,7 +1,7 @@
 import { css } from 'styled-system/css'
 import { GITHUB_URL, RELEASES_URL } from '../lib/detect'
 import { Install } from './Install'
-import { container } from './ui'
+import { EXTERNAL, container } from './ui'
 
 export function Cta() {
   return (
@@ -56,6 +56,7 @@ export function Cta() {
           </div>
           <a
             href={RELEASES_URL}
+            {...EXTERNAL}
             className={css({
               mt: '5',
               fontSize: '13.5px',
@@ -93,13 +94,17 @@ export function Footer() {
             Rust.
           </span>
           <div className={css({ display: 'flex', gap: '6' })}>
-            <a className={css({ _hover: { color: 'fg.default' } })} href={GITHUB_URL}>
+            <a className={css({ _hover: { color: 'fg.default' } })} href={GITHUB_URL} {...EXTERNAL}>
               GitHub
             </a>
-            <a className={css({ _hover: { color: 'fg.default' } })} href={`${GITHUB_URL}/blob/main/SPEC.md`}>
+            <a
+              className={css({ _hover: { color: 'fg.default' } })}
+              href={`${GITHUB_URL}/blob/main/docs/SPEC.md`}
+              {...EXTERNAL}
+            >
               Spec
             </a>
-            <a className={css({ _hover: { color: 'fg.default' } })} href={RELEASES_URL}>
+            <a className={css({ _hover: { color: 'fg.default' } })} href={RELEASES_URL} {...EXTERNAL}>
               Releases
             </a>
           </div>

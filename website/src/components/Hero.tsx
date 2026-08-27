@@ -2,7 +2,7 @@ import { css } from 'styled-system/css'
 import { GITHUB_URL } from '../lib/detect'
 import { Install } from './Install'
 import { Terminal } from './Terminal'
-import { GitHubIcon, container } from './ui'
+import { EXTERNAL, GitHubIcon, container } from './ui'
 
 const STATS = [
   ['1 binary', 'no runtime'],
@@ -56,6 +56,7 @@ export function Hero() {
           >
             <a
               href={`${GITHUB_URL}/releases`}
+              {...EXTERNAL}
               className={css({
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -117,6 +118,7 @@ export function Hero() {
 
             <a
               href={GITHUB_URL}
+              {...EXTERNAL}
               className={css({
                 mt: '5',
                 display: 'inline-flex',

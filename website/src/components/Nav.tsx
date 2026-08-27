@@ -1,7 +1,7 @@
 import { css } from 'styled-system/css'
 import { GITHUB_URL } from '../lib/detect'
 import { useTheme } from '../lib/useTheme'
-import { GitHubIcon, container } from './ui'
+import { EXTERNAL, GitHubIcon, container } from './ui'
 
 const LINKS = [
   ['Why', '#features'],
@@ -103,6 +103,7 @@ export function Nav() {
                 </button>
                 <a
                   href={GITHUB_URL}
+                  {...EXTERNAL}
                   className={css({
                     display: 'flex',
                     alignItems: 'center',

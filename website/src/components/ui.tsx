@@ -106,3 +106,9 @@ export function GitHubIcon() {
     </svg>
   )
 }
+
+/// Spread onto any link that leaves the site. `noopener` keeps the opened
+/// page from reaching back through `window.opener`; `noreferrer` also drops
+/// the referrer. Anchors within the page must not use it — sending a reader
+/// to a new tab to read the next section would be hostile.
+export const EXTERNAL = { target: '_blank', rel: 'noopener noreferrer' } as const
