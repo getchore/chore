@@ -1,0 +1,10 @@
+target/
+/dist
+# release artifacts, built by .github/workflows/release.yml
+/chore-*.tar.gz
+/chore-*.zip
+/*.sha256
+
+node_modules/
+website/dist/
+.DS_Store

@@ -26,6 +26,21 @@ chore check           # lint without running
 chore help            # syntax and builtins
 ```
 
+## Install
+
+```sh
+curl -fsSL https://getchore.github.io/chore/install.sh | sh
+```
+
+```powershell
+irm https://getchore.github.io/chore/install.ps1 | iex
+```
+
+Or download a binary from [releases][releases] — macOS, Linux and Windows, on
+x86-64 and arm64. The Linux builds are static, so they run on any distro.
+
+[releases]: https://github.com/getchore/chore/releases/latest
+
 ## Why
 
 - One binary, no shell, no dependencies.

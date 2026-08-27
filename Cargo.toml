@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+repository = "https://github.com/getchore/chore"
+rust-version = "1.85"
+
+[workspace.dependencies]
+chorefile = { path = "crates/chorefile", version = "0.1.0" }
+
+# --- HTTP, for `download` -----------------------------------------------
+# rustls, never native-tls: OpenSSL would leave a dynamic link on Linux and
+# need a system library on Windows, and `chore` ships as one static binary.
+# The rustls provider is `ring` (ureq's `rustls` feature): it ships
+# pregenerated assembly/object files, so no cmake and no nasm are needed on
+# windows-msvc or windows-gnu. aws-lc-rs would need both.
+# Roots are the bundled webpki set rather than the platform verifier, so a
+# fresh container with no CA bundle still works.
+# `gzip` is deliberately off: transparent decoding would change the bytes on
+# disk and break `--sha256`.
+ureq = { version = "3.4", default-features = false, features = [
+    "rustls",
+    "rustls-webpki-roots",
+] }
+
+# --- Archives, for `extract` and `archive` ------------------------------
+# Every codec below is pure Rust except zstd, so the only C in the tree is
+# zstd's, and `ring` already requires a C compiler anyway.
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
+tar = { version = "0.4", default-features = false }              # default = xattr, which we do not restore
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }  # miniz_oxide, not zlib-sys
+lzma-rs = "0.3"                                                  # pure-Rust xz, both directions
+# zstd-sys bundles the C sources and links them statically, so the binary
+# stays static on all four targets; it needs only `cc`. ruzstd is pure Rust
+# but decode-only, and `archive out.tar.zst` has to encode.
+zstd = { version = "0.13", default-features = false }
+
+sha2 = "0.11"                                                    # `--sha256`, and the `sha256` builtin
+tempfile = "3"                                                   # temp file beside the destination, so the final rename is atomic
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,228 @@
+name: release
+
+# Tag-driven. `git tag v0.1.0 && git push --tags` builds every target,
+# uploads the archives and their checksums, and publishes the release.
+#
+# workflow_dispatch does the same but always leaves the release as a draft,
+# so the whole pipeline can be rehearsed before a tag exists.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.0). Published as a draft."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Fail before spending six build slots on a version mismatch.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      draft: ${{ steps.plan.outputs.draft }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: plan
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag='${{ inputs.tag }}'
+            draft=true
+          else
+            tag='${{ github.ref_name }}'
+            draft=false
+          fi
+          version="${tag#v}"
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$crate" != "$version" ]; then
+            echo "::error::tag $tag implies version $version, but Cargo.toml says $crate"
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "draft=$draft"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux is musl on both arches: a fully static binary that runs on
+          # any distro, glibc or not, which is what `chore` promises.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+
+          # Both darwin targets build on the arm runner. Apple's clang is a
+          # cross compiler, so the C in zstd-sys and ring builds for either
+          # arch without a second machine.
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            deployment_target: "11.0"
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            deployment_target: "10.13"
+
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.tag }}
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup target add ${{ matrix.target }}
+          rustup default stable
+
+      # musl-gcc is needed by the two crates that carry C: zstd-sys and ring.
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin chore
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          target='${{ matrix.target }}'
+          name="chore-$target"
+          out="dist"
+          mkdir -p "$out"
+
+          for extra in LICENSE README.md; do
+            if [ -f "$extra" ]; then cp "$extra" "$out/"; fi
+          done
+
+          if [[ "$target" == *windows* ]]; then
+            cp "target/$target/release/chore.exe" "$out/chore.exe"
+            archive="$name.zip"
+            pwsh -Command "Compress-Archive -Path '$out/*' -DestinationPath '$archive' -CompressionLevel Optimal"
+          else
+            cp "target/$target/release/chore" "$out/chore"
+            chmod +x "$out/chore"
+            archive="$name.tar.gz"
+            COPYFILE_DISABLE=1 tar -czf "$archive" -C "$out" .
+          fi
+
+          # One sidecar per asset, so an installer can verify with a single
+          # extra download and no parsing.
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          cat "$archive.sha256"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      # x86_64-apple-darwin is the one cross-built target; Rosetta may not be
+      # on the runner, so a failure there says nothing about the binary.
+      - name: Smoke test
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$PWD/target/${{ matrix.target }}/release/chore"
+          case '${{ matrix.target }}' in *windows*) bin="$bin.exe" ;; esac
+
+          work=$(mktemp -d)
+          cat > "$work/chorefile" <<'EOF'
+          # greet the platform
+          task hello {
+            echo "hello from $PLATFORM"
+          }
+          EOF
+
+          cd "$work"
+          "$bin" --version
+          "$bin" list
+          "$bin" list --json
+          "$bin" check
+          "$bin" hello
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chore-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Collect checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          cat *.sha256 | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+          ls -la
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='${{ needs.plan.outputs.tag }}'
+          draft='${{ needs.plan.outputs.draft }}'
+          args=(--title "$tag" --generate-notes)
+          [ "$draft" = "true" ] && args+=(--draft)
+          case "$tag" in *-alpha*|*-beta*|*-rc*) args+=(--prerelease) ;; esac
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" artifacts/* --clobber
+          else
+            gh release create "$tag" artifacts/* "${args[@]}"
+          fi

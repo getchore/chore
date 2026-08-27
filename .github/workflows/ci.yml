@@ -1,0 +1,131 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: lint-${{ hashFiles('Cargo.lock') }}
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: test-${{ matrix.runner }}-${{ hashFiles('Cargo.lock') }}
+      - run: cargo test --workspace --locked
+
+  # The release job builds six targets on five runners. This checks the three
+  # that nothing else covers -- musl, the darwin cross, and windows-gnu -- on
+  # every PR, so a linking break surfaces before a tag is pushed rather than
+  # after.
+  cross:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          # The least-exercised target in the tree: the only one where both C
+          # dependencies, ring and zstd-sys, build against mingw rather than
+          # msvc or a system compiler.
+          - target: x86_64-pc-windows-gnu
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup target add ${{ matrix.target }}
+      - if: endsWith(matrix.target, '-linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      # rustup's rust-mingw component supplies the import libraries, but ring
+      # and zstd-sys compile real C, so the build needs gcc too. It ships with
+      # the runner image; putting it on PATH is all that is required.
+      - if: endsWith(matrix.target, '-windows-gnu')
+        shell: pwsh
+        run: |
+          'C:\msys64\mingw64\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & 'C:\msys64\mingw64\bin\gcc.exe' --version
+      - env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin chore
+      - if: endsWith(matrix.target, '-linux-musl')
+        run: |
+          file target/${{ matrix.target }}/release/chore
+          # The whole point of musl here: no interpreter, no shared objects.
+          if ldd target/${{ matrix.target }}/release/chore 2>&1 | grep -qv 'not a dynamic executable'; then
+            echo "::error::binary is dynamically linked"
+            ldd target/${{ matrix.target }}/release/chore
+            exit 1
+          fi
+      # Nothing links against a system library here, so the .exe should stand
+      # alone apart from the Windows API DLLs every process loads.
+      - if: endsWith(matrix.target, '-windows-gnu')
+        shell: pwsh
+        run: |
+          $exe = "target/${{ matrix.target }}/release/chore.exe"
+          if (-not (Test-Path $exe)) { throw "no binary at $exe" }
+          $deps = & 'C:\msys64\mingw64\bin\objdump.exe' -p $exe |
+            Select-String 'DLL Name:' | ForEach-Object { ($_ -split ':')[1].Trim() }
+          $deps
+          # libgcc / libstdc++ / libwinpthread would mean the binary needs the
+          # mingw runtime installed on the user's machine, which it must not.
+          $bad = $deps | Where-Object { $_ -match '^(libgcc|libstdc|libwinpthread)' }
+          if ($bad) { throw "binary depends on the mingw runtime: $bad" }
+
+  # The installers are shipped from main, not from a release asset, so a
+  # broken one is live the moment it merges.
+  installers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+      - run: shellcheck --shell=sh installers/install.sh
+      - name: Check installers/install.ps1 parses
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./installers/install.ps1), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          Write-Host 'installers/install.ps1 parses'
