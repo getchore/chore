@@ -1,4 +1,5 @@
 import { Cta, Footer } from './components/Footer'
+import { Dogfood } from './components/Dogfood'
 import { Features } from './components/Features'
 import { Hero } from './components/Hero'
 import { Nav } from './components/Nav'
@@ -18,6 +19,7 @@ export function App() {
         <Features />
         <Replaces />
         <Showcase />
+        <Dogfood />
         <Reference />
         <Cta />
       </main>

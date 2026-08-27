@@ -18,6 +18,7 @@ export default defineConfig({
         fonts: {
           sans: { value: '"Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif' },
           mono: { value: '"JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace' },
+          hand: { value: 'Caveat, "Bradley Hand", "Segoe Script", cursive' },
         },
         colors: {
           ember: {
