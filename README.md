@@ -33,6 +33,17 @@ the published checksum. Prebuilt archives for macOS, Linux (musl-static) and
 Windows on x86-64 and arm64 are on the
 [releases page](https://github.com/getchore/chore/releases/latest).
 
+## In GitHub Actions
+
+```yaml
+- uses: getchore/setup-chore@v1
+- run: chore ci
+```
+
+Installs `chore` and puts it on `PATH` on `ubuntu-*`, `macos-*` and
+`windows-*` runners, so a matrix leg no longer needs a `runner.os` branch to
+install its tools. Pin a version with `with: {version: v1.1.0}`.
+
 ## A chorefile
 
 `chore` reads the `chorefile` in the working directory or the nearest parent,
