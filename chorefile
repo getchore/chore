@@ -12,6 +12,10 @@
 bin=chore
 musl=x86_64-unknown-linux-musl
 
+# The website is its own project, with its own package manager and lockfile,
+# so its tasks live beside it: `chore web::build`, `chore web::dev`.
+include website as web
+
 # Compile the workspace, tests and examples included.
 task build {
     # --all-targets so a test file that no longer compiles fails here, rather
@@ -93,16 +97,6 @@ task static-check {
     } else {
         echo "built the musl binary; ldd is Linux-only, so the assertion is skipped here"
     }
-}
-
-# Build the website the way GitHub Pages does, base path included.
-task web-build {
-    # cd moves the interpreter's directory and is undone when the task
-    # returns, so this leaves the rest of the run where it found it.
-    cd website
-    env VITE_BASE /chore/
-    pnpm install --frozen-lockfile
-    pnpm build
 }
 
 # Delete the target directory.
