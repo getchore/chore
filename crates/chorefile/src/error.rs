@@ -67,9 +67,13 @@ impl Location {
     }
 
     /// `path:line:col`, the form editors and terminals make clickable.
+    ///
+    /// The path is spelled with `/` on every platform, like every other path
+    /// `chore` prints — one rule, so a diagnostic looks the same wherever it
+    /// was produced.
     pub fn render(&self, source: &str) -> String {
         let (line, col) = self.line_col(source);
-        format!("{}:{line}:{col}", self.file.display())
+        format!("{}:{line}:{col}", crate::vars::display(&self.file))
     }
 }
 
@@ -95,14 +99,14 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Syntax { message, at } => {
-                write!(f, "{}: {message}", at.file.display())
+                write!(f, "{}: {message}", crate::vars::display(&at.file))
             }
             Self::Run { message } => write!(f, "{message}"),
             Self::NotFound { from } => write!(
                 f,
                 "no {} found in {} or any parent directory",
                 crate::FILE_NAME,
-                from.display()
+                crate::vars::display(from)
             ),
             Self::Io(e) => write!(f, "{e}"),
         }

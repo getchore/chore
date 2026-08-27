@@ -910,9 +910,12 @@ fn list_json_names_the_file_and_namespace_each_task_came_from() {
             line.contains(&format!("\"namespace\": {namespace}")),
             "{line}"
         );
+        // Reported with `/` on every platform, so compare on the tail rather
+        // than on this host's spelling of an absolute path.
+        let tail = suffix(file);
         assert!(
-            line.contains(&format!("\"file\": \"{}\"", file.display())),
-            "{line}"
+            line.contains(&format!("/{tail}\"")),
+            "{line}\nexpected the file field to end with /{tail}"
         );
     }
 }
@@ -1026,7 +1029,10 @@ fn check_reports_a_finding_inside_the_included_file() {
     let offset = source.find("curl").expect("curl in the source");
     let line = source[..offset].matches('\n').count() + 1;
     let col = offset - source[..offset].rfind('\n').map_or(0, |i| i + 1) + 1;
-    let expected = format!("{}:{line}:{col}", dir.path().join("tasks.chore").display());
+    let expected = format!(
+        "{}:{line}:{col}",
+        chorefile::vars::display(&dir.path().join("tasks.chore"))
+    );
     assert!(
         run.stdout.contains(&expected),
         "want {expected} in\n{}",
@@ -1045,17 +1051,10 @@ fn check_reports_a_missing_include_as_a_finding_rather_than_giving_up() {
     // there is nothing to run.
     let checked = chore(&dir, &["check"]);
     assert_eq!(checked.code, 1, "{}{}", checked.stdout, checked.stderr);
-    let at = format!(
-        "{}:1:1",
-        dir.path()
-            .canonicalize()
-            .expect("canonical")
-            .join("chorefile")
-            .display()
-    );
+    let at = format!("/{}:1:1", suffix(&dir.path().join("chorefile")));
     assert!(
         checked.stdout.contains(&at),
-        "want {at} in\n{}",
+        "want a location ending {at} in\n{}",
         checked.stdout
     );
     assert!(
@@ -1063,4 +1062,19 @@ fn check_reports_a_missing_include_as_a_finding_rather_than_giving_up() {
         "{}",
         checked.stdout
     );
+}
+
+/// The last two components of a path, `/`-joined: enough to identify a file
+/// in a per-test temp directory without asserting how this platform spells an
+/// absolute path. `canonicalize` is deliberately not used — on Windows it
+/// prepends a `\\?\\` verbatim prefix that `chore` never emits.
+fn suffix(path: &Path) -> String {
+    let mut parts: Vec<String> = path
+        .components()
+        .rev()
+        .take(2)
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.reverse();
+    parts.join("/")
 }

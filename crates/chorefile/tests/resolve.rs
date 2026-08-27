@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use chorefile::ast::{self, Chain, Cond, PartKind, Stmt, VarRef, Word};
 use chorefile::error::Error;
 use chorefile::resolve::{self, Merged};
+use chorefile::vars;
 
 // ---------------------------------------------------------------------------
 // harness — same shape as the e2e tests: a temp dir that removes itself
@@ -497,7 +498,7 @@ fn a_duplicate_task_in_a_flat_merge_is_an_error() {
     // Names the file the earlier definition came from...
     assert!(message.contains("libs.chore"), "{message}");
     // ...and points at the later one, which is in the top-level file.
-    assert!(message.starts_with(&format!("{}:", dir.path("chorefile").display())));
+    assert!(message.starts_with(&format!("{}:", vars::display(&dir.path("chorefile")))));
     assert!(message.contains("as <namespace>"), "{message}");
 }
 
@@ -531,7 +532,7 @@ fn a_within_file_duplicate_still_collides_across_files() {
     let message = error(&top);
     assert!(message.contains("duplicate task `build`"), "{message}");
     assert!(message.contains("`a.chore`"), "{message}");
-    assert!(message.starts_with(&format!("{}:", dir.path("b.chore").display())));
+    assert!(message.starts_with(&format!("{}:", vars::display(&dir.path("b.chore")))));
 }
 
 #[test]
@@ -556,7 +557,7 @@ fn two_flat_includes_that_collide_are_an_error() {
     assert!(message.contains("duplicate task `build`"), "{message}");
     assert!(message.contains("a.chore"), "{message}");
     // The later definition is the one in `b.chore`.
-    assert!(message.starts_with(&format!("{}:", dir.path("b.chore").display())));
+    assert!(message.starts_with(&format!("{}:", vars::display(&dir.path("b.chore")))));
 }
 
 #[test]
@@ -619,7 +620,7 @@ fn sources_key_matches_the_location_a_diagnostic_carries() {
     let text = std::fs::read_to_string(dir.path("libs.chore")).unwrap();
     let rendered = at.render(&text);
     assert!(
-        rendered.starts_with(&dir.path("libs.chore").display().to_string()),
+        rendered.starts_with(&vars::display(&dir.path("libs.chore"))),
         "{rendered}"
     );
     assert!(rendered.contains(":4:"), "{rendered}");
@@ -638,7 +639,7 @@ fn a_diagnostic_in_an_included_file_renders_through_sources() {
     let at = chorefile::error::Location::new(dir.path("libs.chore"), build.span);
     assert_eq!(
         merged.sources.render(&at),
-        format!("{}:1:1", dir.path("libs.chore").display())
+        format!("{}:1:1", vars::display(&dir.path("libs.chore")))
     );
 }
 
