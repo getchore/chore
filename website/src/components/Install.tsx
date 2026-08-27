@@ -3,6 +3,30 @@ import { css, cx } from 'styled-system/css'
 import { INSTALL, OS_LABEL, detectOs, type OsKey } from '../lib/detect'
 import { CheckIcon, CopyIcon } from './ui'
 
+const part = {
+  cmd: css({ color: 'fg.default', fontWeight: '600' }),
+  flag: css({ color: 'fg.faint' }),
+  url: css({ color: 'fg.accent' }),
+  pipe: css({ color: 'fg.faint' }),
+}
+
+/** The one-liner is the first thing anyone reads — colour it like code. */
+function highlightCommand(command: string) {
+  return command.split(' ').map((word, i) => {
+    const space = i === 0 ? '' : ' '
+    let tone = part.pipe
+    if (i === 0) tone = part.cmd
+    else if (word.startsWith('-')) tone = part.flag
+    else if (word.startsWith('http')) tone = part.url
+    return (
+      <span key={i} className={tone}>
+        {space}
+        {word}
+      </span>
+    )
+  })
+}
+
 const ORDER: OsKey[] = ['macos', 'linux', 'windows']
 
 function OsIcon({ os }: { os: OsKey }) {
@@ -126,7 +150,7 @@ export function Install() {
             '&::-webkit-scrollbar': { display: 'none' },
           })}
         >
-          {command}
+          {highlightCommand(command)}
         </code>
         <button
           type="button"

@@ -1,77 +1,84 @@
 import { css } from 'styled-system/css'
-import { Eyebrow, Heading, Lede, Section } from './ui'
+import { Eyebrow, Heading, Section } from './ui'
 
-const BUILTINS: [string, string][] = [
-  ['download <url> <dest>', 'http(s) and gh://owner/repo/tag/asset, with --retries, --timeout, --sha256'],
-  ['extract <archive> <dest>', 'zip, tar, .gz .xz .zst — with --member and --strip'],
-  ['archive <src> <dest>', 'format inferred from the extension'],
-  ['copy / move <src> <dest>', 'file or directory, recursive'],
-  ['remove <path...>', 'recursive, no error when missing'],
-  ['mkdir <path...>', '-p semantics'],
-  ['find <root> <name...>', 'every match, recursive, one per line'],
-  ['read / write <file>', 'contents trimmed; >> appends'],
-  ['sha256 <file>', 'hex digest on stdout'],
-  ['exists <path>', 'exit 0/1 — for use in if'],
-  ['which <name>', 'prints the path, or fails'],
-  ['env <NAME> [value]', 'get or set'],
+const BUILTINS = [
+  'download', 'extract', 'archive', 'copy', 'move', 'remove',
+  'mkdir', 'chmod', 'which', 'find', 'read', 'write',
+  'sha256', 'exists', 'echo', 'env', 'fail', 'sleep',
 ]
 
 const VARS: [string, string][] = [
   ['$OS', 'macos | linux | windows'],
   ['$ARCH', 'x86_64 | arm64'],
-  ['$ENV', 'gnu | msvc | ""'],
+  ['$ENV', 'gnu | msvc'],
   ['$PLATFORM', '$OS-$ARCH'],
   ['$EXE', '"" or ".exe"'],
-  ['$ROOT', 'dir of the top-level chorefile'],
+  ['$ROOT', 'chorefile dir'],
   ['$HOME', 'user home'],
-  ['$CWD', 'current directory'],
-  ['$TASK', 'name of the running task'],
+  ['$CWD', 'current dir'],
+  ['$TASK', 'running task'],
   ['$NOW', 'ISO timestamp'],
 ]
 
 export function Reference() {
   return (
     <Section id="reference">
-      <Eyebrow>reference</Eyebrow>
-      <Heading>Everything portable, already in the box.</Heading>
-      <Lede>
-        These resolve before <code className={css({ fontFamily: 'mono' })}>PATH</code>, so a chorefile that downloads,
-        verifies and unpacks a toolchain runs on a bare Windows container with nothing installed.
-      </Lede>
+      <div
+        className={css({
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'end',
+          justifyContent: 'space-between',
+          gap: '6',
+        })}
+      >
+        <div>
+          <Eyebrow>reference</Eyebrow>
+          <Heading>Everything portable, already in the box.</Heading>
+        </div>
+        <p className={css({ fontSize: '14.5px', color: 'fg.faint', maxW: '280px', lineHeight: '1.55' })}>
+          These resolve before <code className={css({ fontFamily: 'mono' })}>PATH</code>, so a chorefile runs on a
+          bare container with nothing installed.
+        </p>
+      </div>
 
       <div
         className={css({
-          mt: '14',
+          mt: '12',
           display: 'grid',
-          gridTemplateColumns: { base: '1fr', lg: '1.5fr 1fr' },
+          gridTemplateColumns: { base: '1fr', lg: '1.35fr 1fr' },
           gap: { base: '10', lg: '14' },
         })}
       >
         <div>
-          <h3 className={css({ fontSize: '13px', fontWeight: '600', color: 'fg.muted', mb: '5' })}>
-            Builtin commands
+          <h3 className={css({ fontSize: '12.5px', fontWeight: '600', color: 'fg.faint', mb: '5' })}>
+            18 builtin commands
           </h3>
-          <dl className={css({ display: 'grid', gap: '0' })}>
-            {BUILTINS.map(([sig, desc]) => (
-              <div
-                key={sig}
+          <div className={css({ display: 'flex', flexWrap: 'wrap', gap: '2' })}>
+            {BUILTINS.map((b) => (
+              <span
+                key={b}
                 className={css({
-                  display: 'grid',
-                  gridTemplateColumns: { base: '1fr', sm: '260px 1fr' },
-                  gap: { base: '1', sm: '6' },
-                  py: '3.5',
-                  borderBottom: '1px solid token(colors.border.default)',
+                  fontFamily: 'mono',
+                  fontSize: '13.5px',
+                  px: '3',
+                  py: '2',
+                  rounded: '9px',
+                  color: 'fg.accent',
+                  bg: 'accent.soft',
+                  border: '1px solid transparent',
+                  transition: 'border-color .15s',
+                  _hover: { borderColor: 'accent.ring' },
                 })}
               >
-                <dt className={css({ fontFamily: 'mono', fontSize: '12.5px', color: 'fg.accent' })}>{sig}</dt>
-                <dd className={css({ fontSize: '13.5px', color: 'fg.muted', lineHeight: '1.55' })}>{desc}</dd>
-              </div>
+                {b}
+              </span>
             ))}
-          </dl>
+          </div>
         </div>
 
         <div>
-          <h3 className={css({ fontSize: '13px', fontWeight: '600', color: 'fg.muted', mb: '5' })}>
+          <h3 className={css({ fontSize: '12.5px', fontWeight: '600', color: 'fg.faint', mb: '5' })}>
             Builtin variables
           </h3>
           <div
@@ -79,7 +86,8 @@ export function Reference() {
               bg: 'bg.inset',
               border: '1px solid token(colors.border.default)',
               rounded: '14px',
-              p: '5',
+              px: '5',
+              py: '2',
             })}
           >
             {VARS.map(([name, desc]) => (
@@ -93,7 +101,7 @@ export function Reference() {
                   fontFamily: 'mono',
                   fontSize: '12.5px',
                   borderBottom: '1px solid token(colors.border.default)',
-                  _last: { borderBottom: 'none', pb: '0' },
+                  _last: { borderBottom: 'none' },
                 })}
               >
                 <span className={css({ color: 'fg.accent' })}>{name}</span>
@@ -101,10 +109,6 @@ export function Reference() {
               </div>
             ))}
           </div>
-          <p className={css({ mt: '4', fontSize: '13px', color: 'fg.faint', lineHeight: '1.6' })}>
-            Read-only and always set. Paths are written with <code className={css({ fontFamily: 'mono' })}>/</code>{' '}
-            everywhere and converted on Windows.
-          </p>
         </div>
       </div>
     </Section>

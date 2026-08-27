@@ -2,8 +2,17 @@
 #
 #   irm https://getchore.github.io/chore/install.ps1 | iex
 #
+# To pin a version, iex cannot take arguments — run the script as a block:
+#
+#   & ([scriptblock]::Create((irm https://getchore.github.io/chore/install.ps1))) v0.15.0
+#
+# The optional argument is a release tag; a leading v is optional. It wins over
+# CHORE_VERSION, which still works.
+#
 # CHORE_VERSION      version to install, e.g. 0.1.0  (default: latest)
 # CHORE_INSTALL_DIR  where the binary lands          (default: ~\.local\bin)
+
+param([string]$Version)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # the progress bar makes downloads slower
@@ -18,8 +27,10 @@ $target = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchite
     default { throw "unsupported architecture: $_" }
 }
 
-$base = if ($env:CHORE_VERSION) {
-    "https://github.com/$repo/releases/download/v$($env:CHORE_VERSION -replace '^v','')"
+if (-not $Version) { $Version = $env:CHORE_VERSION }
+
+$base = if ($Version) {
+    "https://github.com/$repo/releases/download/v$($Version -replace '^v','')"
 } else {
     # Resolves server-side, so there is no API call and no JSON to parse.
     "https://github.com/$repo/releases/latest/download"
@@ -32,7 +43,10 @@ try {
     $zip = Join-Path $tmp $archive
     Write-Host "downloading $archive"
     try { Invoke-WebRequest "$base/$archive" -OutFile $zip -UseBasicParsing }
-    catch { throw "no release asset for $target" }
+    catch {
+        $at = if ($Version) { " at $($Version -replace '^v','')" } else { '' }
+        throw "no release asset for $target$at"
+    }
 
     # Best effort: a release without sidecars still installs, a mismatch does not.
     $want = $null

@@ -2,6 +2,10 @@
 # chore installer.
 #
 #   curl -fsSL https://getchore.github.io/chore/install.sh | sh
+#   curl -fsSL https://getchore.github.io/chore/install.sh | sh -s -- v0.15.0
+#
+# The optional argument is a release tag; a leading v is optional. It wins over
+# CHORE_VERSION, which still works.
 #
 # CHORE_VERSION      version to install, e.g. 0.1.0  (default: latest)
 # CHORE_INSTALL_DIR  where the binary lands          (default: ~/.local/bin)
@@ -9,8 +13,21 @@ set -eu
 
 REPO="getchore/chore"
 DIR="${CHORE_INSTALL_DIR:-$HOME/.local/bin}"
+VERSION="${CHORE_VERSION:-}"
 
 err() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# `curl ... | sh` passes nothing; `| sh -s -- v0.15.0` lands the tag in $1.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h | --help)
+            echo "usage: install.sh [version]    e.g. install.sh v0.15.0"
+            exit 0 ;;
+        -*) err "unknown option: $1" ;;
+        *) VERSION="$1" ;;
+    esac
+    shift
+done
 
 arch=$(uname -m)
 case "$arch" in
@@ -28,8 +45,8 @@ case "$(uname -s)" in
     *) err "unsupported OS: $(uname -s)" ;;
 esac
 
-if [ -n "${CHORE_VERSION:-}" ]; then
-    base="https://github.com/$REPO/releases/download/v${CHORE_VERSION#v}"
+if [ -n "$VERSION" ]; then
+    base="https://github.com/$REPO/releases/download/v${VERSION#v}"
 else
     # Resolves server-side, so there is no API call and no JSON to parse.
     base="https://github.com/$REPO/releases/latest/download"
@@ -40,7 +57,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 echo "downloading $archive"
-curl -fsSL "$base/$archive" -o "$tmp/$archive" || err "no release asset for $target"
+curl -fsSL "$base/$archive" -o "$tmp/$archive" ||
+    err "no release asset for $target${VERSION:+ at ${VERSION#v}}"
 
 # Best effort: a release without sidecars still installs, a mismatch does not.
 if curl -fsSL "$base/$archive.sha256" -o "$tmp/sum" 2>/dev/null; then

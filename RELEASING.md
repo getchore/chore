@@ -13,8 +13,13 @@ Six, one per platform anyone actually runs:
 | `chore-x86_64-pc-windows-msvc.zip`    | Windows, x86-64                   |
 | `chore-aarch64-pc-windows-msvc.zip`   | Windows, arm64                    |
 
-Each ships with a `.sha256` sidecar, and the release carries a combined
-`SHA256SUMS`.
+Each archive holds the binary plus `LICENSE` and `README.md`, ships with a
+`.sha256` sidecar, and the release carries a combined `SHA256SUMS`.
+
+`x86_64-pc-windows-gnu` is deliberately not on this list. CI's `cross` job
+builds it on every PR — it is the only target where `ring` and `zstd-sys`
+compile against mingw, so a linking break there is worth catching early — but
+it is not published as a release asset. Windows users get msvc.
 
 Linux is musl on both arches. The result is statically linked, so one asset
 per architecture covers every distro, glibc or not — which is the same
@@ -53,18 +58,31 @@ copies them into `dist/` — so they are served from the Pages site, not from a
 release asset. A change to either is live once the `website` workflow deploys
 the merge to `main`. CI shellchecks and parse-checks both on every PR.
 
+There is no staged or versioned copy: whatever is on `main` is what the next
+person to run the one-liner executes, which is why the CI check is not
+optional. Pinning the scripts themselves — serving `install.sh` from a tag
+rather than from the tip of `main` — is the obvious next step and is not done
+yet.
+
 Neither calls the GitHub API. `…/releases/latest/download/<asset>` resolves
 server-side, so there is no JSON to parse and no rate limit to hit.
 
 ```sh
 curl -fsSL https://getchore.github.io/chore/install.sh | sh
+
+# pin a version
+curl -fsSL https://getchore.github.io/chore/install.sh | sh -s -- v0.1.0
 ```
 
 ```powershell
 irm https://getchore.github.io/chore/install.ps1 | iex
+
+# pin a version (iex takes no arguments, so run it as a block)
+& ([scriptblock]::Create((irm https://getchore.github.io/chore/install.ps1))) v0.1.0
 ```
 
-Both honour `CHORE_VERSION` and `CHORE_INSTALL_DIR` (default `~/.local/bin`).
+Both take an optional release tag as their first argument, which wins over
+`CHORE_VERSION`; both also honour `CHORE_INSTALL_DIR` (default `~/.local/bin`).
 Checksum verification is best-effort on a missing sidecar and fatal on a
 mismatch. `install.ps1` sets the user PATH; `install.sh` only prints the line
 to add, rather than guessing which of your rc files is the right one.

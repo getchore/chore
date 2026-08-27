@@ -3,6 +3,7 @@ import { Features } from './components/Features'
 import { Hero } from './components/Hero'
 import { Nav } from './components/Nav'
 import { Reference } from './components/Reference'
+import { Replaces } from './components/Replaces'
 import { Showcase } from './components/Showcase'
 
 export function App() {
@@ -12,6 +13,7 @@ export function App() {
       <main>
         <Hero />
         <Features />
+        <Replaces />
         <Showcase />
         <Reference />
         <Cta />

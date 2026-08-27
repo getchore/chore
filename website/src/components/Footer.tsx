@@ -46,10 +46,10 @@ export function Cta() {
               maxW: '620px',
             })}
           >
-            Write the task once. Run it everywhere.
+            Stop writing the same task twice.
           </h2>
-          <p className={css({ mt: '5', fontSize: '16.5px', color: 'fg.muted', maxW: '480px', lineHeight: '1.6' })}>
-            One file in your repo, one binary on the machine. Nothing to install for anyone who clones it.
+          <p className={css({ mt: '5', fontSize: '16.5px', color: 'fg.muted', maxW: '440px', lineHeight: '1.55' })}>
+            One file in your repo. One binary on the machine.
           </p>
           <div className={css({ mt: '10', display: 'flex', justifyContent: 'center', w: 'full' })}>
             <Install />

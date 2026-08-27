@@ -5,6 +5,7 @@ import { GitHubIcon, container } from './ui'
 
 const LINKS = [
   ['Why', '#features'],
+  ['Compare', '#replaces'],
   ['Example', '#example'],
   ['Reference', '#reference'],
 ]

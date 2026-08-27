@@ -1,27 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import { css } from 'styled-system/css'
 
-type Line = { text: string; kind: 'prompt' | 'echo' | 'out' | 'ok' }
+type Line =
+  | { kind: 'cmd'; verb: string; rest: string }
+  | { kind: 'out'; text: string }
+  | { kind: 'ok'; text: string }
 
 const SCRIPT: Line[] = [
-  { text: 'chore build', kind: 'prompt' },
-  { text: '$ mkdir -p build', kind: 'echo' },
-  { text: '$ download gh://sona-lang/deps/v3/llvm-arm64.tar.zst vendor/llvm.tar.zst', kind: 'echo' },
-  { text: '  vendor/llvm.tar.zst  18.4 MB  sha256 ok', kind: 'out' },
-  { text: '$ extract vendor/llvm.tar.zst vendor/llvm --strip 1', kind: 'echo' },
-  { text: '$ cmake -B build -DCMAKE_BUILD_TYPE=Release', kind: 'echo' },
-  { text: '  -- Configuring done', kind: 'out' },
-  { text: '$ cmake --build build --parallel', kind: 'echo' },
-  { text: '  [100%] Built target sona', kind: 'out' },
-  { text: 'build ok  ·  macos-arm64  ·  6.2s', kind: 'ok' },
+  { kind: 'cmd', verb: 'download', rest: '$LLVM vendor/llvm.tar.zst' },
+  { kind: 'out', text: '18.4 MB · sha256 ok' },
+  { kind: 'cmd', verb: 'extract', rest: 'vendor/llvm.tar.zst vendor/llvm' },
+  { kind: 'cmd', verb: 'cmake', rest: '--build build --parallel' },
+  { kind: 'out', text: '[100%] Built target sona' },
+  { kind: 'ok', text: 'build ok · macos-arm64 · 6.2s' },
 ]
-
-const COLOR = {
-  prompt: css({ color: 'fg.default', fontWeight: '500' }),
-  echo: css({ color: { base: '#0369a1', _dark: '#7dd3fc' } }),
-  out: css({ color: 'fg.faint' }),
-  ok: css({ color: { base: '#15803d', _dark: '#86efac' }, fontWeight: '500' }),
-}
 
 export function Terminal() {
   const [shown, setShown] = useState(0)
@@ -29,24 +21,23 @@ export function Terminal() {
   const timers = useRef<number[]>([])
 
   useEffect(() => {
-    const cmd = SCRIPT[0].text
+    const cmd = 'chore build'
     let i = 0
     const type = window.setInterval(() => {
-      i += 1
-      setTyped(cmd.slice(0, i))
+      setTyped(cmd.slice(0, ++i))
       if (i >= cmd.length) {
         window.clearInterval(type)
-        SCRIPT.slice(1).forEach((_, n) => {
-          timers.current.push(window.setTimeout(() => setShown(n + 1), 380 + n * 330))
+        SCRIPT.forEach((_, n) => {
+          timers.current.push(window.setTimeout(() => setShown(n + 1), 320 + n * 300))
         })
       }
-    }, 55)
+    }, 60)
     timers.current.push(type)
     const t = timers.current
     return () => t.forEach(window.clearTimeout)
   }, [])
 
-  const done = shown >= SCRIPT.length - 1
+  const done = shown >= SCRIPT.length
 
   return (
     <div
@@ -67,7 +58,7 @@ export function Terminal() {
           alignItems: 'center',
           gap: '2',
           px: '4',
-          h: '40px',
+          h: '38px',
           borderBottom: '1px solid token(colors.border.default)',
           bg: 'bg.subtle',
         })}
@@ -75,29 +66,24 @@ export function Terminal() {
         {['#ff5f57', '#febc2e', '#28c840'].map((c) => (
           <span key={c} className={css({ w: '10px', h: '10px', rounded: 'full' })} style={{ background: c }} />
         ))}
-        <span
-          className={css({
-            ml: 'auto',
-            fontFamily: 'mono',
-            fontSize: '11px',
-            color: 'fg.faint',
-          })}
-        >
-          ~/sona
-        </span>
+        <span className={css({ ml: 'auto', fontFamily: 'mono', fontSize: '11px', color: 'fg.faint' })}>~/sona</span>
       </div>
 
       <div
         className={css({
           fontFamily: 'mono',
-          fontSize: { base: '11.5px', md: '12.5px' },
-          lineHeight: '1.95',
-          p: '5',
-          minH: '340px',
+          fontSize: { base: '12px', md: '13.5px' },
+          lineHeight: '2.05',
+          px: { base: '5', md: '7' },
+          py: '6',
+          minH: '270px',
+          whiteSpace: 'nowrap',
+          overflowX: 'auto',
+          scrollbarWidth: 'none',
         })}
       >
-        <div className={COLOR.prompt}>
-          <span className={css({ color: 'fg.accent', mr: '2' })}>❯</span>
+        <div className={css({ fontWeight: '500' })}>
+          <span className={css({ color: 'accent.solid', mr: '2.5' })}>❯</span>
           {typed}
           {!done && (
             <span
@@ -113,13 +99,22 @@ export function Terminal() {
             />
           )}
         </div>
-        {SCRIPT.slice(1, shown + 1).map((l, i) => (
-          <div
-            key={i}
-            className={COLOR[l.kind]}
-            style={{ animation: 'fadeUp .28s ease-out both', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
-          >
-            {l.kind === 'ok' ? `✓ ${l.text}` : l.text}
+
+        {SCRIPT.slice(0, shown).map((l, i) => (
+          <div key={i} style={{ animation: 'fadeUp .26s ease-out both' }}>
+            {l.kind === 'cmd' && (
+              <>
+                <span className={css({ color: 'fg.faint', mr: '2.5' })}>$</span>
+                <span className={css({ color: 'fg.accent' })}>{l.verb}</span>
+                <span className={css({ color: 'fg.muted' })}> {l.rest}</span>
+              </>
+            )}
+            {l.kind === 'out' && <span className={css({ color: 'fg.faint', pl: '6' })}>{l.text}</span>}
+            {l.kind === 'ok' && (
+              <span className={css({ color: { base: '#15803d', _dark: '#4ade80' }, fontWeight: '500' })}>
+                ✓ {l.text}
+              </span>
+            )}
           </div>
         ))}
       </div>
