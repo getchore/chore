@@ -133,7 +133,7 @@ export function Dogfood() {
                   },
                 })}
               >
-                {l.path}{l.title}
+                {l.path}
               </a>
             ))}
           </div>
