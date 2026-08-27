@@ -85,11 +85,6 @@ mechanics are in [docs/RELEASING.md](docs/RELEASING.md).
 `chore` builds itself with its own `chorefile`: `chore list` shows the tasks,
 and `chore ci` is the gate CI runs.
 
-## Status
-
-v1. `x86_64-pc-windows-gnu` is built on every PR in CI but is not shipped as a
-release artifact; Windows users get msvc.
-
 ## License
 
 MIT
