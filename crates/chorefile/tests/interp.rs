@@ -1935,15 +1935,30 @@ fn an_unknown_namespaced_task_is_reported_by_full_name() {
 
 #[test]
 fn a_namespaced_task_recursing_still_hits_the_depth_guard() {
-    // The guard counts frames, so the shape of the name cannot slip past it.
-    let f = file(vec![task(
-        "libs::build",
-        &[],
-        vec![assign("n", lit("x")), run(cmd("libs::build", vec![]))],
-    )]);
-    // --force, or run-once would stop the second call before the guard could.
-    let ran = exec(&f, "libs::build", &[], Mode::Run, Repeat::Always, &root());
-    let message = ran.err_text();
+    // On a stack the size `chore` itself uses. The guard allows 128 nested
+    // calls, which does not fit the stack a test harness thread gets on
+    // Windows -- the process overflowed before the guard could report. The
+    // binary spawns its work on a 32 MB stack for exactly this reason, so a
+    // test of the guard has to stand where the binary stands.
+    let handle = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            // The guard counts frames, so the shape of the name cannot slip
+            // past it.
+            let f = file(vec![task(
+                "libs::build",
+                &[],
+                vec![assign("n", lit("x")), run(cmd("libs::build", vec![]))],
+            )]);
+            // --force, or run-once would stop the second call before the
+            // guard could.
+            let ran = exec(&f, "libs::build", &[], Mode::Run, Repeat::Always, &root());
+            ran.err_text()
+        })
+        .expect("spawn");
+    let message = handle
+        .join()
+        .expect("the guard should report, not overflow");
     assert!(message.contains("libs::build"), "{message}");
     assert!(message.contains("recursed"), "{message}");
 }

@@ -35,7 +35,30 @@ usage: chore <task> [args...] [--dry] [--force]
   --dry      echo commands without side effects
   --force    disable run-once";
 
+/// The interpreter evaluates a chorefile by recursing, and its depth guard
+/// allows 128 nested calls. That fits the 8 MB main thread Linux and macOS
+/// give a process, and does not fit the 1 MB Windows gives a thread — so on
+/// Windows the process died where the other platforms reported a clean
+/// "recursed more than 128 levels deep". `chore` promises identical behavior
+/// on every platform, so the work runs on a stack big enough to keep that
+/// promise everywhere rather than on whatever the host happened to hand us.
+const STACK: usize = 32 * 1024 * 1024;
+
 fn main() -> ExitCode {
+    match std::thread::Builder::new()
+        .stack_size(STACK)
+        .name("chore".into())
+        .spawn(cli)
+    {
+        // A thread that panicked has already printed why.
+        Ok(handle) => handle.join().unwrap_or(ExitCode::from(FAILED)),
+        // If the OS will not give us a thread, run on the one we have: a
+        // deep chorefile may still overflow, but a shallow one works.
+        Err(_) => cli(),
+    }
+}
+
+fn cli() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let stdout = io::stdout();
     let mut out = stdout.lock();
