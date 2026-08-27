@@ -101,11 +101,34 @@ fn assign(name: &str, value: Word) -> Stmt {
 }
 
 fn task(name: &str, params: &[&str], body: Block) -> Task {
+    with_params(name, params.iter().map(|p| required(p)).collect(), body)
+}
+
+/// A task whose parameters carry defaults.
+fn with_params(name: &str, params: Vec<Param>, body: Block) -> Task {
     Task {
         name: name.into(),
-        params: params.iter().map(|p| p.to_string()).collect(),
+        params,
         doc: None,
         body,
+        span: sp(),
+    }
+}
+
+/// A parameter the caller must supply.
+fn required(name: &str) -> Param {
+    Param {
+        name: name.into(),
+        default: None,
+        span: sp(),
+    }
+}
+
+/// A parameter with a default, evaluated at call time when it is left off.
+fn optional(name: &str, default: Word) -> Param {
+    Param {
+        name: name.into(),
+        default: Some(default),
         span: sp(),
     }
 }
@@ -1448,6 +1471,253 @@ fn calling_a_task_with_too_few_arguments_is_an_error() {
         message.contains("build") && message.contains("profile"),
         "{message}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Optional parameters
+// ---------------------------------------------------------------------------
+
+/// `$n`, the way a task body reaches a parameter.
+fn pos(n: usize) -> WordPart {
+    part(PartKind::Var(VarRef::Positional(n)))
+}
+
+/// A word that captures a chain, for a default with a cost.
+fn capture(chain: Chain) -> Word {
+    unquoted(vec![part(PartKind::Capture(Box::new(chain)))])
+}
+
+#[test]
+fn a_default_binds_the_parameter_the_caller_left_off() {
+    let f = file(vec![with_params(
+        "t",
+        vec![optional("env", lit("staging"))],
+        vec![run(cmd("say", vec![unquoted(vec![pos(1)])]))],
+    )]);
+    assert_eq!(go(&f, "t", &[]).printed(), ["staging"]);
+}
+
+#[test]
+fn an_explicit_argument_wins_over_the_default() {
+    let f = file(vec![with_params(
+        "t",
+        vec![optional("env", lit("staging"))],
+        vec![run(cmd("say", vec![unquoted(vec![pos(1)])]))],
+    )]);
+    assert_eq!(go(&f, "t", &["prod"]).printed(), ["prod"]);
+}
+
+#[test]
+fn a_default_reads_the_callees_scope_not_the_callers() {
+    // The caller has a local `TRIPLE` of its own. A default is evaluated in
+    // the frame it is filling, so the callee's default sees the global.
+    let mut f = file(vec![
+        task(
+            "caller",
+            &[],
+            vec![assign("TRIPLE", lit("the-callers")), run(cmd("t", vec![]))],
+        ),
+        with_params(
+            "t",
+            vec![optional("target", unquoted(vec![var("TRIPLE")]))],
+            vec![run(cmd("say", vec![unquoted(vec![pos(1)])]))],
+        ),
+    ]);
+    f.globals.push(Assign {
+        name: "TRIPLE".into(),
+        value: lit("aarch64-apple-darwin"),
+        span: sp(),
+    });
+    assert_eq!(go(&f, "caller", &[]).printed(), ["aarch64-apple-darwin"]);
+}
+
+#[test]
+fn a_default_sees_the_parameters_declared_before_it() {
+    // Binding is left to right, so `$1` is already there when `b`'s default
+    // is evaluated.
+    let f = file(vec![with_params(
+        "t",
+        vec![required("a"), optional("b", unquoted(vec![pos(1)]))],
+        vec![run(cmd("say", vec![unquoted(vec![pos(2)])]))],
+    )]);
+    assert_eq!(go(&f, "t", &["one"]).printed(), ["one"]);
+}
+
+#[test]
+fn a_default_runs_only_when_it_is_used() {
+    // The whole point of evaluating at call time: `url=$(read .env)` must not
+    // read anything when the caller supplied a url. The default records that
+    // it ran, and prints a value, so both halves are observable.
+    let probe = || {
+        capture(Chain::And(
+            Box::new(cmd("hit", vec![lit("default")])),
+            Box::new(cmd("say", vec![lit("fallback")])),
+        ))
+    };
+    let f = file(vec![with_params(
+        "t",
+        vec![optional("url", probe())],
+        vec![run(cmd("say", vec![unquoted(vec![pos(1)])]))],
+    )]);
+
+    let bare = go(&f, "t", &[]);
+    assert_eq!(bare.printed(), ["fallback"]);
+    assert_eq!(trace(), ["default"]);
+
+    let supplied = go(&f, "t", &["https://example.invalid"]);
+    assert_eq!(supplied.printed(), ["https://example.invalid"]);
+    assert!(trace().is_empty(), "the default ran anyway: {:?}", trace());
+}
+
+#[test]
+fn count_and_all_reflect_the_bound_arguments() {
+    // A `$1` that exists while `$#` says zero would be incoherent, so the
+    // filled-in defaults are part of both.
+    let f = file(vec![with_params(
+        "t",
+        vec![optional("a", lit("x")), optional("b", lit("y"))],
+        vec![
+            run(cmd(
+                "say",
+                vec![unquoted(vec![part(PartKind::Var(VarRef::Count))])],
+            )),
+            run(cmd(
+                "count",
+                vec![unquoted(vec![part(PartKind::Var(VarRef::All))])],
+            )),
+            run(cmd(
+                "say",
+                vec![unquoted(vec![part(PartKind::Var(VarRef::All))])],
+            )),
+        ],
+    )]);
+    assert_eq!(go(&f, "t", &[]).printed(), ["2", "2", "x y"]);
+    assert_eq!(go(&f, "t", &["a"]).printed(), ["2", "2", "a y"]);
+}
+
+#[test]
+fn extra_arguments_past_the_last_parameter_are_still_allowed() {
+    let f = file(vec![with_params(
+        "t",
+        vec![optional("a", lit("x"))],
+        vec![run(cmd(
+            "count",
+            vec![unquoted(vec![part(PartKind::Var(VarRef::All))])],
+        ))],
+    )]);
+    assert_eq!(go(&f, "t", &["one", "two", "three"]).printed(), ["3"]);
+}
+
+#[test]
+fn a_default_that_expands_to_two_words_still_fills_one_parameter() {
+    // A default is a value, like the right-hand side of an assignment: it
+    // fills its own slot and cannot spill into the next parameter's.
+    let mut f = file(vec![with_params(
+        "t",
+        vec![optional("flags", unquoted(vec![var("both")]))],
+        vec![
+            run(cmd("count", vec![unquoted(vec![pos(1)])])),
+            run(cmd(
+                "say",
+                vec![unquoted(vec![part(PartKind::Var(VarRef::Count))])],
+            )),
+        ],
+    )]);
+    f.globals.push(Assign {
+        name: "both".into(),
+        value: lit("-a -b"),
+        span: sp(),
+    });
+    // `count $1` splits at *that* call site — the word there is an argument —
+    // but `$#` shows the two words went into one parameter.
+    assert_eq!(go(&f, "t", &[]).printed(), ["2", "1"]);
+}
+
+#[test]
+fn run_once_keys_on_the_bound_arguments_not_the_written_ones() {
+    // `t` and `t staging` name the same work when `staging` is the default,
+    // so the body runs once between them.
+    let f = file(vec![
+        task(
+            "caller",
+            &[],
+            vec![
+                run(cmd("t", vec![])),
+                run(cmd("t", vec![lit("staging")])),
+                run(cmd("t", vec![lit("prod")])),
+            ],
+        ),
+        with_params(
+            "t",
+            vec![optional("env", lit("staging"))],
+            vec![run(cmd("hit", vec![unquoted(vec![pos(1)])]))],
+        ),
+    ]);
+    go(&f, "caller", &[]);
+    assert_eq!(trace(), ["staging", "prod"]);
+}
+
+#[test]
+fn force_still_runs_a_defaulted_task_every_time() {
+    let f = file(vec![
+        task(
+            "caller",
+            &[],
+            vec![run(cmd("t", vec![])), run(cmd("t", vec![lit("staging")]))],
+        ),
+        with_params(
+            "t",
+            vec![optional("env", lit("staging"))],
+            vec![run(cmd("hit", vec![unquoted(vec![pos(1)])]))],
+        ),
+    ]);
+    exec(&f, "caller", &[], Mode::Run, Repeat::Always, &root());
+    assert_eq!(trace(), ["staging", "staging"]);
+}
+
+#[test]
+fn a_missing_required_argument_is_named_and_the_optional_one_is_not() {
+    let f = file(vec![
+        task("t", &[], vec![run(cmd("deploy", vec![]))]),
+        with_params(
+            "deploy",
+            vec![required("url"), optional("dest", lit("build"))],
+            vec![],
+        ),
+    ]);
+    let message = go(&f, "t", &[]).err_text();
+    assert!(
+        message.contains("missing required argument(s) `url`")
+            && message.contains("usage: deploy <url> [dest=build]"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_task_with_only_optional_parameters_may_be_called_bare() {
+    let f = file(vec![
+        task("t", &[], vec![run(cmd("build", vec![]))]),
+        with_params(
+            "build",
+            vec![optional("profile", lit("debug"))],
+            vec![run(cmd("say", vec![unquoted(vec![pos(1)])]))],
+        ),
+    ]);
+    assert_eq!(go(&f, "t", &[]).printed(), ["debug"]);
+}
+
+#[test]
+fn a_default_that_fails_fails_the_call() {
+    let f = file(vec![with_params(
+        "t",
+        vec![optional(
+            "x",
+            capture(cmd("boom", vec![lit("no such thing")])),
+        )],
+        vec![run(cmd("say", vec![unquoted(vec![pos(1)])]))],
+    )]);
+    let message = go(&f, "t", &[]).err_text();
+    assert!(message.contains("no such thing"), "{message}");
 }
 
 #[test]

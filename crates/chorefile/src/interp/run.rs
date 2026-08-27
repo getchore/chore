@@ -13,12 +13,12 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::rc::Rc;
 
-use crate::ast::{Chain, Command, Redirect, RedirectKind, Word};
+use crate::ast::{Chain, Command, Redirect, RedirectKind, Task, Word};
 use crate::error::{Error, Result};
 use crate::exec::{Builtin, Ctx, Output};
 use crate::{builtins, vars};
 
-use super::{Called, Dest, Flags, Flow, Frame, Interpreter, MAX_DEPTH, Mode, Repeat};
+use super::{Call, Called, Dest, Flags, Flow, Frame, Interpreter, MAX_DEPTH, Mode, Repeat};
 
 impl Interpreter<'_> {
     pub(super) fn chain(
@@ -422,10 +422,10 @@ impl Interpreter<'_> {
                 written = write_file(&path, &bytes, false);
             }
         }
-        let called = called?;
+        let call = called?;
         written?;
 
-        let mut out = match called {
+        let mut out = match call.called {
             Called::Done(out) => out,
             Called::Exited(code) => {
                 self.pending_exit = Some(code);
@@ -443,8 +443,10 @@ impl Interpreter<'_> {
                 out.stdout = printed;
             }
             // Remembered before a `>` clears the bytes: the value existed,
-            // and the next caller may be a `$(...)` that wants it.
-            self.remember(name, args, &out.stdout);
+            // and the next caller may be a `$(...)` that wants it. Keyed on
+            // the arguments the task ran with — defaults filled in — because
+            // that is the key `call_task` will look it up under.
+            self.remember(name, &call.args, &out.stdout);
             if let Dest::File { path, append } = dest {
                 if self.mode == Mode::Run {
                     write_file(&path, &out.stdout, append)?;
@@ -471,24 +473,71 @@ impl Interpreter<'_> {
         name: &str,
         args: &[String],
         wants_value: bool,
-    ) -> Result<Called> {
+    ) -> Result<Call> {
         let task = self.task(name).ok_or_else(|| Error::Run {
             message: format!("unknown task `{name}`"),
         })?;
-        if args.len() < task.params.len() {
+        // A parameter with a default is optional, so the arity a call must
+        // meet is not the number of parameters but the number of *required*
+        // ones. Anything past the last declared parameter is still accepted
+        // and reaches the body through `$@`.
+        let missing: Vec<&str> = task
+            .params
+            .iter()
+            .skip(args.len())
+            .filter(|p| p.required())
+            .map(|p| p.name.as_str())
+            .collect();
+        if !missing.is_empty() {
             return Err(Error::Run {
-                message: format!(
-                    "task `{name}` takes {} argument(s) ({}), got {}",
-                    task.params.len(),
-                    task.params.join(", "),
-                    args.len()
-                ),
+                message: self.arity_error(name, task, &missing),
             });
         }
 
+        if self.frames.len() > MAX_DEPTH {
+            return Err(Error::Run {
+                message: format!("task `{name}` recursed more than {MAX_DEPTH} levels deep"),
+            });
+        }
+
+        // The frame goes up before the defaults are evaluated, because that
+        // is where a default is meant to be evaluated: in the callee's scope,
+        // at the moment of the call. `$TRIPLE` in a default is the callee's
+        // `$TRIPLE`, `$(...)` runs in the callee's directory, and the caller's
+        // locals are not in scope — a default belongs to the task that
+        // declared it, not to whoever happened to call it.
+        self.frames.push(Frame {
+            task: name.to_string(),
+            args: args.to_vec(),
+            // The callee starts where the caller stands, and its own `cd`
+            // dies with the frame.
+            cwd: self.cwd().to_path_buf(),
+            vars: HashMap::new(),
+        });
+        let bound = match self.bind_defaults(task, args.len()) {
+            Ok(()) => self.frame().args.clone(),
+            // The frame must not outlive the failure: a default that could
+            // not be evaluated leaves no half-bound call behind.
+            Err(e) => {
+                self.frames.pop();
+                return Err(e);
+            }
+        };
+
         // Keyed on name *and* arguments: a parameterised task called with
         // different arguments has different work to do.
-        let key = (name.to_string(), args.to_vec());
+        //
+        // The arguments are the bound ones. `deploy` and `deploy staging`,
+        // where `staging` is the default, ask for exactly the same work, and
+        // keying them apart would run the body — and its effects — twice for
+        // one job. The price is that a repeat call evaluates the defaults it
+        // is about to discard, so a `$( )` default is paid for once per call
+        // rather than once per run; that is a cost, where running the body
+        // twice would be a wrong answer.
+        let key = (name.to_string(), bound.clone());
+        // Skipping the call still has to unwind the frame that was pushed
+        // to bind the defaults.
+        let mut skipped = None;
         if self.repeat == Repeat::Once {
             match self.ran.get(&key) {
                 // Run-once exists to keep a task's *effects* from happening
@@ -498,13 +547,13 @@ impl Interpreter<'_> {
                 // an empty, successful output — is what used to blank
                 // `platform=$(platform-id)` on its second use, silently.
                 Some(Some(recorded)) if wants_value => {
-                    return Ok(Called::Done(Output {
+                    skipped = Some(Called::Done(Output {
                         stdout: recorded.clone(),
                         ..Output::ok()
                     }));
                 }
                 // The work is done and nobody wants a value: skip it.
-                Some(_) if !wants_value => return Ok(Called::Done(Output::ok())),
+                Some(_) if !wants_value => skipped = Some(Called::Done(Output::ok())),
                 // Ran, but streamed to the terminal, so there is no value to
                 // replay. Running it again is the only honest way to answer,
                 // and it beats handing back an empty string that would be
@@ -516,35 +565,92 @@ impl Interpreter<'_> {
                 }
             }
         }
-
-        if self.frames.len() > MAX_DEPTH {
-            return Err(Error::Run {
-                message: format!("task `{name}` recursed more than {MAX_DEPTH} levels deep"),
+        if let Some(called) = skipped {
+            self.frames.pop();
+            return Ok(Call {
+                called,
+                args: bound,
             });
         }
 
-        self.frames.push(Frame {
-            task: name.to_string(),
-            args: args.to_vec(),
-            // The callee starts where the caller stands, and its own `cd`
-            // dies with the frame.
-            cwd: self.cwd().to_path_buf(),
-            vars: HashMap::new(),
-        });
         let flow = self.block(&task.body);
         self.frames.pop();
 
-        match flow? {
-            Flow::Normal => Ok(Called::Done(Output::ok())),
+        let called = match flow? {
+            Flow::Normal => Called::Done(Output::ok()),
             // `return` stops here, at the frame that raised it: the call is
             // over, the caller is not. The code is the task's status, so a
             // `return 1` reads to the caller exactly like a command that
             // exited 1 — `&&` skips, `||` takes over, `try` swallows it, and
             // outside those the caller stops fail-fast. `exit` is the other
             // half of this match precisely because it does *not* stop here.
-            Flow::Return(code) => Ok(Called::Done(Output::failed(code))),
-            Flow::Exit(code) => Ok(Called::Exited(code)),
+            Flow::Return(code) => Called::Done(Output::failed(code)),
+            Flow::Exit(code) => Called::Exited(code),
+        };
+        Ok(Call {
+            called,
+            args: bound,
+        })
+    }
+
+    /// Fill in the parameters the caller left off, in declaration order.
+    ///
+    /// Two rules meet here, and both are deliberate.
+    ///
+    /// A default is evaluated **only when it is used**: the loop starts at the
+    /// first parameter the caller did not supply, so `task fetch url=$(read
+    /// .env)` called with an explicit url never reads the file. A default that
+    /// costs something — a capture, a network probe — is then a fallback and
+    /// not a toll every call pays.
+    ///
+    /// A default is evaluated **left to right, into the frame it is filling**,
+    /// so an earlier parameter is already bound and visible to a later one's
+    /// default: `task t a b=$1` binds `b` to `a`. Parameters live in the frame
+    /// as `$1`, `$2`, ..., and by the time the default for `$2` is evaluated,
+    /// `$1` is there — there is no order in which the reverse could work, and
+    /// forbidding it would only forbid the useful direction.
+    ///
+    /// The value is expanded to exactly one string, the way an assignment's
+    /// right-hand side is. A default fills one parameter slot; letting a
+    /// default that expands to two words spill into the next slot would make
+    /// `$2` mean something different depending on what `$1` happened to
+    /// contain. A caller's argument still splits at the call site, because
+    /// there the word is an argument and splitting is what argument words do.
+    fn bind_defaults(&mut self, task: &Task, given: usize) -> Result<()> {
+        for param in task.params.iter().skip(given) {
+            // The arity check above rejected any required parameter this loop
+            // would reach, so every one of these has a default.
+            let Some(default) = &param.default else {
+                continue;
+            };
+            let value = self.expand_to_string(default)?;
+            self.frames.last_mut().unwrap().args.push(value);
         }
+        Ok(())
+    }
+
+    /// The message for a call that left a required argument off.
+    ///
+    /// A task with an optional parameter has no single number of arguments it
+    /// "takes", so the message names what is missing and shows the shape of a
+    /// complete call — `<required>` and `[optional=default]` — rather than
+    /// asking the caller to work the count out.
+    fn arity_error(&self, name: &str, task: &Task, missing: &[&str]) -> String {
+        let missing = missing
+            .iter()
+            .map(|m| format!("`{m}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let usage = task
+            .params
+            .iter()
+            .map(|p| match &p.default {
+                Some(d) => format!("[{}={}]", p.name, self.preview(d)),
+                None => format!("<{}>", p.name),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("task `{name}` is missing required argument(s) {missing} (usage: {name} {usage})")
     }
 }
 

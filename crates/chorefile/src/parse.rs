@@ -8,8 +8,8 @@
 use std::path::Path;
 
 use crate::ast::{
-    Assign, Block, Chain, Command, CompareOp, Cond, File, For, If, Include, PartKind, Redirect,
-    RedirectKind, Stmt, Task, VarRef, Word, WordPart,
+    Assign, Block, Chain, Command, CompareOp, Cond, File, For, If, Include, Param, PartKind,
+    Redirect, RedirectKind, Stmt, Task, VarRef, Word, WordPart,
 };
 use crate::error::{Error, Location, Result, Span};
 use crate::lex::{self, Spanned, Token};
@@ -236,14 +236,7 @@ impl<'a> Parser<'a> {
                 );
             }
         };
-        let mut params = Vec::new();
-        while let Token::Word { text, quoted } = self.kind().clone() {
-            if quoted || !lex::is_ident(&text) {
-                return self.err(format!("task parameter `{text}` must be a name"));
-            }
-            params.push(text);
-            self.bump();
-        }
+        let params = self.params()?;
         let (body, end) = self.block()?;
         Ok(Task {
             name,
@@ -252,6 +245,74 @@ impl<'a> Parser<'a> {
             body,
             span: Span::new(start, end),
         })
+    }
+
+    /// The parameter list of a task header: names, each optionally followed by
+    /// `=` and a default word.
+    ///
+    /// Required parameters must come before optional ones. A required
+    /// parameter after an optional one is unreachable — the caller's arguments
+    /// are positional, so supplying the required one means supplying the
+    /// optional one too, and the default could never apply. Rejecting it here
+    /// turns a promise no call can honour into one syntax error, rather than a
+    /// confusing arity complaint at every call site.
+    ///
+    /// A default is left as a [`Word`]: quoting, `$name` and `$( )` all work,
+    /// and the interpreter evaluates it at call time, in the called task's
+    /// scope, only when the caller left the parameter out.
+    fn params(&mut self) -> Result<Vec<Param>> {
+        let mut params: Vec<Param> = Vec::new();
+        while let Token::Word { text, quoted } = self.kind().clone() {
+            if quoted || !lex::is_ident(&text) {
+                return self.err(format!("task parameter `{text}` must be a name"));
+            }
+            let name_span = self.bump().span;
+            let default = match self.kind() {
+                Token::Assign => {
+                    let eq = self.bump().span;
+                    Some(self.default(eq)?)
+                }
+                _ => None,
+            };
+            let end = default.as_ref().map_or(name_span.end, |w| w.span.end);
+            let param = Param {
+                name: text,
+                default,
+                span: Span::new(name_span.start, end),
+            };
+            if param.required()
+                && let Some(optional) = params.iter().find(|p| !p.required())
+            {
+                return self.err_at(
+                    format!(
+                        "required parameter `{}` cannot follow optional parameter `{}`; \
+                         arguments are positional, so anything after an optional parameter \
+                         can only be reached by supplying that one too — \
+                         give `{}` a default, or declare it before `{}`",
+                        param.name, optional.name, param.name, optional.name
+                    ),
+                    param.span,
+                );
+            }
+            params.push(param);
+        }
+        Ok(params)
+    }
+
+    /// The default after a parameter's `=`, given the span of that `=`.
+    ///
+    /// `env=` with nothing after it is the empty string, exactly as the
+    /// assignment `env=` is: one spelling of `name=`, one meaning. It still
+    /// makes the parameter optional, and `env=""` says the same thing louder.
+    fn default(&mut self, eq: Span) -> Result<Word> {
+        match self.kind() {
+            Token::Word { .. } => self.word("a default value after `=`"),
+            _ => Ok(Word {
+                parts: Vec::new(),
+                quoted: true,
+                span: Span::new(eq.end, eq.end),
+            }),
+        }
     }
 
     // --- statements -----------------------------------------------------

@@ -147,6 +147,17 @@ fn render_word(word: &Word) -> String {
     }
 }
 
+/// A task's parameters as written: `who`, or `env=staging`.
+fn render_params(task: &Task) -> Vec<String> {
+    task.params
+        .iter()
+        .map(|p| match &p.default {
+            Some(d) => format!("{}={}", p.name, render_word(d)),
+            None => p.name.clone(),
+        })
+        .collect()
+}
+
 // --- the sona chorefile -------------------------------------------------
 
 const SONA: &str = r#"ggml=$(read .ggml-version)
@@ -347,8 +358,94 @@ fn return_parses_inside_a_loop_and_a_nested_if() {
 #[test]
 fn task_parameters_and_positionals() {
     let f = file("task greet who when {\n echo $1 $2 $@ $#\n}");
-    assert_eq!(f.tasks[0].params, ["who", "when"]);
+    assert_eq!(render_params(&f.tasks[0]), ["who", "when"]);
+    assert!(f.tasks[0].params.iter().all(Param::required));
     assert_eq!(render_block(&f.tasks[0].body), "{ echo $1 $2 $@ $# }");
+}
+
+#[test]
+fn a_task_without_parameters_declares_none() {
+    let f = file("task build {\n cargo build\n}");
+    assert!(f.tasks[0].params.is_empty());
+}
+
+#[test]
+fn a_default_makes_a_parameter_optional() {
+    let f = file("task deploy env=staging {\n echo $1\n}");
+    assert_eq!(render_params(&f.tasks[0]), ["env=staging"]);
+    assert!(!f.tasks[0].params[0].required());
+}
+
+#[test]
+fn required_parameters_may_be_followed_by_optional_ones() {
+    let f = file("task fetch url dest=build {\n echo $1 $2\n}");
+    assert_eq!(render_params(&f.tasks[0]), ["url", "dest=build"]);
+    let required: Vec<bool> = f.tasks[0].params.iter().map(Param::required).collect();
+    assert_eq!(required, [true, false]);
+}
+
+#[test]
+fn a_default_interpolates_and_captures_like_any_other_word() {
+    let f = file("task setup target=$TRIPLE {\n echo $1\n}");
+    assert_eq!(render_params(&f.tasks[0]), ["target=$TRIPLE"]);
+
+    let f = file("task ship to=$(read .env) {\n echo $1\n}");
+    assert_eq!(render_params(&f.tasks[0]), ["to=$(read .env)"]);
+}
+
+#[test]
+fn a_quoted_default_is_one_word_even_with_spaces() {
+    let f = file("task greet who=\"good morning\" {\n echo $1\n}");
+    assert_eq!(render_params(&f.tasks[0]), ["who=\"good morning\""]);
+    let default = f.tasks[0].params[0].default.as_ref().expect("no default");
+    assert!(default.quoted, "a quoted default must stay one argument");
+}
+
+#[test]
+fn a_default_may_hold_the_equals_signs_after_the_first() {
+    // Only the first `=` separates the name from the value, exactly as in an
+    // assignment, so a `-D` flag survives being a default.
+    let f = file("task build flags=-DGGML_METAL=ON {\n cmake $1\n}");
+    assert_eq!(render_params(&f.tasks[0]), ["flags=-DGGML_METAL=ON"]);
+}
+
+#[test]
+fn an_empty_default_is_the_empty_string() {
+    // `env=` means the same here as it does in the assignment `env=`.
+    let f = file("task deploy env= {\n echo $1\n}");
+    assert_eq!(render_params(&f.tasks[0]), ["env=\"\""]);
+    assert!(!f.tasks[0].params[0].required());
+}
+
+#[test]
+fn a_required_parameter_cannot_follow_an_optional_one() {
+    let message = error("task deploy env=staging target {\n echo $1\n}");
+    assert!(
+        message.contains("required parameter `target`")
+            && message.contains("optional parameter `env`"),
+        "unhelpful message: {message}"
+    );
+    assert!(
+        message.contains("positional"),
+        "message should say why: {message}"
+    );
+}
+
+#[test]
+fn a_parameter_span_covers_the_name_and_the_default() {
+    let src = "task deploy host env=staging {\n echo $1 $2\n}";
+    let f = file(src);
+    let params = &f.tasks[0].params;
+    assert_eq!(&src[params[0].span.range()], "host");
+    assert_eq!(&src[params[1].span.range()], "env=staging");
+    let default = params[1].default.as_ref().expect("no default");
+    assert_eq!(&src[default.span.range()], "staging");
+}
+
+#[test]
+fn a_parameter_name_must_still_be_a_name() {
+    assert!(error("task t 1st { }").contains("must be a name"));
+    assert!(error("task t \"a b\" { }").contains("must be a name"));
 }
 
 // --- conditions ---------------------------------------------------------

@@ -28,11 +28,35 @@ pub struct Include {
 pub struct Task {
     pub name: String,
     /// Declared parameters, bound to `$1`, `$2`, ... in the body.
-    pub params: Vec<String>,
+    ///
+    /// A parameter may carry a default (`task deploy env=staging { }`), which
+    /// makes it optional. Every parameter without one must be supplied, and
+    /// they come first: a required parameter after an optional one could only
+    /// be reached by supplying the optional one anyway, so the grammar
+    /// refuses it rather than letting a chorefile declare something no caller
+    /// can satisfy.
+    pub params: Vec<Param>,
     /// The comment line directly above the task, shown by `list`.
     pub doc: Option<String>,
     pub body: Block,
     pub span: Span,
+}
+
+/// One declared parameter of a task.
+#[derive(Debug)]
+pub struct Param {
+    pub name: String,
+    /// The value bound when the caller supplies nothing. Evaluated at call
+    /// time, in the called task's scope, so a default can read `$TRIPLE` or
+    /// capture a command — and pays for it only when it is actually used.
+    pub default: Option<Word>,
+    pub span: Span,
+}
+
+impl Param {
+    pub fn required(&self) -> bool {
+        self.default.is_none()
+    }
 }
 
 pub type Block = Vec<Stmt>;

@@ -113,7 +113,9 @@ pub enum Mode {
 pub enum Repeat {
     /// Default: a task runs once per invocation, keyed on its name *and* its
     /// arguments, so a parameterised task called twice with different
-    /// arguments is not silently skipped.
+    /// arguments is not silently skipped. The arguments are the *bound* ones:
+    /// `deploy` and `deploy staging`, where `staging` is the default, are one
+    /// call and run once between them.
     Once,
     /// `--force`.
     Always,
@@ -180,6 +182,17 @@ enum Called {
     Exited(i32),
 }
 
+/// One finished task call.
+///
+/// `args` is what the task actually ran with — the caller's arguments with
+/// every omitted optional parameter's default filled in. It travels back out
+/// because it, and not what the caller wrote, is the run-once key: see
+/// `call_task`.
+struct Call {
+    called: Called,
+    args: Vec<String>,
+}
+
 /// What a block did when it stopped.
 ///
 /// The two abnormal exits differ only in where they stop, and that is the
@@ -206,7 +219,8 @@ pub struct Interpreter<'a> {
     mode: Mode,
     repeat: Repeat,
     globals: HashMap<String, String>,
-    /// Run-once records, keyed on `(task, args)`. The value is the task's
+    /// Run-once records, keyed on `(task, bound args)` — the arguments the
+    /// task ran with, defaults filled in, not the ones the caller wrote. The value is the task's
     /// captured stdout the first time something asked for it, or `None` while
     /// nothing has: replaying it is what lets a task be used as a function
     /// without running its body twice. See `call_task`.
@@ -324,7 +338,7 @@ impl<'a> Interpreter<'a> {
     /// by default, so a bare `return` on the last reachable line is a success.
     pub fn run_task(&mut self, name: &str, args: &[String]) -> Result<i32> {
         self.run_globals()?;
-        match self.call_task(name, args, false)? {
+        match self.call_task(name, args, false)?.called {
             Called::Exited(code) => Ok(code),
             Called::Done(out) => Ok(out.code),
         }

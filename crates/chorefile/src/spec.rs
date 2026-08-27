@@ -469,7 +469,7 @@ capture read it as they read any command's. Inside a `for` it leaves the task, n
     },
     Form {
         name: "task",
-        syntax: "task name [params...] { }",
+        syntax: "task name [param[=default]...] { }",
         example: "# Build the release binary\ntask build target { cargo build --release \
 --target $target }",
         meaning: "Define a task. Parameters bind to `$1`, `$2`, ... in the body. The comment \

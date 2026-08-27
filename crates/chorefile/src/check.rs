@@ -2,7 +2,9 @@
 //!
 //! Reports syntax errors, tasks named after a reserved subcommand or builtin,
 //! duplicate task names across a flat `include`, include cycles, unknown
-//! commands, undefined variables, and non-portable commands with the builtin
+//! commands, undefined variables — in a parameter's default as much as in a
+//! body — a parameter name declared twice in one header or read as `$name`
+//! when parameters are positional, and non-portable commands with the builtin
 //! that replaces them.
 //!
 //! Nothing here touches the filesystem except to look a command up on `PATH`,
@@ -41,7 +43,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ast::{
-    Block, Chain, Command, CompareOp, Cond, File, If, PartKind, Stmt, Task, VarRef, Word,
+    Block, Chain, Command, CompareOp, Cond, File, If, Param, PartKind, Stmt, Task, VarRef, Word,
 };
 use crate::error::{Error, Location, Span};
 use crate::resolve::Merged;
@@ -246,6 +248,12 @@ impl Names {
 struct Scope<'a> {
     /// `None` at the top level, where there are no arguments at all.
     task: Option<&'a Task>,
+    /// How many of the task's parameters are bound here. A body sees all of
+    /// them — an optional one is bound to its default when the caller passes
+    /// nothing, so `$2` is set either way. A parameter's *default* is
+    /// evaluated while the frame is still being built, and sees only the
+    /// parameters declared before it.
+    params_bound: usize,
     /// Globals, plus locals and loop variables bound so far.
     names: HashSet<String>,
     /// Inside an `if` whose condition this machine's platform decides against.
@@ -313,6 +321,7 @@ impl<'a> Checker<'a> {
         let outside = self.outside_globals();
         let mut scope = Scope {
             task: None,
+            params_bound: 0,
             names: outside.clone(),
             off_platform: false,
         };
@@ -327,8 +336,10 @@ impl<'a> Checker<'a> {
         let mut visible = outside;
         visible.extend(self.own_globals.iter().cloned());
         for task in &file.tasks {
+            self.params(task, &visible);
             let mut scope = Scope {
                 task: Some(task),
+                params_bound: task.params.len(),
                 names: visible.clone(),
                 off_platform: false,
             };
@@ -532,6 +543,58 @@ impl<'a> Checker<'a> {
                  — for a directory you want to move",
             ),
         );
+    }
+
+    // -- parameters ---------------------------------------------------------
+
+    /// A task's header: the names it declares, and the defaults it gives them.
+    ///
+    /// A default is a [`Word`] like any other, so it is walked like any other
+    /// — otherwise `task t x=$nope { }` says nothing until the day someone
+    /// calls `t` bare. What it may *see* is narrower than a body: it is
+    /// evaluated while the frame is being built, so it reads the globals and
+    /// the builtin variables, plus the parameters declared before it — `$1`
+    /// while binding the second parameter — and nothing after.
+    ///
+    /// The order of required and optional parameters is the grammar's
+    /// business, not this module's: a required parameter after an optional one
+    /// never parses, so there is nothing here to report.
+    fn params(&mut self, task: &Task, globals: &HashSet<String>) {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (i, param) in task.params.iter().enumerate() {
+            if !seen.insert(param.name.as_str()) {
+                self.push(
+                    Diagnostic::error(
+                        format!(
+                            "task `{}` declares the parameter `{}` twice",
+                            task.name, param.name
+                        ),
+                        self.at(param.span),
+                    )
+                    .with_help(format!(
+                        "parameters are bound by position, so the second `{}` is `${}` and the \
+                         first is still `${}` — give them different names",
+                        param.name,
+                        i + 1,
+                        task.params
+                            .iter()
+                            .position(|p| p.name == param.name)
+                            .unwrap_or(0)
+                            + 1,
+                    )),
+                );
+            }
+            if let Some(default) = &param.default {
+                let scope = Scope {
+                    task: Some(task),
+                    // Only what is already bound: the parameters to the left.
+                    params_bound: i,
+                    names: globals.clone(),
+                    off_platform: false,
+                };
+                self.word(default, &scope);
+            }
+        }
     }
 
     // -- includes -----------------------------------------------------------
@@ -964,7 +1027,45 @@ impl<'a> Checker<'a> {
         let at = self.at(span);
         match var {
             VarRef::Named(name) => {
-                if vars::BUILTIN_NAMES.contains(&name.as_str()) || scope.names.contains(name) {
+                let defined =
+                    vars::BUILTIN_NAMES.contains(&name.as_str()) || scope.names.contains(name);
+                // A parameter's name is not a variable: parameters are bound
+                // by position, so `$target` in a task declaring `target` reads
+                // whatever `target` means outside the task — or nothing.
+                let param = scope
+                    .task
+                    .and_then(|t| t.params.iter().position(|p| p.name == *name));
+                if let Some(i) = param {
+                    let task = scope.task.expect("a parameter implies a task");
+                    let d = if defined {
+                        Diagnostic::warning(
+                            format!(
+                                "`${name}` reads the global, not the parameter `{name}` of task \
+                                 `{}`",
+                                task.name
+                            ),
+                            at,
+                        )
+                        .with_help(format!(
+                            "parameters are read by position: write `${}` for `{name}`, or rename \
+                             the parameter if the global is what was meant",
+                            i + 1
+                        ))
+                    } else {
+                        Diagnostic::error(format!("undefined variable `${name}`"), at).with_help(
+                            format!(
+                                "`{name}` is parameter {} of task `{}`, and parameters are read \
+                                 by position — write `${}`",
+                                i + 1,
+                                task.name,
+                                i + 1
+                            ),
+                        )
+                    };
+                    self.push(d);
+                    return;
+                }
+                if defined {
                     return;
                 }
                 let mut d = Diagnostic::error(format!("undefined variable `${name}`"), at);
@@ -982,22 +1083,44 @@ impl<'a> Checker<'a> {
                 self.push(d);
             }
             VarRef::Positional(n) => match scope.task {
-                Some(task) if *n <= task.params.len() && *n > 0 => {}
-                Some(task) => {
-                    let declared = if task.params.is_empty() {
-                        "no parameters".to_string()
-                    } else {
-                        format!(
-                            "{} parameter(s) ({})",
-                            task.params.len(),
-                            task.params.join(", ")
-                        )
-                    };
+                Some(_) if *n <= scope.params_bound && *n > 0 => {}
+                // Inside a default, and naming a parameter that exists but is
+                // not bound yet. The header is not what is wrong here.
+                Some(task) if *n > 0 && *n <= task.params.len() => {
+                    let this = &task.params[scope.params_bound];
                     self.push(
                         Diagnostic::error(
                             format!(
-                                "`${n}` is never set: task `{}` declares {declared}",
+                                "`${n}` is not bound yet: it is the default for `{}`, parameter \
+                                 {} of task `{}`",
+                                this.name,
+                                scope.params_bound + 1,
                                 task.name
+                            ),
+                            at,
+                        )
+                        .with_help(if scope.params_bound == 0 {
+                            format!(
+                                "a default is evaluated as the call is bound, so `{}` — the first \
+                                 parameter — can only read globals and the builtin variables",
+                                this.name
+                            )
+                        } else {
+                            format!(
+                                "a default may read the parameters declared before it, `$1` \
+                                 through `${}`, and nothing after",
+                                scope.params_bound
+                            )
+                        }),
+                    );
+                }
+                Some(task) => {
+                    self.push(
+                        Diagnostic::error(
+                            format!(
+                                "`${n}` is never set: task `{}` declares {}",
+                                task.name,
+                                declared_params(task)
                             ),
                             at,
                         )
@@ -1203,13 +1326,56 @@ fn advice(pattern: &str, replacement: &str) -> String {
     }
 }
 
+/// What a task's header gives a caller, in the terms the caller cares about:
+/// how many arguments they *have* to pass, and which names are answered for
+/// them by a default. `2 parameter(s): 1 required (src), 1 optional (dest)`.
+fn declared_params(task: &Task) -> String {
+    if task.params.is_empty() {
+        return "no parameters".to_string();
+    }
+    let mut parts = Vec::new();
+    for (label, group) in [
+        ("required", split_params(task, true)),
+        ("optional", split_params(task, false)),
+    ] {
+        if !group.is_empty() {
+            parts.push(format!("{} {label} ({})", group.len(), group.join(", ")));
+        }
+    }
+    format!("{} parameter(s): {}", task.params.len(), parts.join(", "))
+}
+
+fn split_params(task: &Task, required: bool) -> Vec<&str> {
+    task.params
+        .iter()
+        .filter(|p| p.required() == required)
+        .map(|p| p.name.as_str())
+        .collect()
+}
+
 /// A plausible `task` header for a task that reads `$n`.
+///
+/// The parameters it already has are written as they were declared — an
+/// optional one keeps its `=`, since the fix is to add a parameter, never to
+/// drop somebody's default.
 fn header_params(task: &Task, n: usize) -> String {
-    let mut params: Vec<String> = task.params.clone();
+    let mut params: Vec<String> = task.params.iter().map(param_header).collect();
     while params.len() < n {
         params.push(format!("arg{}", params.len() + 1));
     }
     params.join(" ")
+}
+
+/// One parameter as a header writes it: `name`, `name=value` when the default
+/// is plain text, `name=...` when it is something only a run can produce.
+fn param_header(param: &Param) -> String {
+    match &param.default {
+        None => param.name.clone(),
+        Some(word) => match literal(word) {
+            Some(text) if !text.is_empty() => format!("{}={text}", param.name),
+            _ => format!("{}=...", param.name),
+        },
+    }
 }
 
 /// The closest candidate, when it is close enough to be a typo rather than a

@@ -86,6 +86,8 @@ pub(crate) fn lex_offset(source: &str, base: usize) -> Result<Vec<Spanned>> {
         i: 0,
         out: Vec::new(),
         stmt_start: true,
+        task_header: false,
+        depth: 0,
     }
     .run()
 }
@@ -109,13 +111,28 @@ struct Lexer<'a> {
     /// into `Word` `Assign` `Word` there, so `cmake -DFOO=ON` and `a=b=c` keep
     /// their `=` inside the word.
     stmt_start: bool,
+    /// Whether we are between `task` and the `{` that opens its body. A task
+    /// header is the one other place `name=value` splits, because that is how
+    /// a parameter declares a default. Each word of the header gets the split
+    /// offered to it once — the flag re-arms [`stmt_start`](Self::stmt_start)
+    /// at every space — so `target=$TRIPLE` splits but `a=b=c` still keeps its
+    /// second `=` inside the value.
+    task_header: bool,
+    /// Open `{` blocks, so that only a `task` at the top level opens a header.
+    /// Inside a body, `task` is an ordinary command name.
+    depth: usize,
 }
 
 impl Lexer<'_> {
     fn run(mut self) -> Result<Vec<Spanned>> {
         while self.i < self.src.len() {
             match self.byte(self.i) {
-                b' ' | b'\t' | b'\r' => self.i += 1,
+                b' ' | b'\t' | b'\r' => {
+                    self.i += 1;
+                    // Every word of a task header may declare a default, so
+                    // the space between them re-offers the `=` split.
+                    self.stmt_start |= self.task_header;
+                }
                 b'\n' => {
                     self.punct(Token::Newline, 1);
                     self.stmt_start = true;
@@ -124,10 +141,12 @@ impl Lexer<'_> {
                 b'{' => {
                     self.punct(Token::LBrace, 1);
                     self.stmt_start = true;
+                    self.depth += 1;
                 }
                 b'}' => {
                     self.punct(Token::RBrace, 1);
                     self.stmt_start = true;
+                    self.depth = self.depth.saturating_sub(1);
                 }
                 b'(' => self.punct(Token::LParen, 1),
                 b')' => self.punct(Token::RParen, 1),
@@ -177,6 +196,7 @@ impl Lexer<'_> {
         self.i += len;
         self.push(token, start, start + len);
         self.stmt_start = false;
+        self.task_header = false;
     }
 
     fn comment(&mut self) {
@@ -186,6 +206,7 @@ impl Lexer<'_> {
             .map_or(self.src.len(), |n| start + n);
         let text = self.src[start + 1..end].trim_end().to_string();
         self.push(Token::Comment(text), start, end);
+        self.task_header = false;
         self.i = end;
     }
 
@@ -209,6 +230,7 @@ impl Lexer<'_> {
                     self.push(Token::Word { text, quoted }, start, self.i);
                     self.push(Token::Assign, self.i, self.i + 1);
                     self.i += 1;
+                    // The value that follows is one word, `=` and all.
                     self.stmt_start = false;
                     return Ok(());
                 }
@@ -216,6 +238,9 @@ impl Lexer<'_> {
             }
         }
         let text = self.src[start..self.i].to_string();
+        // A top-level `task` opens a header, where the words that follow are
+        // parameters and may carry `=` defaults. It stays open until the `{`.
+        self.task_header |= self.stmt_start && self.depth == 0 && text == "task" && !quoted;
         self.push(Token::Word { text, quoted }, start, self.i);
         self.stmt_start = false;
         Ok(())

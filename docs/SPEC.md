@@ -104,16 +104,47 @@ a syntax error: there is no task to leave, and `exit` is what ends a run.
 
 ### Task parameters
 
-Declared parameters are **required**: `task deploy env { }` called with no
-argument is an error, and `$1` in a task that declares none is a `check`
-finding. There is no optional parameter and no default value in v1, so a task
-that takes a variable number of arguments declares none and reads `$@` and
-`$#`:
+A declared parameter is **required** unless it carries a default. A default
+makes it optional, and is written like an assignment:
+
+```sh
+# Cross-compile: CI passes a triple, a developer runs it bare
+task setup target=$TRIPLE {
+    rustup target add $1
+    cargo build --release --target $1
+}
+```
+
+The default is an ordinary word, so quoting, `$name` and `$( )` all work. It is
+evaluated **at call time, in the called task's scope, and only when the caller
+left the argument out** — so a `$( )` default costs nothing on a call that
+supplies a value. It can read globals, the builtin variables, and the
+parameters declared to its left (`task t a b=$1`), but not one to its right,
+which is not bound yet.
+
+**Required parameters come first.** Arguments are positional, so a required
+parameter after an optional one could only be reached by supplying the optional
+one too, and its default could never apply. The parser rejects the declaration
+rather than letting it fail at every call site.
+
+A default fills exactly one parameter even when it expands to several words: if
+it could spill, `$2` would mean different things depending on what `$1`
+happened to contain. An argument written at a *call site* still splits, because
+there it is an argument.
+
+Both kinds bind to `$1`, `$2`, …; a parameter's name is not a variable. `$#`
+counts what the call bound, defaults included, and `$@` is that list — which is
+how a task forwards itself to another.
+
+`env=` with nothing after it defaults to the empty string, exactly as the
+assignment `env=` does. `env=""` says the same thing more clearly.
+
+A task taking a variable number of arguments declares none and reads `$@`:
 
 ```sh
 # Run the tests, passing any extra arguments through
 task test {
-  cargo test --workspace $@
+    cargo test --workspace $@
 }
 ```
 
@@ -386,9 +417,13 @@ wins over a builtin of the same name, and it is `check` that reports it. The
 same is true of a task named after a subcommand. `chore list` is always the
 subcommand, so the task is unreachable.
 
-Reports syntax errors, reserved names, unknown commands, undefined variables,
-duplicate names, include cycles, and non-portable commands (`curl`, `unzip`,
-`tar`, `cp`, `rm`) with the builtin that replaces them.
+Reports syntax errors, reserved names, unknown commands, undefined variables —
+in a parameter's default as much as in a body — duplicate names, a parameter
+declared twice in one header, a parameter read as `$name` where parameters are
+positional, include cycles, and non-portable commands (`curl`, `unzip`, `tar`,
+`cp`, `rm`) with the builtin that replaces them. A default is checked in the
+scope it will be evaluated in, so it may read `$1`…`$(n-1)` but not its own
+slot or a later one.
 
 ### Platform guards and `PATH`
 

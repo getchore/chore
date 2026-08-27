@@ -57,7 +57,17 @@ pub fn json(out: &mut dyn Write, merged: &Merged) -> io::Result<()> {
     writeln!(out, "[")?;
     for (i, task) in tasks.iter().enumerate() {
         let comma = if i + 1 == tasks.len() { "" } else { "," };
-        let params: Vec<String> = task.params.iter().map(|p| quote(p)).collect();
+        // A parameter is reported as written, so `dest=build` tells a reader
+        // it is optional and what it falls back to — the same thing they
+        // would see in the chorefile, and enough to build a call from.
+        let params: Vec<String> = task
+            .params
+            .iter()
+            .map(|p| match &p.default {
+                Some(_) => quote(&format!("{}=", p.name)),
+                None => quote(&p.name),
+            })
+            .collect();
         // Where the task came from, for a tool that wants to open it: the
         // namespace an `include ... as` gave it, and the file it was written
         // in. Both are `null` for a task in the top-level chorefile of a

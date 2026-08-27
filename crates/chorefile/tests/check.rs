@@ -340,8 +340,195 @@ task t one {
 ";
     let found = matching(source, "$2");
     assert_eq!(found.len(), 1, "{found:#?}");
-    assert!(found[0].message.contains("1 parameter(s) (one)"));
+    assert!(
+        found[0]
+            .message
+            .contains("1 parameter(s): 1 required (one)"),
+        "{found:#?}"
+    );
     assert!(found[0].help.as_ref().unwrap().contains("task t one arg2"));
+}
+
+#[test]
+fn the_arity_message_separates_required_from_optional() {
+    let source = "\
+task t src dest=out {
+    echo $3
+}
+";
+    let found = matching(source, "$3");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0]
+            .message
+            .contains("2 parameter(s): 1 required (src), 1 optional (dest)"),
+        "{found:#?}"
+    );
+    // The suggested header keeps the default rather than proposing to drop it.
+    assert!(
+        found[0]
+            .help
+            .as_ref()
+            .unwrap()
+            .contains("task t src dest=out arg3"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn an_optional_parameter_is_bound_like_any_other() {
+    // `$2` is set whether or not the caller passes it, so reading it is fine
+    // and calling the task bare is fine.
+    let source = "\
+task greet who when=today {
+    echo $1 $2
+}
+
+task hello {
+    greet world
+}
+";
+    assert_eq!(messages(source), Vec::<String>::new());
+}
+
+// --- 6b. parameter defaults ------------------------------------------------
+
+#[test]
+fn a_default_referencing_an_undefined_variable_is_reported() {
+    let source = "task t x=$nope {\n    echo $1\n}\n";
+    let found = matching(source, "undefined variable");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Error);
+    // At the default, not at the task.
+    assert_eq!(&source[found[0].at.span.range()], "$nope");
+}
+
+#[test]
+fn a_default_sees_globals_and_the_builtin_variables() {
+    let source = "\
+root=/tmp
+
+task build target=$TRIPLE out=$root {
+    echo $1 $2
+}
+";
+    assert_eq!(messages(source), Vec::<String>::new());
+}
+
+#[test]
+fn a_default_may_read_the_parameters_before_it() {
+    let source = "task t a b=$1 {\n    echo $1 $2\n}\n";
+    assert_eq!(messages(source), Vec::<String>::new());
+}
+
+#[test]
+fn a_default_cannot_read_its_own_parameter_or_a_later_one() {
+    let source = "task t a b=$2 c=$3 {\n    echo $1\n}\n";
+    let found = matching(source, "not bound yet");
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert!(found[0].message.contains("`$2`"), "{found:#?}");
+    assert!(found[0].message.contains("`b`"), "{found:#?}");
+    assert_eq!(&source[found[0].at.span.range()], "$2");
+    assert!(
+        found[0].help.as_ref().unwrap().contains("`$1`"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn the_first_default_cannot_read_a_parameter_at_all() {
+    let source = "task t a=$1 {\n    echo $1\n}\n";
+    let found = matching(source, "not bound yet");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0]
+            .help
+            .as_ref()
+            .unwrap()
+            .contains("globals and the builtin variables"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn a_default_beyond_the_declared_parameters_is_the_ordinary_finding() {
+    let source = "task t a=$4 {\n    echo $1\n}\n";
+    let found = matching(source, "$4");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("is never set"), "{found:#?}");
+}
+
+#[test]
+fn a_default_is_checked_for_unknown_commands_too() {
+    let source = "task t x=$(definitely-not-a-real-command) {\n    echo $1\n}\n";
+    let found = matching(source, "definitely-not-a-real-command");
+    assert_eq!(found.len(), 1, "{found:#?}");
+}
+
+// --- 6c. parameter names ---------------------------------------------------
+
+#[test]
+fn a_duplicate_parameter_name() {
+    let source = "task sync src src {\n    echo $1 $2\n}\n";
+    let found = matching(source, "twice");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Error);
+    assert!(found[0].message.contains("`sync`"), "{found:#?}");
+    assert!(found[0].message.contains("`src`"), "{found:#?}");
+    // Points at the second one.
+    assert_eq!(found[0].at.span.start, source.rfind("src").unwrap());
+    let help = found[0].help.as_ref().unwrap();
+    assert!(help.contains("$2") && help.contains("$1"), "{help}");
+}
+
+#[test]
+fn distinct_parameter_names_are_fine() {
+    assert_eq!(
+        messages("task sync src dest {\n    echo $1 $2\n}\n"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_parameter_read_by_name_is_undefined() {
+    let source = "task build target {\n    echo $target\n}\n";
+    let found = matching(source, "undefined variable");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Error);
+    let help = found[0].help.as_ref().unwrap();
+    assert!(help.contains("parameter 1"), "{help}");
+    assert!(help.contains("$1"), "{help}");
+}
+
+#[test]
+fn a_parameter_read_by_name_that_is_also_a_global_reads_the_global() {
+    let source = "\
+target=x86_64
+
+task build target {
+    echo $target
+}
+";
+    let found = matching(source, "reads the global");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Warning);
+    assert_eq!(&source[found[0].at.span.range()], "$target");
+    assert!(found[0].help.as_ref().unwrap().contains("$1"), "{found:#?}");
+}
+
+#[test]
+fn a_parameter_sharing_a_globals_name_is_not_reported_on_its_own() {
+    // Declaring it is not the mistake; reading it by name is.
+    let source = "\
+target=x86_64
+
+task build target {
+    echo $1 $target_dir
+}
+
+target_dir=out
+";
+    assert!(matching(source, "reads the global").is_empty());
 }
 
 #[test]
