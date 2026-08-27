@@ -7,6 +7,9 @@ const CHOREFILE = `VERSION=0.4.2
 DIST=$ROOT/dist/$PLATFORM
 LLVM=gh://sona-lang/deps/v3/llvm-$PLATFORM.tar.zst
 
+# The docs site is its own project, so its tasks live beside it
+include docs as site
+
 # Fetch the toolchain and build the compiler
 task build {
   mkdir $DIST
@@ -30,6 +33,7 @@ task test name {
 task release {
   build
   test
+  site::build
   archive $DIST sona-$VERSION-$PLATFORM.tar.gz
   sha256 sona-$VERSION-$PLATFORM.tar.gz > checksums.txt
 }`
@@ -84,8 +88,8 @@ export function Showcase() {
           </div>
           <p className={css({ fontSize: '14.5px', color: 'fg.faint', maxW: '280px', lineHeight: '1.55' })}>
             Assignments, <code className={css({ fontFamily: 'mono' })}>if</code> /{' '}
-            <code className={css({ fontFamily: 'mono' })}>for</code>, captures, pipes, tasks with arguments. That is
-            the entire surface.
+            <code className={css({ fontFamily: 'mono' })}>for</code>, captures, pipes, tasks with arguments, and{' '}
+            <code className={css({ fontFamily: 'mono' })}>include</code>. That is the entire surface.
           </p>
         </div>
 

@@ -1,6 +1,19 @@
 import { css } from 'styled-system/css'
 import { Band, Eyebrow, Heading } from './ui'
 
+// The language surface, so `include` and friends are visible at a glance and
+// not just buried in the example.
+const SYNTAX = [
+  'task name { }',
+  'task name arg',
+  'if / else',
+  'for x in',
+  '$(capture)',
+  'include … as',
+  'try',
+  'a | b  a > f',
+]
+
 const BUILTINS = [
   'download', 'extract', 'archive', 'copy', 'move', 'remove',
   'mkdir', 'chmod', 'which', 'find', 'read', 'write',
@@ -51,6 +64,29 @@ export function Reference() {
         })}
       >
         <div>
+          <h3 className={css({ fontSize: '12.5px', fontWeight: '600', color: 'fg.faint', mb: '5' })}>
+            The whole language
+          </h3>
+          <div className={css({ display: 'flex', flexWrap: 'wrap', gap: '2', mb: '10' })}>
+            {SYNTAX.map((k) => (
+              <span
+                key={k}
+                className={css({
+                  fontFamily: 'mono',
+                  fontSize: '13px',
+                  px: '3',
+                  py: '2',
+                  rounded: '9px',
+                  color: 'fg.muted',
+                  bg: 'bg.panel',
+                  border: '1px solid token(colors.border.default)',
+                })}
+              >
+                {k}
+              </span>
+            ))}
+          </div>
+
           <h3 className={css({ fontSize: '12.5px', fontWeight: '600', color: 'fg.faint', mb: '5' })}>
             18 builtin commands
           </h3>
