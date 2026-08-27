@@ -1,10 +1,72 @@
+<div align="center">
+
+<img src="website/public/brand/logo-256.png" alt="" width="84" height="84">
+
 # chore
 
-One static binary that runs your project's tasks from a `chorefile`. Tasks run
-through a built-in POSIX-sh-subset interpreter. `chore` never spawns `sh`,
-`cmd` or PowerShell, so a chorefile does the same thing on macOS, Linux and
-Windows. Builtins cover what scripts shell out for: `download`, `extract`,
-`archive`, `copy`, `move`, `remove`, `find`, `sha256`.
+**One binary. Every task. Every OS.**
+
+Run your project's tasks from a `chorefile`, through a shell that lives inside
+the binary. The same file does the same thing on macOS, Linux and Windows.
+
+[**Get started**](https://getchore.github.io/chore/) &nbsp;·&nbsp; [**Language reference**](docs/SPEC.md) &nbsp;·&nbsp; [**Releases**](https://github.com/getchore/chore/releases/latest)
+
+[![CI](https://img.shields.io/github/actions/workflow/status/getchore/chore/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/getchore/chore/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/getchore/chore?style=flat-square&color=f97316)](https://github.com/getchore/chore/releases/latest) [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+
+</div>
+
+---
+
+## Install
+
+```sh
+curl -fsSL https://getchore.github.io/chore/install.sh | sh
+```
+
+```powershell
+irm https://getchore.github.io/chore/install.ps1 | iex
+```
+
+Append `-s -- v1.1.0` (or run the PowerShell script as a block) to pin a
+version. Both honour `CHORE_INSTALL_DIR`, default `~/.local/bin`, and verify
+the published checksum. Prebuilt archives for macOS, Linux (musl-static) and
+Windows on x86-64 and arm64 are on the
+[releases page](https://github.com/getchore/chore/releases/latest).
+
+## A chorefile
+
+`chore` reads the `chorefile` in the working directory or the nearest parent,
+and the comment above a task is its description.
+
+```sh
+DIST=$ROOT/dist/$PLATFORM
+
+# build the compiler
+task build {
+    if !exists vendor/llvm {
+        download $LLVM vendor/llvm.tar.zst --sha256 4f9c2a
+        extract vendor/llvm.tar.zst vendor/llvm --strip 1
+    }
+    cmake --build build --parallel
+    copy build/sona$EXE $DIST/sona$EXE
+}
+
+# package the release archive for this platform
+task package {
+    build
+    archive $DIST sona-$PLATFORM.tar.gz
+}
+```
+
+```console
+$ chore list
+  build      build the compiler
+  package    package the release archive for this platform
+```
+
+`download`, `extract`, `archive`, `copy`, `move`, `remove`, `find` and
+`sha256` are builtins, so the tasks above need nothing installed on the
+machine and behave the same on every platform.
 
 ## It tells you what won't work on Windows
 
@@ -26,54 +88,9 @@ $ chore check
 2 problems
 ```
 
-`check` only parses, and nothing runs. It exits nonzero for errors like these; a
-command it cannot find on this machine's `PATH` is a warning instead, so a tool
-that exists solely in CI does not break the gate.
-
-## Install
-
-```sh
-curl -fsSL https://getchore.github.io/chore/install.sh | sh
-
-# pin a version
-curl -fsSL https://getchore.github.io/chore/install.sh | sh -s -- v1.0.0
-```
-
-```powershell
-irm https://getchore.github.io/chore/install.ps1 | iex
-
-# pin a version (iex takes no arguments, so run it as a block)
-& ([scriptblock]::Create((irm https://getchore.github.io/chore/install.ps1))) v1.0.0
-```
-
-Both honour `CHORE_INSTALL_DIR` (default `~/.local/bin`) and verify the
-published checksum when the release carries one. Prebuilt archives for macOS,
-Linux (musl-static) and Windows, x86-64 and arm64, are on the
-[releases page](https://github.com/getchore/chore/releases/latest).
-
-## Example
-
-`chore` uses the `chorefile` in the working directory or the nearest parent, and
-the comment above a task is its description.
-
-```sh
-# build the compiler
-task build {
-    cmake --build build --parallel
-}
-
-# package the release archive for this platform
-task package {
-    build
-    archive build sona-$PLATFORM.tar.gz
-}
-```
-
-```console
-$ chore list
-  build      build the compiler
-  package    package the release archive for this platform
-```
+`check` only parses, and nothing runs. It exits nonzero for errors like these.
+A command it cannot find on this machine's `PATH` is a warning instead, so a
+tool that exists solely in CI does not break the gate.
 
 ## Docs
 
