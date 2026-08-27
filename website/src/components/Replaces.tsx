@@ -81,6 +81,44 @@ build:
   copy build/sona$EXE dist/$PLATFORM/sona$EXE
 }`,
   },
+  {
+    id: 'cmake',
+    label: 'CMake',
+    lang: 'cmake',
+    afterLang: 'chore',
+    beforeFile: 'CMakeLists.txt',
+    afterFile: 'chorefile',
+    note: 'cmake -E is a portable shell in disguise. chore keeps cmake for the build and takes the chores back.',
+    before: `file(DOWNLOAD "\${LLVM_URL}" "\${CMAKE_BINARY_DIR}/llvm.tar.zst"
+     EXPECTED_HASH SHA256=4f9c2a
+     STATUS dl)
+list(GET dl 0 dl_code)
+if(NOT dl_code EQUAL 0)
+  message(FATAL_ERROR "download failed: \${dl}")
+endif()
+
+file(ARCHIVE_EXTRACT INPUT "\${CMAKE_BINARY_DIR}/llvm.tar.zst"
+     DESTINATION "\${CMAKE_SOURCE_DIR}/vendor/llvm")
+
+if(WIN32)
+  set(EXE ".exe")
+else()
+  set(EXE "")
+endif()
+
+add_custom_target(dist
+  COMMAND \${CMAKE_COMMAND} -E make_directory \${DIST}
+  COMMAND \${CMAKE_COMMAND} -E copy $<TARGET_FILE:sona> \${DIST}/sona\${EXE}
+  COMMAND \${CMAKE_COMMAND} -E tar czf sona-\${PLATFORM}.tar.gz \${DIST})`,
+    after: `task dist {
+  download $LLVM vendor/llvm.tar.zst --sha256 4f9c2a
+  extract vendor/llvm.tar.zst vendor/llvm --strip 1
+  cmake --build build --parallel
+  mkdir dist/$PLATFORM
+  copy build/sona$EXE dist/$PLATFORM/sona$EXE
+  archive dist/$PLATFORM sona-$PLATFORM.tar.gz
+}`,
+  },
 ]
 
 function lines(s: string) {

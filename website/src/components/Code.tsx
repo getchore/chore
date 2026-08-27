@@ -1,13 +1,18 @@
 import { Fragment, type ReactNode } from 'react'
 import { css } from 'styled-system/css'
 
-export type Lang = 'chore' | 'yaml' | 'make' | 'json'
+export type Lang = 'chore' | 'yaml' | 'make' | 'json' | 'cmake'
 
 const KEYWORDS: Record<Lang, Set<string>> = {
   chore: new Set(['task', 'if', 'else', 'for', 'in', 'try', 'exit', 'include', 'as']),
   yaml: new Set(['uses:', 'run:', 'name:', 'if:', 'shell:', 'with:', 'env:', 'steps:', 'needs:']),
   make: new Set(['ifeq', 'else', 'endif', 'ifneq']),
   json: new Set([]),
+  cmake: new Set([
+    'if', 'else', 'endif', 'set', 'file', 'list', 'message',
+    'add_custom_target', 'DOWNLOAD', 'ARCHIVE_EXTRACT', 'COMMAND',
+    'EXPECTED_HASH', 'DESTINATION', 'INPUT', 'STATUS', 'FATAL_ERROR',
+  ]),
 }
 
 const BUILTINS = new Set([
@@ -48,7 +53,7 @@ function highlight(line: string, i: number, lang: Lang): ReactNode {
     if (KEYWORDS[lang].has(p)) return <span key={key} className={tone.keyword}>{p}</span>
     if (lang === 'chore' && BUILTINS.has(p)) return <span key={key} className={tone.builtin}>{p}</span>
     // yaml/json keys read as structure, not content
-    if (lang !== 'chore' && p.endsWith(':')) return <span key={key} className={tone.keyword}>{p}</span>
+    if (lang !== 'chore' && lang !== 'cmake' && p.endsWith(':')) return <span key={key} className={tone.keyword}>{p}</span>
     if (OPERATORS.has(p)) return <span key={key} className={tone.operator}>{p}</span>
     return <span key={key} className={tone.plain}>{p}</span>
   })
