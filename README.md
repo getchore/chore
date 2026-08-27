@@ -34,8 +34,6 @@ chore help            # syntax and builtins
   `archive`, `copy`, `move`, `remove`, `find`, `sha256`.
 - `--dry` previews a run; `chore check` catches errors before it starts.
 
-See [SPEC.md](SPEC.md) for the full reference.
-
 ## License
 
 MIT
