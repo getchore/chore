@@ -249,6 +249,22 @@ fn a_builtin_of_the_same_name_is_not_flagged() {
     assert!(found[0].help.as_ref().unwrap().contains("-p"));
 }
 
+#[test]
+fn a_task_of_the_same_name_is_not_flagged_either() {
+    // `test` is in REPLACEMENTS (the POSIX `test` program), and it is also
+    // the most common task name there is. Resolution is task -> builtin ->
+    // PATH, so a bare `test` inside another task calls the task and never
+    // reaches the program. chore's own chorefile does exactly this.
+    let source = "# t\ntask test {\n    cargo test\n}\n\n# c\ntask ci {\n    test\n}\n";
+    assert!(matching(source, "not portable").is_empty());
+
+    // `^test` skips the task and does reach the non-portable program.
+    let forced = "# t\ntask test {\n    cargo test\n}\n\n# c\ntask ci {\n    ^test -f x\n}\n";
+    let found = matching(forced, "not portable");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].help.as_ref().unwrap().contains("exists"));
+}
+
 // --- 6. undefined variables ------------------------------------------------
 
 #[test]

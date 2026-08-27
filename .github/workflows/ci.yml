@@ -1,5 +1,16 @@
 name: ci
 
+# chore runs chore. Every job here bootstraps with exactly one native cargo
+# invocation -- `cargo build --release --bin chore` -- and then drives the
+# rest of the job through the binary that build produced.
+#
+# The binary is built from the commit under test, never installed from the
+# v1.0.0 release. Installing the released binary would be faster and it would
+# be wrong: a PR that breaks the interpreter would still go green, because the
+# tasks would have been run by the old binary rather than the new one. The
+# point of CI is that the chorefile in this commit works when read by the
+# chore in this commit.
+
 on:
   push:
     branches: [main]
@@ -28,8 +39,11 @@ jobs:
             ~/.cargo/git/db
             target
           key: lint-${{ hashFiles('Cargo.lock') }}
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build chore
+        run: cargo build --release --locked --bin chore
+      # `lint` is `cargo fmt --all --check` then
+      # `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+      - run: ./target/release/chore lint
 
   test:
     name: test ${{ matrix.runner }}
@@ -49,7 +63,12 @@ jobs:
             ~/.cargo/git/db
             target
           key: test-${{ matrix.runner }}-${{ hashFiles('Cargo.lock') }}
-      - run: cargo test --workspace --locked
+      - name: Build chore
+        run: cargo build --release --locked --bin chore
+      # `test` is `cargo test --workspace --locked`. The forward slashes are
+      # fine on the Windows runners: both pwsh and git-bash resolve
+      # `./target/release/chore` to the .exe.
+      - run: ./target/release/chore test
 
   # The release job builds six targets on five runners. This checks the three
   # that nothing else covers -- musl, the darwin cross, and windows-gnu -- on
@@ -73,11 +92,19 @@ jobs:
           # move their mingw around between releases.
           - target: x86_64-pc-windows-gnu
             runner: ubuntu-latest
+    # Target-scoped, so they are inert for the host bootstrap build below and
+    # only take effect for the cross builds. Hoisted to the job because two
+    # steps -- `chore cross` and `chore static-check` -- both need them.
+    env:
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
+      AR_x86_64_pc_windows_gnu: x86_64-w64-mingw32-ar
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
     steps:
       - uses: actions/checkout@v5
-      - run: |
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup target add ${{ matrix.target }}
+      # `chore cross` runs `rustup target add` itself; the toolchain has to
+      # exist before either that or the bootstrap build can run.
+      - run: rustup toolchain install stable --profile minimal --no-self-update
       - if: endsWith(matrix.target, '-linux-musl')
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
       # rustup's rust-mingw component supplies the import libraries, but ring
@@ -87,27 +114,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
           x86_64-w64-mingw32-gcc --version
-      - env:
-          CC_x86_64_unknown_linux_musl: musl-gcc
-          CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
-          AR_x86_64_pc_windows_gnu: x86_64-w64-mingw32-ar
-          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin chore
+      # Host build, so this is a native binary that runs here even when the
+      # matrix target is Windows.
+      - name: Build chore
+        run: cargo build --release --locked --bin chore
+      # `cross <target>` is `rustup target add <target>` then
+      # `cargo build --release --locked --target <target> --bin chore`.
+      - run: ./target/release/chore cross ${{ matrix.target }}
+      # `static-check` is `cross x86_64-unknown-linux-musl` followed by the
+      # assertion that the binary has no shared-library mapping -- no `lib...
+      # => ...` line from ldd. Its cross build is the one the previous step
+      # just did, so it is a cargo no-op here.
+      #
+      # The assertion has to tolerate both spellings: `ldd` prints "statically
+      # linked" for a static binary and "not a dynamic executable" for a
+      # static-pie one, depending on which libc answers, and both are what we
+      # want. Only a `=>` mapping is a real dependency.
       - if: endsWith(matrix.target, '-linux-musl')
-        run: |
-          bin=target/${{ matrix.target }}/release/chore
-          file "$bin"
-          # The whole point of musl here: no interpreter, no shared objects.
-          # `ldd` says "statically linked" for a static binary and "not a
-          # dynamic executable" for a static-pie one, depending on which libc
-          # provides it -- both are the answer we want. A real dependency
-          # shows up as a `lib... => ...` mapping line.
-          out=$(ldd "$bin" 2>&1 || true)
-          echo "$out"
-          if printf '%s\n' "$out" | grep -q '=>'; then
-            echo "::error::binary is dynamically linked"
-            exit 1
-          fi
+        run: ./target/release/chore static-check
+      # Left inline deliberately. This assertion needs
+      # x86_64-w64-mingw32-objdump, which exists only on this one cross job;
+      # as a chore task it would be dead weight in every developer checkout,
+      # and there is no task in the chorefile for it.
+      #
       # Nothing links against a system library here, so the .exe should stand
       # alone apart from the Windows API DLLs every process loads.
       - if: endsWith(matrix.target, '-windows-gnu')
@@ -129,13 +158,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+      # Provisioning, not a check. shellcheck has to be on PATH before the
+      # task runs; pwsh is already on the ubuntu image, which is what keeps
+      # the install.ps1 parse check running rather than being skipped.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
-      - run: shellcheck --shell=sh installers/install.sh
-      - name: Check installers/install.ps1 parses
-        shell: pwsh
-        run: |
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path ./installers/install.ps1), [ref]$null, [ref]$errors) | Out-Null
-          if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
-          Write-Host 'installers/install.ps1 parses'
+      - name: Build chore
+        run: cargo build --release --locked --bin chore
+      # `installers` is `shellcheck --shell=sh installers/install.sh` then the
+      # PowerShell parse check of installers/install.ps1, which the task runs
+      # only when pwsh exists.
+      - run: ./target/release/chore installers

@@ -14,7 +14,10 @@ Six, one per platform anyone actually runs:
 | `chore-aarch64-pc-windows-msvc.zip`   | Windows, arm64                    |
 
 Each archive holds the binary plus `LICENSE` and `README.md`, ships with a
-`.sha256` sidecar, and the release carries a combined `SHA256SUMS`.
+`.sha256` sidecar, and the release carries a combined `SHA256SUMS`. v1.0.0
+shipped all thirteen assets — six archives, six sidecars, `SHA256SUMS` — and
+`install.sh` installs from them and verifies the checksum, so the whole path
+from tag to installed binary is known to work.
 
 `x86_64-pc-windows-gnu` is deliberately not on this list. CI's `cross` job
 builds it on every PR — it is the only target where `ring` and `zstd-sys`
@@ -31,20 +34,53 @@ machine. Everything else builds natively, including Windows on arm.
 
 ## Cutting a release
 
-```sh
-# 1. bump the workspace version
-$EDITOR Cargo.toml            # [workspace.package] version
-cargo update -w               # refresh Cargo.lock, which CI builds --locked
+By hand, a few times a year. There is no `chore` task for it: `chore` has no
+builtin that edits a file, so it cannot rewrite `Cargo.toml`, and pushing a
+tag is not something to leave one keystroke away.
 
-# 2. commit and tag
-git commit -am "release v0.1.0"
-git tag v0.1.0
-git push && git push --tags
+```sh
+# 1. bump the version -- both lines, see below
+python3 - 1.1.0 <<'EOF'
+import re, pathlib, sys
+version = sys.argv[1]
+p = pathlib.Path("Cargo.toml")
+s = p.read_text()
+# [workspace.package]: the first `version = "..."` line in the file.
+s, n = re.subn(r'^version = ".*"$', f'version = "{version}"', s, count=1, flags=re.M)
+assert n == 1, "no version line in Cargo.toml"
+# [workspace.dependencies]: the chorefile path dependency carries its own pin.
+s, d = re.subn(r'(path = "crates/chorefile", version = ")[^"]+(")', rf'\g<1>{version}\g<2>', s, count=1)
+assert d == 1, "chorefile version pin not found"
+p.write_text(s)
+print(f'Cargo.toml: {version}')
+EOF
+
+# 2. refresh Cargo.lock, which every build reads with --locked
+cargo update -w
+
+# 3. the gates CI runs, in CI's order
+chore ci
+
+# 4. commit, tag, push
+git commit -am "Release 1.1.0"
+git tag v1.1.0
+git push origin main v1.1.0
 ```
+
+Two lines in `Cargo.toml` carry the version and both have to move: the one
+under `[workspace.package]`, and the `version = "..."` pin on the `chorefile`
+path dependency under `[workspace.dependencies]`. Cargo refuses to resolve
+when that pin lags behind the crate it points at.
+
+The script rewrites both and asserts on each, which is the point of it being a
+script. The `sed` range it replaced matched under GNU and not under BSD, so on
+a Mac it edited nothing, said nothing and exited zero — a release tool that
+fails silently is worse than one that is not there.
 
 The tag triggers `.github/workflows/release.yml`, which refuses to build if
 the tag and `Cargo.toml` disagree. It builds all six targets, smoke-tests
-each one it can execute, then creates the release with generated notes.
+each one it can execute, then creates the release with generated notes. This
+is how v1.0.0 was published.
 
 The smoke test writes a one-task chorefile and runs `--version`, `list`,
 `list --json`, `check` and the task itself. `x86_64-apple-darwin` is skipped:
@@ -78,17 +114,18 @@ server-side, so there is no JSON to parse and no rate limit to hit.
 curl -fsSL https://getchore.github.io/chore/install.sh | sh
 
 # pin a version
-curl -fsSL https://getchore.github.io/chore/install.sh | sh -s -- v0.1.0
+curl -fsSL https://getchore.github.io/chore/install.sh | sh -s -- v1.0.0
 ```
 
 ```powershell
 irm https://getchore.github.io/chore/install.ps1 | iex
 
 # pin a version (iex takes no arguments, so run it as a block)
-& ([scriptblock]::Create((irm https://getchore.github.io/chore/install.ps1))) v0.1.0
+& ([scriptblock]::Create((irm https://getchore.github.io/chore/install.ps1))) v1.0.0
 ```
 
-Both take an optional release tag as their first argument, which wins over
+Both are live on the Pages site and both serve `200`. Both take an optional
+release tag as their first argument, which wins over
 `CHORE_VERSION`; both also honour `CHORE_INSTALL_DIR` (default `~/.local/bin`).
 Checksum verification is best-effort on a missing sidecar and fatal on a
 mismatch. `install.ps1` sets the user PATH; `install.sh` only prints the line

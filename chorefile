@@ -1,0 +1,111 @@
+# Development tasks for chore itself.
+#
+# chore is a task runner, so it runs its own tasks. Everything CI does, it does
+# from here, which means `chore ci` before pushing is the same work in the same
+# order that the pull request will run.
+#
+#   chore list            what there is
+#   chore ci              lint, test, installers
+#   chore cross <target>  one release build
+#   chore <task> --dry    preview a task without running it
+
+bin=chore
+musl=x86_64-unknown-linux-musl
+
+# Compile the workspace, tests and examples included.
+task build {
+    # --all-targets so a test file that no longer compiles fails here, rather
+    # than surprising someone at `test` time.
+    cargo build --workspace --all-targets
+}
+
+# Run the test suite against the locked dependency versions.
+task test {
+    # $@ passes a filter straight through: `chore test parse` runs one file.
+    cargo test --workspace --locked $@
+}
+
+# Reformat every crate in place.
+task fmt {
+    cargo fmt --all
+}
+
+# Formatting and clippy: the two gates that fail most often, fast.
+task lint {
+    # Named `lint` rather than `check` because `chore check` is chore's own
+    # linter subcommand and a task can never shadow it.
+    cargo fmt --all --check
+    cargo clippy --workspace --all-targets --locked -- -D warnings
+}
+
+# Everything CI runs, in CI's order. Run this before pushing.
+task ci {
+    lint
+    test
+    installers
+}
+
+# Lint the shell and PowerShell install scripts.
+task installers {
+    # The installers ship from main rather than from a release asset, so a
+    # broken one is live the moment it merges. --shell=sh matters: install.sh
+    # has to run under dash, ash and busybox, not just bash.
+    shellcheck --shell=sh installers/install.sh
+    # A missing pwsh is a skip; a pwsh that finds a parse error is a failure.
+    # `which` answers with an exit code instead of failing, so it drives an if.
+    if which pwsh {
+        pwsh -NoLogo -Command '$e = $null; [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path ./installers/install.ps1), [ref]$null, [ref]$e) | Out-Null; if ($e) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }; Write-Host "installers/install.ps1 parses"'
+    } else {
+        echo "pwsh is not installed, so install.ps1 goes unchecked here; CI still parses it"
+    }
+}
+
+# Build the release binary for one target triple, e.g. aarch64-apple-darwin.
+task cross triple {
+    rustup target add $1
+    cargo build --release --locked --target $1 --bin $bin
+}
+
+# Prove the Linux binary loads no shared library.
+task static-check {
+    cross $musl
+    # ldd exists on Linux only, and macOS always links libSystem, so the
+    # assertion is guarded rather than the build: everyone still gets the
+    # musl binary compiled.
+    if $OS == linux {
+        out=target/$musl/release/$bin
+        file $out
+        # ldd says "statically linked" for a static binary and "not a dynamic
+        # executable" for a static-pie one, depending on which libc answers.
+        # Both are the result we want, so neither wording is the test: a real
+        # dependency is a `lib... => ...` mapping line, and nothing else is.
+        #
+        # ldd also exits nonzero on a binary that is not dynamic at all, which
+        # is the success case here, so its output goes through a file. A
+        # `$(ldd ...)` capture would abort the task exactly when it passed.
+        try ldd $out > target/ldd.txt
+        deps=$(read target/ldd.txt)
+        remove target/ldd.txt
+        echo "$deps"
+        if $deps contains "=>" {
+            fail "binary is dynamically linked"
+        }
+    } else {
+        echo "built the musl binary; ldd is Linux-only, so the assertion is skipped here"
+    }
+}
+
+# Build the website the way GitHub Pages does, base path included.
+task web-build {
+    # cd moves the interpreter's directory and is undone when the task
+    # returns, so this leaves the rest of the run where it found it.
+    cd website
+    env VITE_BASE /chore/
+    pnpm install --frozen-lockfile
+    pnpm build
+}
+
+# Delete the target directory.
+task clean {
+    cargo clean
+}

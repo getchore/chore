@@ -36,14 +36,14 @@ that exists solely in CI does not break the gate.
 curl -fsSL https://getchore.github.io/chore/install.sh | sh
 
 # pin a version
-curl -fsSL https://getchore.github.io/chore/install.sh | sh -s -- v0.1.0
+curl -fsSL https://getchore.github.io/chore/install.sh | sh -s -- v1.0.0
 ```
 
 ```powershell
 irm https://getchore.github.io/chore/install.ps1 | iex
 
 # pin a version (iex takes no arguments, so run it as a block)
-& ([scriptblock]::Create((irm https://getchore.github.io/chore/install.ps1))) v0.1.0
+& ([scriptblock]::Create((irm https://getchore.github.io/chore/install.ps1))) v1.0.0
 ```
 
 Both honour `CHORE_INSTALL_DIR` (default `~/.local/bin`) and verify the
@@ -81,6 +81,9 @@ $ chore list
 [docs/SPEC.md](docs/SPEC.md) is the full language reference — `chore help` and
 `chore spec` print the same material from the binary. Release and installer
 mechanics are in [docs/RELEASING.md](docs/RELEASING.md).
+
+`chore` builds itself with its own `chorefile`: `chore list` shows the tasks,
+and `chore ci` is the gate CI runs.
 
 ## Status
 

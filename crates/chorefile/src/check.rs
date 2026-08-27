@@ -496,9 +496,12 @@ impl Checker<'_> {
         else {
             return;
         };
-        // A builtin of the same name already wins over `PATH`, so only a
-        // `^`-forced call actually reaches the non-portable program.
-        if !cmd.force_path && builtins::is_builtin(name) {
+        // A task or a builtin of the same name already wins over `PATH`, so
+        // only a `^`-forced call actually reaches the non-portable program.
+        // Tasks matter as much as builtins here: `test` is among the most
+        // common task names there is, and calling it from an aggregate task
+        // is the most common thing to do with it.
+        if !cmd.force_path && (self.tasks.contains(name) || builtins::is_builtin(name)) {
             return;
         }
         let called = if cmd.force_path {
