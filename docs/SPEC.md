@@ -87,7 +87,8 @@ The comment line directly above a `task` is its description.
 ```
 $a == $b     $a != $b     $a == ""
 $a contains x    $a starts-with x    $a ends-with x
-exists path      which name      any command's exit code
+exists path      which name      changed path...
+any command's exit code
 !cond      cond && cond      cond || cond
 ```
 
@@ -233,6 +234,7 @@ read     <file>               prints contents, trimmed
 write    <file> <text>        `>>` appends
 sha256   <file>
 exists   <path>               exit 0/1, for `if`
+changed  <path...>            exit 0/1, for `if`; records what it saw
 echo     <text...>
 env      <NAME> [value]       get or set
 fail     <msg>
@@ -300,6 +302,37 @@ feeds straight back into another command.
 **write** ends the file with a newline, and `read` trims it back off, so a
 read/write round trip is lossless and successive `>>` lines stack.
 
+**changed** answers "did any of these paths change since the last time this
+task asked?". Exit 0 means yes, and it records the new state, so the next run
+sees "no"; exit 1 means every path is unchanged, and nothing is recorded. A
+file is hashed by its contents, a directory recursively over its entries in
+sorted order, with each entry's path in the hash as well as its bytes, so a
+rename is a change even when no byte moved. A path that does not exist counts
+as changed and is recorded as missing, which makes a delete a change and a
+re-creation a change again. Symlinked directories are not descended into, the
+same rule `find` follows.
+
+The record lives in `$ROOT/.chore/state`, one line per record, keyed on the
+calling task **and** the exact argument list, so two tasks watching the same
+paths keep separate answers and one task can hold several. Delete the file to
+force everything to rebuild; `.chore/` belongs in `.gitignore`, since the
+state describes one machine's tree. The file starts with a version line and a
+run that does not recognise it starts from scratch, which costs one extra
+build and never a wrong answer.
+
+`--force` reports changed without consulting the state, since a forced run is
+a request to do the work anyway, and it records what it saw. `--dry` reads
+the state but never writes it: a preview that recorded would leave the next
+real run skipping work that was only ever previewed.
+
+```sh
+task build {
+    if changed src Cargo.toml {
+        cargo build --release
+    }
+}
+```
+
 **which**, **exists** and **env <NAME>** report a miss as exit 1 rather than a
 hard failure, which is what lets them drive an `if`. Under fail-fast a bare
 `which foo` still stops the task. Put it in a condition or a `try`.
@@ -366,8 +399,9 @@ A condition is believed only when its command actually **answered**. Any
 command that *fails* inside an `if` condition leaves the condition undecided,
 and an undecided condition previews the `then` branch, since previewing the
 work beats previewing nothing. The rule is positional, not per-builtin:
-`exists`, `which` and `env <NAME>` are the only builtins that cannot fail. A
-miss is their answer, a nonzero exit, so `if exists build/version.txt`
+`exists`, `which`, `env <NAME>` and `changed` are the only builtins that
+cannot fail. A miss is their answer, a nonzero exit, so
+`if exists build/version.txt`
 previews `else` while `if read build/version.txt` previews `then`. The choice
 is made over the condition as a whole, so a failure anywhere inside `&&`, `||`
 or `!` still previews `then`, and `!` has no truth value to flip. A program on

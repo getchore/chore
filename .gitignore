@@ -5,6 +5,9 @@ target/
 /chore-*.zip
 /*.sha256
 
+# `changed` records what it last saw here; it describes one machine's tree.
+.chore/
+
 node_modules/
 website/dist/
 .DS_Store

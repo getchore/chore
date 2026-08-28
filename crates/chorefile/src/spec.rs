@@ -294,6 +294,21 @@ it exists to be the condition of an `if`. A broken symlink still exists.",
         flags: NO_FLAGS,
     },
     Builtin {
+        name: "changed",
+        usage: "changed <path...>",
+        summary: "test whether inputs changed since the last run",
+        description: "Exits 0 when any path differs from the last recorded run and 1 when \
+every one of them is unchanged, so `if changed src Cargo.toml { }` skips work that is already \
+done. A directory is hashed recursively, contents and filenames both, so a rename counts; a \
+missing path counts as changed and is recorded as missing. Exit 0 records the new state and \
+exit 1 records nothing. The record lives in $ROOT/.chore/state, keyed on the calling task and \
+the exact argument list, so two tasks watching the same paths do not clobber each other. \
+--force reports changed without consulting the state; --dry reads the state but never writes \
+it, so a preview cannot make the next real run skip work it never did.",
+        effects: true,
+        flags: NO_FLAGS,
+    },
+    Builtin {
         name: "echo",
         usage: "echo <text...>",
         summary: "print its arguments",

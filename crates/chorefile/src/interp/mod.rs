@@ -138,6 +138,7 @@ pub fn builtin(name: &str) -> Option<Builtin> {
     builtins::fs::lookup(name)
         .or_else(|| builtins::net::lookup(name))
         .or_else(|| builtins::pack::lookup(name))
+        .or_else(|| builtins::state::lookup(name))
 }
 
 /// Resolves a builtin name to its implementation. Swappable so tests can run

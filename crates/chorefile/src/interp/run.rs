@@ -202,7 +202,9 @@ impl Interpreter<'_> {
     ) -> Result<Output> {
         let cwd = self.cwd().to_path_buf();
         let root = self.root.clone();
+        let task = self.frame().task.clone();
         let dry = self.mode == Mode::Dry;
+        let force = self.repeat == Repeat::Always;
         // Only a streamed command writes to the terminal; a capture or a `>`
         // hands the builtin a buffer, and progress redraws must stop there.
         let interactive = matches!(dest, Dest::Stream) && io::stdout().is_terminal();
@@ -228,8 +230,10 @@ impl Interpreter<'_> {
                 args: argv,
                 cwd: &cwd,
                 root: &root,
+                task: &task,
                 stdin,
                 dry,
+                force,
                 out: out_writer,
                 err: err_writer,
                 interactive,

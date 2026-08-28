@@ -54,11 +54,19 @@ pub struct Ctx<'a> {
     pub cwd: &'a Path,
     /// The directory holding the top-level chorefile, for `$ROOT`.
     pub root: &'a Path,
+    /// The name of the task this command is running inside, as `$TASK` gives
+    /// it, or `""` at the top level. `changed` keys its state on it, so two
+    /// tasks watching the same paths keep separate answers.
+    pub task: &'a str,
     /// Piped input, when this command is on the right of a `|`.
     pub stdin: Option<&'a [u8]>,
     /// `--dry`: echo, and do nothing that has an effect. Builtins that only
     /// read still run, because conditions and captures depend on them.
     pub dry: bool,
+    /// `--force`: the run was asked to do its work again whatever it did last
+    /// time. Only an up-to-date check has anything to do with this; `changed`
+    /// reports changed without consulting its state.
+    pub force: bool,
     /// Where the command should write, when it is not captured.
     pub out: &'a mut dyn Write,
     /// Where diagnostics go. Separate from [`Ctx::out`] because the two can
