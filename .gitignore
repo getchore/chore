@@ -8,8 +8,6 @@ target/
 # `changed` records what it last saw here; it describes one machine's tree.
 .chore/
 
-node_modules/
-website/dist/
 .DS_Store
 
 # A checkout of another project someone left here; not part of this repo.
@@ -17,3 +15,5 @@ website/dist/
 
 # Social-preview source and renders. The card that ships is website/public/og.png.
 /design/
+
+# The website is its own repository: getchore/getchore.github.io

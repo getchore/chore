@@ -14,7 +14,7 @@ Six, one per platform anyone actually runs:
 | `chore-aarch64-pc-windows-msvc.zip`   | Windows, arm64                    |
 
 Each archive holds the binary plus `LICENSE` and `README.md`, ships with a
-`.sha256` sidecar, and the release carries a combined `SHA256SUMS`. v1.0.0
+`.sha256` sidecar, and the release carries a combined `SHA256SUMS`. v1.4.0
 shipped all thirteen assets (six archives, six sidecars and `SHA256SUMS`), and
 `install.sh` installs from them and verifies the checksum, so the whole path
 from tag to installed binary is known to work.
@@ -80,7 +80,7 @@ fails silently is worse than one that is not there.
 The tag triggers `.github/workflows/release.yml`, which refuses to build if
 the tag and `Cargo.toml` disagree. It builds all six targets, smoke-tests
 each one it can execute, then creates the release with generated notes. This
-is how v1.0.0 was published.
+is how v1.4.0 was published.
 
 The smoke test writes a one-task chorefile and runs `--version`, `list`,
 `list --json`, `check` and the task itself. `x86_64-apple-darwin` is skipped:
@@ -111,17 +111,17 @@ Neither calls the GitHub API. `…/releases/latest/download/<asset>` resolves
 server-side, so there is no JSON to parse and no rate limit to hit.
 
 ```sh
-curl -fsSL https://getchore.github.io/chore/install.sh | sh
+curl -fsSL https://getchore.github.io/install.sh | sh
 
 # pin a version
-curl -fsSL https://getchore.github.io/chore/install.sh | sh -s -- v1.0.0
+curl -fsSL https://getchore.github.io/install.sh | sh -s -- v1.4.0
 ```
 
 ```powershell
-irm https://getchore.github.io/chore/install.ps1 | iex
+irm https://getchore.github.io/install.ps1 | iex
 
 # pin a version (iex takes no arguments, so run it as a block)
-& ([scriptblock]::Create((irm https://getchore.github.io/chore/install.ps1))) v1.0.0
+& ([scriptblock]::Create((irm https://getchore.github.io/install.ps1))) v1.4.0
 ```
 
 Both are live on the Pages site and both serve `200`. Both take an optional

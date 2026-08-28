@@ -1,8 +1,8 @@
 #!/bin/sh
 # chore installer.
 #
-#   curl -fsSL https://getchore.github.io/chore/install.sh | sh
-#   curl -fsSL https://getchore.github.io/chore/install.sh | sh -s -- v0.15.0
+#   curl -fsSL https://getchore.github.io/install.sh | sh
+#   curl -fsSL https://getchore.github.io/install.sh | sh -s -- v1.4.0
 #
 # The optional argument is a release tag; a leading v is optional. It wins over
 # CHORE_VERSION, which still works.
@@ -17,11 +17,11 @@ VERSION="${CHORE_VERSION:-}"
 
 err() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-# `curl ... | sh` passes nothing; `| sh -s -- v0.15.0` lands the tag in $1.
+# `curl ... | sh` passes nothing; `| sh -s -- v1.4.0` lands the tag in $1.
 while [ $# -gt 0 ]; do
     case "$1" in
         -h | --help)
-            echo "usage: install.sh [version]    e.g. install.sh v0.15.0"
+            echo "usage: install.sh [version]    e.g. install.sh v1.4.0"
             exit 0 ;;
         -*) err "unknown option: $1" ;;
         *) VERSION="$1" ;;
@@ -41,7 +41,7 @@ case "$(uname -s)" in
     # Always musl: statically linked, so it runs on glibc distros too.
     Linux) target="$arch-unknown-linux-musl" ;;
     MINGW* | MSYS* | CYGWIN*)
-        err "on Windows: irm https://getchore.github.io/chore/install.ps1 | iex" ;;
+        err "on Windows: irm https://getchore.github.io/install.ps1 | iex" ;;
     *) err "unsupported OS: $(uname -s)" ;;
 esac
 

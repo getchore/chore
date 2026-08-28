@@ -1,10 +1,10 @@
 # chore installer for Windows.
 #
-#   irm https://getchore.github.io/chore/install.ps1 | iex
+#   irm https://getchore.github.io/install.ps1 | iex
 #
 # To pin a version, iex cannot take arguments — run the script as a block:
 #
-#   & ([scriptblock]::Create((irm https://getchore.github.io/chore/install.ps1))) v0.15.0
+#   & ([scriptblock]::Create((irm https://getchore.github.io/install.ps1))) v1.4.0
 #
 # The optional argument is a release tag; a leading v is optional. It wins over
 # CHORE_VERSION, which still works.

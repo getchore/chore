@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="website/public/brand/logo-256.png" alt="" width="84" height="84">
+<img src="assets/logo-256.png" alt="" width="84" height="84">
 
 # chore
 
@@ -9,7 +9,7 @@
 Run your project's tasks from a `chorefile`, through a shell that lives inside
 the binary. The same file does the same thing on macOS, Linux and Windows.
 
-[**Get started**](https://getchore.github.io/chore/) &nbsp;·&nbsp; [**Reference**](https://getchore.github.io/chore/reference) &nbsp;·&nbsp; [**Releases**](https://github.com/getchore/chore/releases/latest)
+[**Get started**](https://getchore.github.io/) &nbsp;·&nbsp; [**Reference**](https://getchore.github.io/reference) &nbsp;·&nbsp; [**Releases**](https://github.com/getchore/chore/releases/latest)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/getchore/chore/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/getchore/chore/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/getchore/chore?style=flat-square&color=f97316)](https://github.com/getchore/chore/releases/latest) [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
@@ -20,11 +20,11 @@ the binary. The same file does the same thing on macOS, Linux and Windows.
 ## Install
 
 ```sh
-curl -fsSL https://getchore.github.io/chore/install.sh | sh
+curl -fsSL https://getchore.github.io/install.sh | sh
 ```
 
 ```powershell
-irm https://getchore.github.io/chore/install.ps1 | iex
+irm https://getchore.github.io/install.ps1 | iex
 ```
 
 ## A chorefile
@@ -67,7 +67,7 @@ is a warning, so a CI-only tool doesn't break the gate.
 
 ## More
 
-- [**Guide and reference**](https://getchore.github.io/chore/) — and [`llms.txt`](https://getchore.github.io/chore/llms-full.txt) for agents
+- [**Guide and reference**](https://getchore.github.io/) — and [`llms.txt`](https://getchore.github.io/llms-full.txt) for agents
 - [**setup-chore**](https://github.com/getchore/setup-chore) — `- uses: getchore/setup-chore@v1`
 - [**VS Code extension**](https://github.com/getchore/chorefile-vscode) — highlighting for `chorefile` and `.chore`
 - `chore completions --write` — tab completion for bash, zsh, fish and powershell

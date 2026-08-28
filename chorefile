@@ -12,10 +12,6 @@
 bin=chore
 musl=x86_64-unknown-linux-musl
 
-# The website is its own project, with its own package manager and lockfile,
-# so its tasks live beside it: `chore web::build`, `chore web::dev`.
-include website as web
-
 # Checks that need a CI runner's toolchain and would be dead weight in a
 # developer checkout: `chore gha::windows-dll-check`.
 include .github as gha
@@ -103,11 +99,13 @@ task static-check {
     }
 }
 
-# Build this working copy and put it where install.sh puts a release, so
-# `chore` on the PATH is the tree you are standing in. The same directory the
-# installers use, so this replaces a downloaded binary rather than shadowing
-# it from somewhere else on the PATH.
+# Install this working copy over the chore on your PATH.
 task upgrade {
+    # Into the directory install.sh uses, so this replaces a downloaded
+    # release rather than shadowing it from somewhere else on the PATH.
+    # Only the last `#` line above a task becomes its `chore list`
+    # description, so the reasoning lives in here.
+
     cargo build --release --locked --bin chore
     mkdir $HOME/.local/bin
     copy target/release/chore$EXE $HOME/.local/bin/chore$EXE
