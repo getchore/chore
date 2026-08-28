@@ -352,6 +352,7 @@ impl<'a> Interpreter<'a> {
             mode: self.mode,
             repeat: self.repeat,
             globals: self.globals.clone(),
+            globals_invented: self.globals_invented.clone(),
             now: self.now.clone(),
             builtins: self.builtins,
             memo: Arc::clone(&self.memo),
@@ -375,6 +376,9 @@ struct Fork<'a> {
     mode: Mode,
     repeat: Repeat,
     globals: HashMap<String, String>,
+    /// The `--dry` marks on those globals: a sibling reading one must be told
+    /// the same thing the parent would have been.
+    globals_invented: HashMap<String, String>,
     now: String,
     builtins: BuiltinTable,
     memo: Arc<Memo>,
@@ -393,6 +397,7 @@ impl<'a> Fork<'a> {
             .with_output(out)
             .with_error_output(err);
         child.globals = self.globals;
+        child.globals_invented = self.globals_invented;
         // The globals were evaluated once, before the first task, and their
         // values came with us. Running them again would repeat every `$(...)`
         // in them, once per sibling.

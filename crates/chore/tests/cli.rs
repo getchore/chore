@@ -178,13 +178,106 @@ fn list_shows_names_and_docs_in_source_order() {
     dir.chorefile(SAMPLE);
     let run = chore(&dir, &["list"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
-    let names: Vec<&str> = run
-        .stdout
-        .lines()
+    // The listing is one provenance line and then the tasks, so the rows are
+    // parsed the way they always were, one line further down.
+    let names: Vec<&str> = task_lines(&run.stdout)
         .filter_map(|l| l.split_whitespace().next())
         .collect();
     assert_eq!(names, ["build", "greet", "echoes"], "{}", run.stdout);
     assert!(run.stdout.contains("build the project"), "{}", run.stdout);
+}
+
+/// The task rows of a `chore list`: everything after the line that says which
+/// chorefile answered.
+fn task_lines(stdout: &str) -> impl Iterator<Item = &str> {
+    let mut lines = stdout.lines();
+    let first = lines.next().unwrap_or_default();
+    assert!(
+        first.starts_with("using ") && first.contains("$ROOT = "),
+        "no provenance line above the list:\n{stdout}"
+    );
+    lines
+}
+
+/// `chore list` says which chorefile it is listing and where `$ROOT` is,
+/// because the nearest-chorefile search means neither is obvious from where
+/// the command was typed.
+#[test]
+fn list_names_the_chorefile_in_the_current_directory() {
+    let dir = Dir::new();
+    dir.chorefile(SAMPLE);
+    let run = chore(&dir, &["list"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let first = run.stdout.lines().next().unwrap_or_default();
+    // Relative to the working directory, so the file that is right here is
+    // spelled the way a person would spell it.
+    assert!(
+        first.starts_with("using chorefile, $ROOT = "),
+        "{}",
+        run.stdout
+    );
+    // `$ROOT` is absolute: `.` would look identical from a subproject.
+    let root = first.rsplit("$ROOT = ").next().expect("a root");
+    assert!(root.ends_with(&dir_name(&dir)), "{}", run.stdout);
+}
+
+/// Found by walking up: the relative spelling is the part that says "the file
+/// governing this listing is not the one you are standing in".
+#[test]
+fn list_from_a_subdirectory_shows_the_chorefile_it_walked_up_to() {
+    let dir = Dir::new();
+    dir.chorefile(SAMPLE);
+    let nested = dir.path().join("a/b");
+    std::fs::create_dir_all(&nested).expect("nested");
+    let run = chore_in(&nested, &["list"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let first = run.stdout.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with("using ../../chorefile, $ROOT = "),
+        "{}",
+        run.stdout
+    );
+    // And `$ROOT` is the top-level directory, not the one we stood in.
+    let root = first.rsplit("$ROOT = ").next().expect("a root");
+    assert!(root.ends_with(&dir_name(&dir)), "{}", run.stdout);
+    // The tasks below it are still the tasks, parsed as they always were.
+    let names: Vec<&str> = task_lines(&run.stdout)
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert_eq!(names, ["build", "greet", "echoes"], "{}", run.stdout);
+}
+
+/// A subdirectory with a chorefile of its own is a different project with a
+/// different `$ROOT`, and the two listings are told apart by the `$ROOT` — the
+/// relative path is `chorefile` in both.
+#[test]
+fn list_inside_a_subproject_reports_that_subproject_as_root() {
+    let dir = Dir::new();
+    dir.chorefile(SAMPLE);
+    let handoff = dir.path().join("handoff");
+    std::fs::create_dir_all(&handoff).expect("handoff");
+    std::fs::write(handoff.join("chorefile"), "task ship {\n    echo ship\n}\n").expect("write");
+
+    let above = chore(&dir, &["list"]);
+    let inside = chore_in(&handoff, &["list"]);
+    assert_eq!(inside.code, 0, "{}", inside.stderr);
+    let line = |out: &str| out.lines().next().unwrap_or_default().to_string();
+    let (above, inside) = (line(&above.stdout), line(&inside.stdout));
+    assert!(above.starts_with("using chorefile, $ROOT = "), "{above}");
+    assert!(inside.starts_with("using chorefile, $ROOT = "), "{inside}");
+    // Same spelling of the file, different worlds, and the line says so.
+    assert_ne!(above, inside);
+    assert!(inside.ends_with("/handoff"), "{inside}");
+}
+
+/// The unique tail of a test's temp directory, for asserting on a path
+/// without spelling out this host's temp root.
+fn dir_name(dir: &Dir) -> String {
+    dir.path()
+        .file_name()
+        .expect("temp dir name")
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[test]
@@ -193,6 +286,9 @@ fn list_json_has_the_documented_fields() {
     dir.chorefile(SAMPLE);
     let run = chore(&dir, &["list", "--json"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
+    // A bare array. The text listing names the chorefile and `$ROOT`; the JSON
+    // deliberately does not, because carrying them would mean an object and
+    // that breaks `jq '.[]'` for everyone. See `list_json_is_an_array_of_tasks`.
     assert!(run.stdout.trim_start().starts_with('['), "{}", run.stdout);
     // The whole record, except `file`, whose spelling is the host's business.
     assert!(
@@ -243,13 +339,47 @@ fn list_json_has_the_documented_fields() {
     );
 }
 
+/// `list --json` is an array of tasks, and stays one.
+///
+/// The text listing gained a line naming the chorefile and `$ROOT`; the JSON
+/// deliberately did not, because an array has nowhere to put a fact about the
+/// whole listing and turning it into an object breaks every consumer doing
+/// `jq '.[]'`. That is a major-release change with a note, not a quiet one.
+/// This test exists so the shape cannot drift by accident.
+#[test]
+fn list_json_is_an_array_of_tasks() {
+    let dir = Dir::new();
+    dir.chorefile(SAMPLE);
+    let nested = dir.path().join("a/b");
+    std::fs::create_dir_all(&nested).expect("nested");
+    let run = chore_in(&nested, &["list", "--json"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+
+    let text = run.stdout.trim();
+    assert!(text.starts_with('['), "{text}");
+    assert!(text.ends_with(']'), "{text}");
+    // The provenance line belongs to the text listing only; --json is for
+    // tools, and its first byte is the array.
+    assert!(!run.stdout.contains("using "), "{}", run.stdout);
+    // A task still names the file it was written in, which is how a tool
+    // learns where things live until the array becomes an object.
+    let name = dir_name(&dir);
+    assert!(
+        run.stdout.contains(&format!("{name}/chorefile")),
+        "{}",
+        run.stdout
+    );
+}
+
 #[test]
 fn no_arguments_leads_with_the_tasks_and_points_at_help() {
     let dir = Dir::new();
     dir.chorefile(SAMPLE);
     let run = chore(&dir, &[]);
     assert_eq!(run.code, 0, "{}", run.stderr);
-    assert!(run.stdout.starts_with("Available tasks:"), "{}", run.stdout);
+    // Which chorefile answered, then the tasks it holds.
+    assert!(run.stdout.starts_with("using chorefile,"), "{}", run.stdout);
+    assert!(run.stdout.contains("\nAvailable tasks:"), "{}", run.stdout);
     assert!(run.stdout.contains("build"), "{}", run.stdout);
     // The grammar is a page long and nobody asked for it, so the answer is a
     // pointer to where it lives rather than the page itself.

@@ -8,6 +8,7 @@
 use crate::ast::{Chain, PartKind, VarRef, Word};
 use crate::error::{Error, Result};
 
+use super::run::describe;
 use super::{Dest, Flags, Interpreter, Mode};
 
 impl Interpreter<'_> {
@@ -30,6 +31,7 @@ impl Interpreter<'_> {
                     // Each argument stays one argv entry: it arrived as one,
                     // and re-splitting it would lose an argument the caller
                     // deliberately quoted.
+                    self.touch_args("$@");
                     let args = self.frame().args.clone();
                     for arg in args {
                         push_field(&mut fields);
@@ -61,7 +63,10 @@ impl Interpreter<'_> {
         for part in &word.parts {
             match &part.kind {
                 PartKind::Literal(text) => s.push_str(text),
-                PartKind::Var(VarRef::All) => s.push_str(&self.frame().args.join(" ")),
+                PartKind::Var(VarRef::All) => {
+                    self.touch_args("$@");
+                    s.push_str(&self.frame().args.join(" "));
+                }
                 PartKind::Var(other) => {
                     let text = self.var(other)?;
                     s.push_str(&text);
@@ -75,19 +80,38 @@ impl Interpreter<'_> {
         Ok(s)
     }
 
+    /// Read one variable, and — under `--dry` — carry its mark along.
+    ///
+    /// This is the whole of propagation. Every path that turns a `$name`,
+    /// `$1` or `$@` into text comes through here or through `expand`'s two
+    /// `$@` arms, so a value the preview invented marks whatever is computed
+    /// from it without any of the callers having to know. `$#` is deliberately
+    /// left out: a count of arguments is a fact about the call, not about the
+    /// values in it.
     fn var(&mut self, var: &VarRef) -> Result<String> {
         match var {
-            VarRef::Named(name) => self
-                .lookup(name)
-                .ok_or_else(|| self.undefined(&format!("${name}"))),
-            VarRef::Positional(n) => self
-                .frame()
-                .args
-                .get(n.wrapping_sub(1))
-                .cloned()
-                .ok_or_else(|| self.undefined(&format!("${n}"))),
+            VarRef::Named(name) => {
+                let value = self
+                    .lookup(name)
+                    .ok_or_else(|| self.undefined(&format!("${name}")))?;
+                self.touch_named(name);
+                Ok(value)
+            }
+            VarRef::Positional(n) => {
+                let value = self
+                    .frame()
+                    .args
+                    .get(n.wrapping_sub(1))
+                    .cloned()
+                    .ok_or_else(|| self.undefined(&format!("${n}")))?;
+                self.touch_args(&format!("${n}"));
+                Ok(value)
+            }
             VarRef::Count => Ok(self.frame().args.len().to_string()),
-            VarRef::All => Ok(self.frame().args.join(" ")),
+            VarRef::All => {
+                self.touch_args("$@");
+                Ok(self.frame().args.join(" "))
+            }
         }
     }
 
@@ -118,18 +142,29 @@ impl Interpreter<'_> {
             echo: false,
             needed: true,
         };
-        let out = self.chain(chain, Dest::Capture, None, flags)?;
-        if !out.success() {
-            if self.mode == Mode::Dry {
+        // Whatever inside the chain could not be evaluated, the *capture* is
+        // what a mark has to name: it is the text the author wrote, and the
+        // thing whose value is missing. So the innermost reason — a message
+        // from `dry_failed`, a skipped block's command line — is replaced
+        // here by the chain as written, once the whole capture has had its
+        // say. An `unevaluated` from further out is left alone.
+        let outer = self.unevaluated.take();
+        let value = match self.chain(chain, Dest::Capture, None, flags) {
+            Ok(out) if out.success() => Ok(out.captured()),
+            Ok(out) if self.mode == Mode::Dry => {
                 let code = out.code;
                 self.dry_failed(&format!("capture failed with exit code {code}; using \"\""));
-                return Ok(String::new());
+                Ok(String::new())
             }
-            return Err(Error::Run {
+            Ok(out) => Err(Error::Run {
                 message: format!("capture failed with exit code {}", out.code),
-            });
-        }
-        Ok(out.captured())
+            }),
+            Err(e) => Err(e),
+        };
+        let inner = self.unevaluated.take();
+        let blamed = inner.map(|_| describe(chain, &mut |w| self.preview(w)));
+        self.unevaluated = outer.or(blamed);
+        value
     }
 
     /// Preview a word for an error message, without running its captures.

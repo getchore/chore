@@ -566,6 +566,30 @@ or `!` still previews `then`, and `!` has no truth value to flip. A program on
 `PATH` that ran and exited nonzero answered, and is believed; one that could
 not be spawned did not.
 
+A capture the preview could not evaluate leaves something behind.
+`size=$(script uv run - { ... })` binds the empty string, so `if $size == ""`
+is a perfectly **decidable** comparison — nothing failed at the `if`, and the
+undecided rule never fires. The preview would walk into `fail "wasm missing"`
+and report a problem that exists only because it declined to look.
+
+It does not take a different branch: the value does not exist, so every verdict
+about it is a guess. It **explains the decision instead**. A variable assigned
+from something `--dry` could not evaluate remembers what is missing, reading it
+marks whatever is computed from it — through a second assignment, a loop
+variable, and a task's `$1` and `$@` — and a condition that reads one prints a
+note on stderr beside the branch it took:
+
+```console
+--dry: took the `then` branch on `$size`, a value this preview invented because
+it could not evaluate `script uv run - { ... }`; a real run may go the other way
+```
+
+Notes go to stderr, never stdout, since stdout may be a capture's value, and
+each distinct note is printed once per run — a decision inside a `for` body is
+explained once, not once per iteration. An ordinary assignment over the
+variable clears the mark. `fail` still aborts, but one reached from inside a
+branch chosen this way says so. None of this exists in a real run.
+
 ### Top-level statements
 
 Top-level assignments are evaluated once, before the first task. `list`,
@@ -608,9 +632,33 @@ fact, so that message says a newer `chore` may be needed.
 ## include
 
 ```sh
-include ffmpeg.chore
-include libs/chorefile as libs     # its tasks become libs::build
+include tasks/rust.chore           # a fragment of this project
+include website as web             # a subproject, as `web::build`
 ```
+
+### Fragment or subproject
+
+Two different things can be included, and the **filename** is what says which.
+`chore` finds its chorefile by walking up from the working directory to the
+first file named exactly `chorefile`, and nothing else is ever discovered.
+
+A **fragment** is a piece of this project that only means anything merged into
+it. Name it `something.chore`. Discovery never finds it, so there is one
+project and one `$ROOT` however you reach it.
+
+A **subproject** has its own `chorefile`, and is standalone on purpose: its own
+package manager, its own lockfile, worth running from inside. `cd website &&
+chore build` then works, and `$ROOT` is `website/` for that run.
+
+That second one is a real choice with a consequence, so make it deliberately: a
+task reading `download vendor/thing` puts the file under the project root when
+run from the root, and under `website/` when run from there. Neither is wrong,
+and nothing in between tells you which happened. If the directory is not
+genuinely its own project, name the file `.chore` and the question never comes
+up — `check` warns when an `include` points at a `chorefile` inside your
+project, for exactly this reason. It is a warning, once per include, and it
+says both halves: how to make the question go away, and that keeping it is a
+legitimate choice when the directory really is its own project.
 
 - Paths resolve relative to the **including file**, not the working directory.
   A directory argument means the `chorefile` inside it.
@@ -676,6 +724,26 @@ namespaces, its tasks exist twice under two prefixes, which is what asking for
 them twice means. A true cycle, a file that includes itself either directly or
 through others, is an error naming the whole loop.
 
+### Which chorefile answered
+
+`chore` uses the nearest file named `chorefile` at or above the working
+directory, so a project with one in a subdirectory has more than one, and which
+answers depends on where you stand. `chore list` says which it used, on a line
+above the tasks:
+
+```
+using ../../chorefile, $ROOT = /Users/me/repo
+```
+
+The chorefile is spelled relative to the working directory, which is what tells
+you at a glance that you walked up; `$ROOT` is absolute, because it is what
+every relative path in the run resolves against, and a relative `$ROOT` would
+print `.` from both the project root and a subproject. The line is always
+printed, and bare `chore` prints it too.
+
+`chore list --json` is an array of tasks and stays one — a tool reads each
+task's own `file` field. `chore list --names` is unchanged.
+
 ## check
 
 Builtins are reserved by convention, not by the interpreter: at runtime a task
@@ -686,8 +754,9 @@ subcommand, so the task is unreachable.
 Reports syntax errors, reserved names, unknown commands, undefined variables
 (in a parameter's default as much as in a body), duplicate names, a parameter
 declared twice in one header, a parameter read as `$name` where parameters are
-positional, include cycles, an unmet `require`, and non-portable commands
-(`curl`, `unzip`, `tar`, `cp`, `rm`) with the builtin that replaces them. A default is checked in the
+positional, include cycles, an `include` pointing at a file named `chorefile`
+inside the project, an unmet `require`, and non-portable commands (`curl`,
+`unzip`, `tar`, `cp`, `rm`) with the builtin that replaces them. A default is checked in the
 scope it will be evaluated in, so it may read `$1`…`$(n-1)` but not its own
 slot or a later one.
 

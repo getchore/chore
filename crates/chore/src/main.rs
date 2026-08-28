@@ -228,6 +228,10 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
                 }
             };
             warn_unmet(&loaded.merged);
+            // The same provenance line `list` prints, for the same reason:
+            // bare `chore` is the listing most people actually reach for, so
+            // it cannot be the one that leaves out which chorefile answered.
+            list::source(out, &loaded.path, &loaded.merged.root, style)?;
             writeln!(out, "{}", style.bold("Available tasks:"))?;
             list::text(out, &loaded.merged, style)?;
             writeln!(
@@ -242,9 +246,20 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
             let loaded = Loaded::discover()?;
             warn_unmet(&loaded.merged);
             match format {
-                ListFormat::Text => list::text(out, &loaded.merged, style)?,
+                ListFormat::Text => {
+                    // Which chorefile this is, before the tasks it holds:
+                    // `chore list` means different things in different
+                    // directories of the same tree, and the list alone has
+                    // never said which one you got. See `list::source`.
+                    list::source(out, &loaded.path, &loaded.merged.root, style)?;
+                    list::text(out, &loaded.merged, style)?;
+                }
                 // `--json` and `--names` are read by programs, so they are
-                // plain no matter what the terminal would have allowed.
+                // plain no matter what the terminal would have allowed. The
+                // same two facts reach a program through `--json`'s top-level
+                // `chorefile` and `root`; `--names` is a completion script's
+                // format, where anything but `name<TAB>description` per line
+                // would be a bug.
                 ListFormat::Json => list::json(out, &loaded.merged)?,
                 ListFormat::Names => list::names(out, &loaded.merged)?,
             }

@@ -90,10 +90,18 @@ impl Interpreter<'_> {
         stdin: Option<&[u8]>,
         flags: Flags,
     ) -> Result<Output> {
-        let mut argv = self.expand(&cmd.name)?;
-        for word in &cmd.args {
-            argv.extend(self.expand(word)?);
-        }
+        // Under `--dry` the whole argument list is expanded inside one
+        // `marking`, because that is the granularity a reader needs: the mark
+        // names the call, and the callee's `$1` and `$@` carry it.
+        let (argv, marks) = self.marking(|me| -> Result<Vec<String>> {
+            let mut argv = me.expand(&cmd.name)?;
+            for word in &cmd.args {
+                argv.extend(me.expand(word)?);
+            }
+            Ok(argv)
+        });
+        let argv = argv?;
+        let args_mark = marks.source();
         let Some((name, rest)) = argv.split_first() else {
             return Err(Error::Run {
                 message: "empty command".into(),
@@ -125,6 +133,10 @@ impl Interpreter<'_> {
                 return self.parallel(&argv, dest, stderr);
             }
             if self.task(&name).is_some() {
+                // Set immediately before the call and taken by `call_task`:
+                // a builtin or a program on `PATH` has no frame to carry it,
+                // so nothing else may see it.
+                self.pending_args_mark = args_mark;
                 return self.run_task_command(&name, &argv[1..], dest, stderr);
             }
             if let Some(f) = (self.builtins)(&name) {
@@ -296,6 +308,13 @@ impl Interpreter<'_> {
                 return Ok(self.dry_failed(&message));
             }
             Err(e) => {
+                // The one error `--dry` still lets through. `fail` aborting is
+                // right — it is the author's own hard stop — but a `fail` the
+                // preview walked into on a value it invented is worth telling
+                // apart from one the author's logic chose.
+                if self.mode == Mode::Dry && argv[0] == "fail" {
+                    self.note_invented_fail();
+                }
                 if let (Some(path), Mode::Run) = (&stderr, self.mode) {
                     if let Error::Run { message } = &e {
                         let _ = writeln!(diag, "{message}");
@@ -575,7 +594,7 @@ impl Interpreter<'_> {
     /// condition never ran is undecided, and `Interpreter::stmt` previews the
     /// `then` branch rather than believing a verdict nobody gave.
     fn dry_skipped(&mut self, argv: &[String], echoed: bool) -> Result<Output> {
-        self.unevaluated = true;
+        self.unevaluated = Some(format!("script {}", quoted(argv)));
         let why = "chore cannot tell what a `script` block does, so a preview never runs one";
         if echoed {
             writeln!(self.out, "  skipped by --dry: {why}")?;
@@ -745,6 +764,7 @@ impl Interpreter<'_> {
         // `$TRIPLE`, `$(...)` runs in the callee's directory, and the caller's
         // locals are not in scope — a default belongs to the task that
         // declared it, not to whoever happened to call it.
+        let args_invented = self.pending_args_mark.take();
         self.frames.push(Frame {
             task: name.to_string(),
             args: args.to_vec(),
@@ -752,6 +772,10 @@ impl Interpreter<'_> {
             // dies with the frame.
             cwd: self.cwd().to_path_buf(),
             vars: HashMap::new(),
+            invented: HashMap::new(),
+            // The mark on what the caller passed. It dies with the frame too,
+            // which is right: `$1` means something different in every call.
+            args_invented,
         });
         let bound = match self.bind_defaults(task, args.len()) {
             Ok(()) => self.frame().args.clone(),
@@ -877,7 +901,15 @@ impl Interpreter<'_> {
             let Some(default) = &param.default else {
                 continue;
             };
-            let value = self.expand_to_string(default)?;
+            let (value, marks) = self.marking(|me| me.expand_to_string(default));
+            let value = value?;
+            // A default is an argument too, so one the preview could not
+            // evaluate marks this call's `$1`, `$2` and `$@` exactly as a
+            // caller's would.
+            if let Some(source) = marks.source() {
+                let frame = self.frames.last_mut().unwrap();
+                frame.args_invented.get_or_insert(source);
+            }
             self.frames.last_mut().unwrap().args.push(value);
         }
         Ok(())

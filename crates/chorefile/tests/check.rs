@@ -4,6 +4,7 @@
 //! that breaks these snippets breaks these tests too.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use chorefile::ast;
 use chorefile::check::{self, Diagnostic, Severity};
@@ -935,6 +936,152 @@ fn namespace_containing_the_separator() {
 fn a_namespace_used_twice() {
     let source = "include a.chore as libs\ninclude b.chore as libs\n";
     assert_eq!(matching(source, "used twice").len(), 1);
+}
+
+// --- 8a. an include that is also discoverable -------------------------------
+//
+// Discovery walks up to the first file named exactly `chorefile`, so an
+// include pointing at one gives that file a second life with a different
+// `$ROOT`. See `Checker::discoverable`.
+
+/// A temp directory that cleans itself up, for the cases that need `include`
+/// to resolve against something real on disk.
+struct Dir(PathBuf);
+
+impl Dir {
+    fn new(label: &str) -> Self {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "chorefile-check-{label}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("temp dir");
+        Self(path)
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The message names the file; the help is where the value is, so both are
+/// pinned.
+#[test]
+fn including_a_file_named_chorefile_is_a_warning() {
+    let found = matching("include libs/chorefile as libs\n", "discover");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Warning);
+    assert!(found[0].message.contains("libs/chorefile"), "{found:#?}");
+
+    let help = found[0].help.as_deref().expect("help");
+    assert!(help.contains("cd libs && chore list"), "{help}");
+    assert!(help.contains("$ROOT"), "{help}");
+    assert!(help.contains("libs/tasks.chore"), "{help}");
+    // The deliberate case is named rather than argued with.
+    assert!(help.contains("standalone subproject"), "{help}");
+}
+
+/// The whole point of the include extension: a fragment discovery cannot find
+/// is the shape being recommended, so it must never be warned about.
+#[test]
+fn including_a_dot_chore_fragment_is_silent() {
+    let found = matching("include libs/tasks.chore as libs\n", "discover");
+    assert!(found.is_empty(), "{found:#?}");
+}
+
+/// The same trap wearing a different hat: `include libs` resolves to
+/// `libs/chorefile` when `libs` is a directory, so it warns exactly as the
+/// spelled-out form does — and the help still points at the directory.
+#[test]
+fn including_a_bare_directory_warns_about_the_chorefile_inside_it() {
+    let dir = Dir::new("bare-dir");
+    std::fs::create_dir_all(dir.0.join("libs")).expect("libs");
+    std::fs::write(dir.0.join("libs").join("chorefile"), "").expect("write");
+
+    let path = dir.0.join("chorefile");
+    let found: Vec<Diagnostic> = check::check_source("include libs as libs\n", &path)
+        .into_iter()
+        .filter(|d| d.message.contains("discover"))
+        .collect();
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Warning);
+    // Shown relative to `$ROOT`, not as the temp-directory path.
+    assert!(found[0].message.contains("`libs/chorefile`"), "{found:#?}");
+    assert!(
+        found[0]
+            .help
+            .as_deref()
+            .is_some_and(|h| h.contains("cd libs")),
+        "{found:#?}"
+    );
+}
+
+/// No subproject heuristic: a manifest next to the target does not buy
+/// silence. The warning is true either way, and a filesystem probe would make
+/// the same text check differently on two machines.
+#[test]
+fn a_manifest_beside_the_target_does_not_silence_the_warning() {
+    let dir = Dir::new("subproject");
+    std::fs::create_dir_all(dir.0.join("website")).expect("website");
+    std::fs::write(dir.0.join("website").join("chorefile"), "").expect("write");
+    std::fs::write(dir.0.join("website").join("package.json"), "{}").expect("write");
+
+    let path = dir.0.join("chorefile");
+    let found: Vec<Diagnostic> = check::check_source("include website/chorefile as web\n", &path)
+        .into_iter()
+        .filter(|d| d.message.contains("discover"))
+        .collect();
+    assert_eq!(found.len(), 1, "{found:#?}");
+}
+
+/// Outside the project there is nothing to be shadowed: walking up from
+/// another project's directory was never going to land here.
+#[test]
+fn a_chorefile_outside_the_project_is_not_warned_about() {
+    let found = matching("include ../other/chorefile as other\n", "discover");
+    assert!(found.is_empty(), "{found:#?}");
+}
+
+/// A self-include is already an error, and one file does not need two
+/// findings; the same goes for the second of a doubled include.
+#[test]
+fn an_include_that_is_already_an_error_is_not_also_warned_about() {
+    let found = matching("include chorefile\n", "discover");
+    assert!(found.is_empty(), "{found:#?}");
+    assert_eq!(
+        matching(
+            "include libs/chorefile\ninclude ./libs/chorefile\n",
+            "discover"
+        )
+        .len(),
+        1
+    );
+}
+
+/// In a merged tree the finding belongs to the file that wrote the `include`,
+/// and `$ROOT` is the top-level file's directory however deep that file is.
+#[test]
+fn the_warning_points_at_the_file_that_wrote_the_include() {
+    let found: Vec<String> = check::check_merged(&merge(&[
+        ("chorefile", None, "include libs/tasks.chore as libs\n"),
+        (
+            "libs/tasks.chore",
+            Some("libs"),
+            "include vendor/chorefile as vendor\n",
+        ),
+    ]))
+    .into_iter()
+    .filter(|d| d.message.contains("discover"))
+    .map(|d| format!("{}: {}", vars::display(&d.at.file), d.message))
+    .collect();
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].starts_with("libs/tasks.chore: "), "{found:#?}");
+    // Resolved against the file doing the including, shown against `$ROOT`.
+    assert!(found[0].contains("`libs/vendor/chorefile`"), "{found:#?}");
 }
 
 // --- clean -----------------------------------------------------------------

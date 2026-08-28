@@ -830,9 +830,13 @@ fn included_project() -> Dir {
 fn list_shows_flat_and_namespaced_tasks_from_the_included_files() {
     let dir = included_project();
     let run = chore(&dir, &["list"]).ok();
-    let names: Vec<&str> = run
-        .stdout
-        .lines()
+    // The first line says which chorefile answered — the top-level one, not
+    // any of the files it includes — and the tasks follow it.
+    let first = run.stdout.lines().next().unwrap_or_default();
+    assert!(first.starts_with("using chorefile, $ROOT = "), "{first}");
+    let rows: Vec<&str> = run.stdout.lines().skip(1).collect();
+    let names: Vec<&str> = rows
+        .iter()
         .filter_map(|l| l.split_whitespace().next())
         .collect();
     // Merge order: each include, then the including file's own tasks. A flat
@@ -845,10 +849,10 @@ fn list_shows_flat_and_namespaced_tasks_from_the_included_files() {
         run.stdout
     );
 
-    // The descriptions line up in one column, sized by the longest name.
-    let columns: Vec<usize> = run
-        .stdout
-        .lines()
+    // The descriptions line up in one column, sized by the longest name. The
+    // provenance line is not a row and takes no part in the column.
+    let columns: Vec<usize> = rows
+        .iter()
         .filter(|l| !l.trim().is_empty())
         .map(|l| {
             // Where the description starts: past the indent, past the name,

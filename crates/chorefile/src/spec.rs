@@ -540,10 +540,13 @@ requirement fails a run and `chore check`, and `chore list` warns and still list
     Form {
         name: "include",
         syntax: "include path [as name]",
-        example: "include libs/chorefile as libs",
+        example: "include tasks/rust.chore",
         meaning: "Pull another chorefile in and merge it. Paths resolve relative to the \
 including file, a directory means the chorefile inside it, and `$ROOT` stays the top-level \
-chorefile's directory. `as` namespaces both tasks and globals as `libs::build`; without it \
+chorefile's directory. The filename says what is being included: a `.chore` file is a fragment \
+of this project, which discovery never finds on its own, while a directory holding its own \
+`chorefile` is a subproject that can also be run from inside, where `$ROOT` is that directory \
+rather than the project root. `as` namespaces both tasks and globals as `libs::build`; without it \
 everything merges flat, where a duplicate name across two files is an error. A cycle names the \
 whole loop.",
     },

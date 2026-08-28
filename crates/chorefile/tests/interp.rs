@@ -2136,6 +2136,395 @@ fn dry_branches_on_a_softened_failure_the_way_a_shell_would() {
 }
 
 // ---------------------------------------------------------------------------
+// --dry: a value the preview invented
+//
+// A capture the preview could not evaluate binds the empty string, and every
+// later decision on that variable is decidable — and wrong. The preview does
+// not take a different branch, because there is nothing to decide on; it says
+// the decision was made on a value it made up. See the interpreter's module
+// docs.
+// ---------------------------------------------------------------------------
+
+/// `v=$(read <missing>)` — the plainest capture `--dry` cannot evaluate, and
+/// the one that needs no `PATH` program.
+fn missing_capture(var: &str, path: &str) -> Stmt {
+    assign(
+        var,
+        unquoted(vec![part(PartKind::Capture(Box::new(cmd(
+            "read",
+            vec![lit(path)],
+        ))))]),
+    )
+}
+
+#[test]
+fn dry_explains_a_decision_made_on_an_invented_value() {
+    // The shape from the bug report: the capture is skipped, `$size` is empty
+    // only because of that, and `if $size == ""` is a perfectly decidable
+    // comparison that walks into `fail`.
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            missing_capture("size", "wasm/out.wasm"),
+            if_stmt(
+                compare(unquoted(vec![var("size")]), CompareOp::Eq, quoted(vec![])),
+                vec![run(cmd("fail", vec![lit("wasm missing or empty")]))],
+                None,
+            ),
+            run(cmd("hit", vec![lit("unreached")])),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+
+    // The branch is exactly the one the preview took before: `fail` still
+    // aborts, and nothing after it previews.
+    assert!(ran.result.is_err(), "`fail` is still a hard stop");
+    assert_eq!(trace(), Vec::<String>::new());
+
+    assert!(
+        ran.err.contains(
+            "--dry: took the `then` branch on `$size`, a value this preview invented \
+             because it could not evaluate `read wasm/out.wasm`; a real run may go the other way"
+        ),
+        "{}",
+        ran.err
+    );
+    // And the `fail` says it was walked into rather than chosen.
+    assert!(
+        ran.err.contains(
+            "--dry: this `fail` is inside the `then` branch, which was chosen on `$size` \
+             — a value this preview invented, so a real run may never reach it"
+        ),
+        "{}",
+        ran.err
+    );
+}
+
+#[test]
+fn dry_notes_go_to_stderr_never_stdout() {
+    // stdout may be a capture's value; a note is a fact about the preview.
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            missing_capture("size", "out.wasm"),
+            if_stmt(
+                compare(unquoted(vec![var("size")]), CompareOp::Eq, quoted(vec![])),
+                vec![run(cmd("say", vec![lit("empty")]))],
+                None,
+            ),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+    ran.ok();
+    assert_eq!(ran.printed(), ["empty"]);
+    assert!(!ran.out.contains("--dry: took"), "{}", ran.out);
+    assert!(
+        ran.err.contains("--dry: took the `then` branch"),
+        "{}",
+        ran.err
+    );
+}
+
+#[test]
+fn the_mark_travels_through_a_second_assignment() {
+    // `label` never touched the capture; it only read something that did.
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            missing_capture("size", "out.wasm"),
+            assign("label", quoted(vec![text("size is "), var("size")])),
+            if_stmt(
+                compare(
+                    unquoted(vec![var("label")]),
+                    CompareOp::Eq,
+                    quoted(vec![text("size is ")]),
+                ),
+                vec![run(cmd("hit", vec![lit("then")]))],
+                Some(vec![run(cmd("hit", vec![lit("else")]))]),
+            ),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+    ran.ok();
+    assert_eq!(trace(), ["then"]);
+    // Named for the variable the condition read, and blamed on the command
+    // whose answer is missing two assignments back.
+    assert!(
+        ran.err.contains(
+            "took the `then` branch on `$label`, a value this preview invented \
+             because it could not evaluate `read out.wasm`"
+        ),
+        "{}",
+        ran.err
+    );
+}
+
+#[test]
+fn an_ordinary_assignment_clears_the_mark() {
+    // The mark describes the value the variable holds, not the history of the
+    // name.
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            missing_capture("size", "out.wasm"),
+            assign("size", lit("4096")),
+            if_stmt(
+                compare(unquoted(vec![var("size")]), CompareOp::Eq, quoted(vec![])),
+                vec![run(cmd("hit", vec![lit("then")]))],
+                Some(vec![run(cmd("hit", vec![lit("else")]))]),
+            ),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+    ran.ok();
+    assert_eq!(trace(), ["else"]);
+    assert!(!ran.err.contains("took the"), "{}", ran.err);
+}
+
+#[test]
+fn a_condition_on_a_value_that_was_never_invented_says_nothing() {
+    let dir = Temp::new("dry-untainted");
+    std::fs::write(dir.path().join("size.txt"), "4096").unwrap();
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            assign(
+                "size",
+                unquoted(vec![part(PartKind::Capture(Box::new(cmd(
+                    "read",
+                    vec![lit("size.txt")],
+                ))))]),
+            ),
+            if_stmt(
+                compare(unquoted(vec![var("size")]), CompareOp::Eq, quoted(vec![])),
+                vec![run(cmd("hit", vec![lit("then")]))],
+                Some(vec![run(cmd("hit", vec![lit("else")]))]),
+            ),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, dir.path());
+    ran.ok();
+    assert_eq!(trace(), ["else"]);
+    assert_eq!(ran.err, "");
+}
+
+#[test]
+fn run_mode_carries_no_mark_at_all() {
+    let dir = Temp::new("dry-run-mode");
+    std::fs::write(dir.path().join("size.txt"), "4096").unwrap();
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            assign(
+                "size",
+                unquoted(vec![part(PartKind::Capture(Box::new(cmd(
+                    "read",
+                    vec![lit("size.txt")],
+                ))))]),
+            ),
+            assign("label", quoted(vec![text("size is "), var("size")])),
+            if_stmt(
+                compare(unquoted(vec![var("label")]), CompareOp::Eq, quoted(vec![])),
+                vec![run(cmd("hit", vec![lit("then")]))],
+                Some(vec![run(cmd("hit", vec![lit("else")]))]),
+            ),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path());
+    ran.ok();
+    assert_eq!(trace(), ["else"]);
+    assert_eq!(ran.err, "", "a run has nothing to explain");
+    assert!(!ran.out.contains("--dry"), "{}", ran.out);
+}
+
+#[test]
+fn the_note_is_printed_once_however_often_the_decision_repeats() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            missing_capture("size", "out.wasm"),
+            Stmt::For(For {
+                var: "item".into(),
+                items: vec![lit("a"), lit("b"), lit("c")],
+                body: vec![if_stmt(
+                    compare(unquoted(vec![var("size")]), CompareOp::Eq, quoted(vec![])),
+                    vec![run(cmd("hit", vec![unquoted(vec![var("item")])]))],
+                    None,
+                )],
+                span: sp(),
+            }),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+    ran.ok();
+    // The loop still runs three times; only the explanation is said once.
+    assert_eq!(trace(), ["a", "b", "c"]);
+    assert_eq!(
+        ran.err.matches("--dry: took the `then` branch").count(),
+        1,
+        "{}",
+        ran.err
+    );
+}
+
+#[test]
+fn a_loop_variable_taken_from_an_invented_list_is_marked_too() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            missing_capture("names", "names.txt"),
+            Stmt::For(For {
+                var: "item".into(),
+                items: vec![unquoted(vec![var("names")])],
+                body: vec![if_stmt(
+                    compare(unquoted(vec![var("item")]), CompareOp::Eq, lit("x")),
+                    vec![run(cmd("hit", vec![lit("then")]))],
+                    Some(vec![run(cmd("hit", vec![lit("else")]))]),
+                )],
+                span: sp(),
+            }),
+            // The list was empty, so the body never ran: the `for` header
+            // itself is where the invented value showed.
+            if_stmt(
+                compare(unquoted(vec![var("names")]), CompareOp::Eq, quoted(vec![])),
+                vec![run(cmd("hit", vec![lit("empty")]))],
+                None,
+            ),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+    ran.ok();
+    assert_eq!(trace(), ["empty"]);
+    assert!(
+        ran.err.contains("took the `then` branch on `$names`"),
+        "{}",
+        ran.err
+    );
+}
+
+#[test]
+fn the_mark_reaches_a_called_task_through_its_arguments() {
+    // The callee never saw the capture; it was handed the value.
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                missing_capture("size", "out.wasm"),
+                run(cmd("check", vec![unquoted(vec![var("size")])])),
+            ],
+        ),
+        with_params(
+            "check",
+            vec![optional("s", lit(""))],
+            vec![if_stmt(
+                compare(unquoted(vec![pos(1)]), CompareOp::Eq, quoted(vec![])),
+                vec![run(cmd("hit", vec![lit("then")]))],
+                Some(vec![run(cmd("hit", vec![lit("else")]))]),
+            )],
+        ),
+    ]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+    ran.ok();
+    assert_eq!(trace(), ["then"]);
+    assert!(
+        ran.err.contains(
+            "took the `then` branch on `$1`, a value this preview invented \
+             because it could not evaluate `read out.wasm`"
+        ),
+        "{}",
+        ran.err
+    );
+}
+
+#[test]
+fn the_mark_reaches_a_called_task_through_dollar_at() {
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                missing_capture("size", "out.wasm"),
+                run(cmd("check", vec![unquoted(vec![var("size")])])),
+            ],
+        ),
+        task(
+            "check",
+            &[],
+            vec![if_stmt(
+                compare(
+                    unquoted(vec![part(PartKind::Var(VarRef::All))]),
+                    CompareOp::Eq,
+                    quoted(vec![]),
+                ),
+                vec![run(cmd("hit", vec![lit("then")]))],
+                Some(vec![run(cmd("hit", vec![lit("else")]))]),
+            )],
+        ),
+    ]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+    ran.ok();
+    assert_eq!(trace(), ["then"]);
+    assert!(ran.err.contains("branch on `$@`"), "{}", ran.err);
+}
+
+#[test]
+fn a_marked_variable_does_not_leak_out_of_the_task_that_made_it() {
+    // The mark lives in the frame, so it dies with it: the caller's `$size`
+    // is its own.
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                assign("size", lit("4096")),
+                run(cmd("inner", vec![])),
+                if_stmt(
+                    compare(unquoted(vec![var("size")]), CompareOp::Eq, lit("4096")),
+                    vec![run(cmd("hit", vec![lit("then")]))],
+                    None,
+                ),
+            ],
+        ),
+        task("inner", &[], vec![missing_capture("size", "out.wasm")]),
+    ]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+    ran.ok();
+    assert_eq!(trace(), ["then"]);
+    assert!(!ran.err.contains("took the"), "{}", ran.err);
+}
+
+#[test]
+fn a_fail_the_author_chose_gets_no_extra_note() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            missing_capture("size", "out.wasm"),
+            if_stmt(
+                compare(unquoted(vec![var("size")]), CompareOp::Ne, quoted(vec![])),
+                vec![run(cmd("hit", vec![lit("unreached")]))],
+                None,
+            ),
+            // Outside the branch chosen on `$size`: this one is the author's.
+            run(cmd("fail", vec![lit("deliberate")])),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+    assert!(ran.result.is_err());
+    assert!(ran.err.contains("took no branch on `$size`"), "{}", ran.err);
+    assert!(!ran.err.contains("this `fail` is inside"), "{}", ran.err);
+}
+
+// ---------------------------------------------------------------------------
 // PATH
 // ---------------------------------------------------------------------------
 
@@ -3151,6 +3540,47 @@ mod script_blocks {
         )]);
         exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root()).ok();
         assert_eq!(trace(), ["then"]);
+    }
+
+    #[test]
+    fn a_decision_on_a_skipped_blocks_value_is_explained_not_guessed() {
+        // The shape from the bug report, whole: the block is skipped, `$size`
+        // is empty only because of that, and `if $size == ""` is a decidable
+        // comparison of a variable that walks straight into `fail`. The
+        // preview keeps that branch — there is nothing to decide on, and the
+        // undecided rule would land in the same place — and says where the
+        // value came from instead.
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![
+                assign(
+                    "size",
+                    unquoted(vec![capture(script_chain(sh(), "echo 4096\n"))]),
+                ),
+                if_stmt(
+                    compare(unquoted(vec![var("size")]), CompareOp::Eq, quoted(vec![])),
+                    vec![run(cmd("fail", vec![lit("wasm missing or empty")]))],
+                    None,
+                ),
+            ],
+        )]);
+        let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+        assert!(ran.result.is_err(), "`fail` is still a hard stop");
+        assert!(
+            ran.err.contains(
+                "--dry: took the `then` branch on `$size`, a value this preview invented \
+                 because it could not evaluate `script sh { ... }`; a real run may go the \
+                 other way"
+            ),
+            "{}",
+            ran.err
+        );
+        assert!(
+            ran.err.contains("this `fail` is inside the `then` branch"),
+            "{}",
+            ran.err
+        );
     }
 
     #[test]

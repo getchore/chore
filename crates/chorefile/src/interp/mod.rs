@@ -81,6 +81,51 @@
 //! one takes the empty string and an `if` around one is left undecided. See
 //! [`Interpreter::script`].
 //!
+//! # A value the preview invented
+//!
+//! Skipping a capture leaves something behind. `size=$(script uv run - { ... })`
+//! binds the empty string, and `if $size == ""` is then a *decidable*
+//! comparison of a variable — the undecided rule above never fires, because
+//! nothing failed at the `if`. The preview walks into `fail "wasm missing"`
+//! and reports a problem that exists only because the preview declined to
+//! look.
+//!
+//! The fix is not to take a different branch. There is no branch to prefer:
+//! the value does not exist, so every verdict about it is a guess, and the
+//! undecided rule above would have walked into the same `fail` anyway.
+//! Guessing would also make `--dry` unpredictable in the one way a preview
+//! must not be — the commands it lists would depend on what chore imagined
+//! rather than on what the chorefile says. **So the preview keeps its control
+//! flow exactly as it is and explains itself instead**, which is the thing a
+//! reader can actually act on: they learn the branch was chosen on a value
+//! chore made up, and which command's answer is missing.
+//!
+//! A future reader will be tempted to "fix" this by flipping the branch.
+//! That is the change this design exists to refuse.
+//!
+//! The mechanism is a mark that travels with the value:
+//!
+//! - A variable assigned from something `--dry` could not evaluate — a
+//!   skipped `script` block, an unspawnable program, a builtin that failed —
+//!   is marked with that command as it would have to be typed.
+//! - Reading a marked variable marks whatever is computed from it, so the
+//!   mark reaches a second assignment, a loop variable, and a task's `$1` and
+//!   `$@` through the call that passed it.
+//! - A condition that reads a marked variable prints a note on stderr beside
+//!   the branch it took, and a `fail` reached from inside that branch says so
+//!   as it aborts.
+//!
+//! The mark lives beside the values it describes — a map per [`Frame`] for
+//! locals, one on the interpreter for globals — so it is scoped, shadowed and
+//! dropped exactly as the variables are, and an ordinary assignment over a
+//! marked variable clears it. It is written only under [`Mode::Dry`]; in
+//! [`Mode::Run`] the maps stay empty and nothing consults them.
+//!
+//! Notes go to stderr, never stdout: a capture's stdout is somebody's value,
+//! and a note is a fact about the preview rather than a step of the recipe.
+//! Each distinct note is printed once per run, so a decision inside a `for`
+//! body says the same thing fifty times to nobody.
+//!
 //! # A `script` block is a command
 //!
 //! It is a [`Chain`](crate::ast::Chain), not a statement, so it is captured,
@@ -95,7 +140,7 @@ mod memo;
 mod parallel;
 mod run;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -177,6 +222,60 @@ struct Frame {
     args: Vec<String>,
     vars: HashMap<String, String>,
     cwd: PathBuf,
+    /// `--dry` only: which of `vars` hold a value the preview invented, and
+    /// the command whose answer is missing. Parallel to `vars` rather than
+    /// folded into it so that a value stays a `String` everywhere it is read,
+    /// and so the whole apparatus is absent — not merely unused — in
+    /// [`Mode::Run`], where this map is never written.
+    invented: HashMap<String, String>,
+    /// `--dry` only: set when the arguments this task was called with were
+    /// computed from a marked value, so `$1`, `$2` and `$@` carry the mark
+    /// into the callee. One flag rather than one per argument: the caller
+    /// expands the whole argument list in one go, and blaming the call is
+    /// what a reader needs.
+    args_invented: Option<String>,
+}
+
+/// A value the preview made up, and where it read it from.
+#[derive(Clone)]
+struct Mark {
+    /// The variable as it was written: `$size`, `$1`, `$@`.
+    var: String,
+    /// The command whose answer is missing, as it would have to be typed.
+    source: String,
+}
+
+/// What, inside some scope, made a value one the preview invented.
+///
+/// The two halves are kept apart because they are read by different places: a
+/// condition reports only [`Marks::read`], since a command that failed *at*
+/// the condition is already reported by `dry_failed` and already leaves the
+/// condition undecided; an assignment takes either, since both mean the value
+/// it is about to bind does not exist.
+#[derive(Default)]
+struct Marks {
+    /// A command `--dry` could not evaluate, as it would have to be typed.
+    unevaluated: Option<String>,
+    /// A variable that already carried a mark.
+    read: Option<Mark>,
+}
+
+impl Marks {
+    /// The mark a value computed in this scope should carry. The command that
+    /// could not answer wins over a variable that was already marked: it is
+    /// the nearer cause, and the one the author can go and look at.
+    fn source(self) -> Option<String> {
+        self.unevaluated.or(self.read.map(|m| m.source))
+    }
+}
+
+/// A branch `--dry` chose while reading a value it invented. Held for as long
+/// as that branch is running, so a `fail` inside it can say where it came
+/// from.
+struct Chosen {
+    /// `"then"`, `"else"`, or `"no"` for an `if` with no `else`.
+    branch: &'static str,
+    var: String,
 }
 
 /// Where a command's output goes. Owns its
@@ -276,7 +375,30 @@ pub struct Interpreter<'a> {
     /// Set when `--dry` had to paper over a command it could not carry out,
     /// so the caller can tell "the command answered no" from "the command
     /// could not answer". Scoped with `tracking`.
-    unevaluated: bool,
+    ///
+    /// It carries the command as it would have to be typed, because the same
+    /// fact answers a second question: if a capture binds this non-answer to
+    /// a variable, that is what the variable's mark has to name.
+    unevaluated: Option<String>,
+    /// `--dry` only: marks on the top-level variables, the counterpart of
+    /// [`Frame::invented`] for the scope `assign` writes when no task frame
+    /// is on the stack.
+    globals_invented: HashMap<String, String>,
+    /// `--dry` only: a marked variable read since this was last cleared.
+    /// Scoped with `marking`, which is the only thing that reads it.
+    touched: Option<Mark>,
+    /// `--dry` only: the branch currently running, when it was chosen while
+    /// reading an invented value. Saved and restored around the branch, so it
+    /// describes the innermost such decision a `fail` sits inside.
+    chosen: Option<Chosen>,
+    /// `--dry` only: notes already printed, so a decision inside a `for` body
+    /// says the same thing once rather than once per iteration.
+    reported: HashSet<String>,
+    /// `--dry` only: the mark on the arguments of the task call about to
+    /// happen, handed to the frame `call_task` is on its way to push. Set
+    /// immediately before that call and taken by it, the way `pending_exit`
+    /// hands a code the other way.
+    pending_args_mark: Option<String>,
     /// One timestamp per run, so two lines of the same recipe cannot disagree
     /// about what `$NOW` is.
     now: String,
@@ -314,6 +436,8 @@ impl<'a> Interpreter<'a> {
             args: Vec::new(),
             vars: HashMap::new(),
             cwd: root.clone(),
+            invented: HashMap::new(),
+            args_invented: None,
         };
         Self {
             file,
@@ -327,7 +451,12 @@ impl<'a> Interpreter<'a> {
             globals_done: false,
             pending_exit: None,
             quiet: false,
-            unevaluated: false,
+            unevaluated: None,
+            globals_invented: HashMap::new(),
+            touched: None,
+            chosen: None,
+            reported: HashSet::new(),
+            pending_args_mark: None,
             now: now_iso8601(),
             captive: false,
             abort: None,
@@ -423,8 +552,10 @@ impl<'a> Interpreter<'a> {
         }
         self.globals_done = true;
         for assign in &self.file.globals {
-            let value = self.expand_to_string(&assign.value)?;
-            self.globals.insert(assign.name.clone(), value);
+            let (value, marks) = self.marking(|me| me.expand_to_string(&assign.value));
+            let source = marks.source();
+            self.globals.insert(assign.name.clone(), value?);
+            self.mark(&assign.name, source);
         }
         Ok(())
     }
@@ -480,6 +611,68 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Record — or clear — the mark on a variable just assigned, in the same
+    /// scope [`assign`](Self::assign) wrote it, so the two are shadowed and
+    /// dropped together.
+    ///
+    /// `None` *removes* the mark: the mark describes the value the variable
+    /// holds now, not the history of the name, so `size=4096` after a
+    /// `size=$(script ...)` is an ordinary value again.
+    fn mark(&mut self, name: &str, source: Option<String>) {
+        if self.mode != Mode::Dry {
+            return;
+        }
+        let marks = if self.frames.len() > 1 {
+            &mut self.frames.last_mut().unwrap().invented
+        } else {
+            &mut self.globals_invented
+        };
+        match source {
+            Some(source) => {
+                marks.insert(name.into(), source);
+            }
+            None => {
+                marks.remove(name);
+            }
+        }
+    }
+
+    /// The mark on `name`, if it has one.
+    ///
+    /// Shadowing is resolved the way [`lookup`](Self::lookup) resolves it: a
+    /// local hides a global, mark and all, so a task that assigns an ordinary
+    /// value over a marked global's name is not blamed for it.
+    fn mark_of(&self, name: &str) -> Option<String> {
+        let frame = self.frame();
+        if frame.vars.contains_key(name) {
+            return frame.invented.get(name).cloned();
+        }
+        self.globals_invented.get(name).cloned()
+    }
+
+    /// Note that a marked variable was read. The first one in a scope is the
+    /// one reported: a note naming two variables explains neither.
+    pub(super) fn touch(&mut self, var: String, source: String) {
+        if self.mode == Mode::Dry && self.touched.is_none() {
+            self.touched = Some(Mark { var, source });
+        }
+    }
+
+    /// The mark carried by the named variable, for the caller that is about
+    /// to read it.
+    pub(super) fn touch_named(&mut self, name: &str) {
+        if let Some(source) = self.mark_of(name) {
+            self.touch(format!("${name}"), source);
+        }
+    }
+
+    /// The mark carried by this frame's arguments, for `$1`, `$2` and `$@`.
+    pub(super) fn touch_args(&mut self, var: &str) {
+        if let Some(source) = self.frame().args_invented.clone() {
+            self.touch(var.to_string(), source);
+        }
+    }
+
     // -- statements --------------------------------------------------------
 
     /// Run a block until it ends or something stops it early. Both kinds of
@@ -505,8 +698,10 @@ impl<'a> Interpreter<'a> {
     fn stmt(&mut self, stmt: &Stmt) -> Result<Flow> {
         match stmt {
             Stmt::Assign(a) => {
-                let value = self.expand_to_string(&a.value)?;
-                self.assign(&a.name, value);
+                let (value, marks) = self.marking(|me| me.expand_to_string(&a.value));
+                let source = marks.source();
+                self.assign(&a.name, value?);
+                self.mark(&a.name, source);
             }
             Stmt::Command(chain) => {
                 let flags = Flags {
@@ -551,26 +746,64 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Stmt::If(node) => {
-                let (taken, undecided) = self.tracking(|me| me.cond(&node.cond));
+                let ((taken, undecided), marks) =
+                    self.marking(|me| me.tracking(|me| me.cond(&node.cond)));
                 // Under `--dry` a condition is believed only when its command
                 // answered; one that failed leaves the condition undecided and
                 // previews the `then` branch. Deciding here, above the whole
                 // condition, is what makes the rule compose: a failure inside
                 // an `&&` or under a `not` still lands on `then`, because
                 // there is no truth value for the `not` to flip.
-                if taken? || (undecided && self.mode == Mode::Dry) {
-                    return self.block(&node.then);
+                let then = taken? || (undecided && self.mode == Mode::Dry);
+                let branch = match (then, node.otherwise.is_some()) {
+                    (true, _) => "then",
+                    (false, true) => "else",
+                    // An `if` with no `else`: nothing ran, which is still a
+                    // decision, and still one made on a value that does not
+                    // exist.
+                    (false, false) => "no",
+                };
+                // The marks of a command that failed *inside* the condition
+                // are not reported here: that is the undecided rule above,
+                // and `dry_failed` has already said so on stderr. Only a
+                // marked *variable* is news, because nothing failed at this
+                // `if` and the comparison looked perfectly decidable.
+                let chosen = marks.read.map(|mark| {
+                    self.note_invented_branch(branch, &mark);
+                    Chosen {
+                        branch,
+                        var: mark.var,
+                    }
+                });
+                // Held only for as long as the branch runs, so a `fail`
+                // further down the same task — reached by the author's own
+                // logic — is not blamed on this decision.
+                let outer = std::mem::replace(&mut self.chosen, chosen);
+                let flow = if then {
+                    self.block(&node.then)
                 } else if let Some(other) = &node.otherwise {
-                    return self.block(other);
-                }
+                    self.block(other)
+                } else {
+                    Ok(Flow::Normal)
+                };
+                self.chosen = outer;
+                return flow;
             }
             Stmt::For(node) => {
+                // Each item keeps the mark of the word it came from, so a
+                // loop over an invented list marks the loop variable on every
+                // iteration rather than only where the mark happened to land.
                 let mut items = Vec::new();
                 for word in &node.items {
-                    items.extend(self.expand(word)?);
+                    let (expanded, marks) = self.marking(|me| me.expand(word));
+                    let source = marks.source();
+                    for item in expanded? {
+                        items.push((item, source.clone()));
+                    }
                 }
-                for item in items {
+                for (item, source) in items {
                     self.assign(&node.var, item);
+                    self.mark(&node.var, source);
                     // There is no `break`, so anything that stops the body
                     // stops the loop and everything around it: `return` in a
                     // `for` ends the task, not the iteration.
@@ -622,18 +855,102 @@ impl<'a> Interpreter<'a> {
     /// it. The flag still propagates outwards, so a capture nested in a
     /// condition marks the condition unevaluated too.
     fn tracking<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> (T, bool) {
-        let outer = std::mem::replace(&mut self.unevaluated, false);
+        let outer = self.unevaluated.take();
         let value = f(self);
-        let hit = self.unevaluated;
-        self.unevaluated = outer || hit;
-        (value, hit)
+        let hit = self.unevaluated.take();
+        let hit_here = hit.is_some();
+        self.unevaluated = outer.or(hit);
+        (value, hit_here)
+    }
+
+    /// Run `f` and report what inside it made its value one the preview
+    /// invented: a command `--dry` could not evaluate, or a variable already
+    /// marked. Both still propagate outwards, exactly as `tracking`'s flag
+    /// does, so a caller further out sees them too.
+    ///
+    /// In [`Mode::Run`] there is nothing to report and nothing to scope: the
+    /// marks are never written there, so this is `f` and an empty answer.
+    fn marking<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> (T, Marks) {
+        if self.mode != Mode::Dry {
+            return (f(self), Marks::default());
+        }
+        let (outer_un, outer_touch) = (self.unevaluated.take(), self.touched.take());
+        let value = f(self);
+        let marks = Marks {
+            unevaluated: self.unevaluated.take(),
+            read: self.touched.take(),
+        };
+        self.unevaluated = outer_un.or_else(|| marks.unevaluated.clone());
+        self.touched = outer_touch.or_else(|| marks.read.clone());
+        (value, marks)
+    }
+
+    /// Print a `--dry` note once per run.
+    ///
+    /// Always stderr, never stdout: stdout may be a capture's value or a
+    /// parallel sibling's block, and a note is a fact about the preview
+    /// rather than a step of the recipe. Deduplicating on the finished line
+    /// is what keeps a decision inside a `for` body to one note while still
+    /// letting a genuinely different decision — another variable, the other
+    /// branch — have its own.
+    fn note(&mut self, line: String) {
+        if self.reported.insert(line.clone()) {
+            let _ = writeln!(self.err, "{line}");
+            let _ = self.err.flush();
+        }
+    }
+
+    /// Say that a branch was chosen on a value `--dry` made up.
+    ///
+    /// It does not say which branch a real run would take, because nothing
+    /// here knows: the point is that the reader now knows there was nothing
+    /// to decide on. See the module docs for why the branch itself is left
+    /// alone.
+    fn note_invented_branch(&mut self, branch: &str, mark: &Mark) {
+        let taken = if branch == "no" {
+            "took no branch".to_string()
+        } else {
+            format!("took the `{branch}` branch")
+        };
+        self.note(format!(
+            "--dry: {taken} on `{}`, a value this preview invented because it could not \
+             evaluate `{}`; a real run may go the other way",
+            mark.var, mark.source
+        ));
+    }
+
+    /// Say that a `fail` was reached from a branch chosen the same way.
+    ///
+    /// `fail` still aborts the preview — it is the author's own hard stop and
+    /// swallowing it would describe a run that cannot happen — but a `fail`
+    /// the preview walked into is not the same thing as one the author's own
+    /// logic chose, and the difference is exactly what a reader staring at
+    /// "wasm missing or empty" needs.
+    pub(super) fn note_invented_fail(&mut self) {
+        let Some(chosen) = &self.chosen else {
+            return;
+        };
+        let where_ = if chosen.branch == "no" {
+            "a branch not taken".to_string()
+        } else {
+            format!("the `{}` branch", chosen.branch)
+        };
+        let line = format!(
+            "--dry: this `fail` is inside {where_}, which was chosen on `{}` — a value this \
+             preview invented, so a real run may never reach it",
+            chosen.var
+        );
+        self.note(line);
     }
 
     /// Turn a command `--dry` could not carry out into a failed command:
     /// report the reason, and remember that the answer is a stand-in rather
     /// than the command's own verdict.
     pub(super) fn dry_failed(&mut self, message: &str) -> Output {
-        self.unevaluated = true;
+        // The message is the fallback name for whatever a capture binds from
+        // this; `expand::capture` replaces it with the chain as written,
+        // which is what a mark wants to name.
+        self.unevaluated = Some(message.to_string());
         let _ = writeln!(self.err, "--dry: {message}");
         let _ = self.err.flush();
         Output::failed(1)

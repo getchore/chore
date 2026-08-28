@@ -1,8 +1,9 @@
 //! `chore check` — everything that can be known without running anything.
 //!
 //! Reports syntax errors, tasks named after a reserved subcommand or builtin,
-//! duplicate task names across a flat `include`, include cycles, unknown
-//! commands, undefined variables — in a parameter's default as much as in a
+//! duplicate task names across a flat `include`, include cycles, an `include`
+//! of a file that discovery can also find on its own, unknown commands,
+//! undefined variables — in a parameter's default as much as in a
 //! body — a parameter name declared twice in one header or read as `$name`
 //! when parameters are positional, and non-portable commands with the builtin
 //! that replaces them.
@@ -46,12 +47,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ast::{
-    Block, Chain, Command, CompareOp, Cond, File, If, Param, PartKind, Script, Stmt, Task, VarRef,
-    Word,
+    Block, Chain, Command, CompareOp, Cond, File, If, Include, Param, PartKind, Script, Stmt, Task,
+    VarRef, Word,
 };
 use crate::error::{Error, Location, Span};
 use crate::resolve::Merged;
-use crate::{FILE_NAME, NAMESPACE_SEP, RESERVED_TASKS, builtins, parse, require, resolve, vars};
+use crate::{
+    FILE_EXT, FILE_NAME, NAMESPACE_SEP, RESERVED_TASKS, builtins, parse, require, resolve, vars,
+};
 
 /// How much a finding matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +134,9 @@ pub fn check_source(source: &str, path: &Path) -> Vec<Diagnostic> {
 /// file order.
 pub fn check(file: &File, source: &str, path: &Path) -> Vec<Diagnostic> {
     let names = Names::from_file(file);
-    let mut checker = Checker::new(path, names, None, false, file);
+    // One file on its own is its own top level, so its directory is `$ROOT`.
+    let root = path.parent().unwrap_or(Path::new("")).to_path_buf();
+    let mut checker = Checker::new(path, &root, names, None, false, file);
     checker.run(file, source)
 }
 
@@ -191,6 +196,7 @@ pub fn check_merged(merged: &Merged) -> Vec<Diagnostic> {
         };
         let mut checker = Checker::new(
             &part.path,
+            &merged.root,
             names.clone(),
             part.prefix.clone(),
             true,
@@ -267,6 +273,11 @@ struct Scope<'a> {
 
 struct Checker<'a> {
     path: &'a Path,
+    /// `$ROOT` for the run: the directory of the *top-level* chorefile, not of
+    /// this file. Only [`Checker::discoverable`] needs it, and it needs the
+    /// top-level one — whether an included file is inside the project is a
+    /// question about the project, not about whichever file did the including.
+    root: PathBuf,
     /// Every name in scope for this file: the merged tables when includes were
     /// followed, this file's own names when they were not.
     names: Names,
@@ -297,6 +308,7 @@ struct Checker<'a> {
 impl<'a> Checker<'a> {
     fn new(
         path: &'a Path,
+        root: &Path,
         mut names: Names,
         prefix: Option<String>,
         merged: bool,
@@ -307,6 +319,7 @@ impl<'a> Checker<'a> {
         names.absorb_namespaces(file);
         Self {
             path,
+            root: normalize(root),
             names,
             own_tasks: file.tasks.iter().map(|t| t.name.clone()).collect(),
             own_globals: file.globals.iter().map(|g| g.name.clone()).collect(),
@@ -651,7 +664,9 @@ impl<'a> Checker<'a> {
                     )
                     .with_help("an include cycle never terminates; remove it"),
                 );
-            } else if !seen.insert(resolved) {
+            } else if seen.insert(resolved.clone()) {
+                self.discoverable(include, &resolved, &at);
+            } else {
                 self.push(
                     Diagnostic::error(
                         format!("`{}` is included more than once", include.path),
@@ -703,6 +718,90 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// An `include` whose target is itself named `chorefile`: a file that is
+    /// both merged into this one *and* discoverable on its own.
+    ///
+    /// `chore` finds the chorefile governing a directory by walking up from
+    /// the working directory to the first file named exactly `chorefile`, and
+    /// the directory holding it becomes `$ROOT`. That rule is the whole reason
+    /// `include` has its own extension: a fragment named `libs/tasks.chore`
+    /// cannot be reached by that walk, so it only ever means what its includer
+    /// makes it mean. Name the same fragment `libs/chorefile` and it acquires
+    /// a second life — `cd libs && chore <anything>` stops at it, showing only
+    /// its tasks with `$ROOT` at `libs/`, and every relative path inside it
+    /// resolves against a different directory than it does through the
+    /// include. Nothing fails; the same task simply writes to somewhere else.
+    /// That is the shape worth a word, and the spec's own example (`include
+    /// libs/chorefile as libs`) is how people arrive at it.
+    ///
+    /// **A warning, not an error, and no attempt to tell the two intents
+    /// apart.** The shape is legal and sometimes exactly right: a subproject
+    /// with its own lockfile *should* stand alone from its own directory, and
+    /// `chore`'s own repo does this. The tempting refinement — probe the
+    /// target's directory for a `package.json`, `Cargo.toml`, `go.mod` and
+    /// friends and stay quiet when one is there — is not taken, for three
+    /// reasons. It is wrong in both directions: a subproject whose only
+    /// manifest *is* the chorefile would still be warned about, and a fragment
+    /// parked in `vendor/thing/` next to somebody else's manifest would be
+    /// silently excused. It would make the finding depend on the filesystem,
+    /// so the same text checks differently on two machines — this module goes
+    /// out of its way to avoid that (see the module docs). And it would be
+    /// answering the wrong question anyway: when the target really is a
+    /// subproject the warning is not a false positive, it is a true statement
+    /// about a trade-off the author made deliberately, so the help says so
+    /// and lets them keep it. Cheap to ignore, and never wrong.
+    ///
+    /// **Once per include**, unlike the `script` summary in
+    /// [`Checker::unchecked`]: each one names a different file and each is
+    /// fixed on its own, by renaming that file. Only the include that already
+    /// draws a "more than once" error is skipped, so a doubled include is not
+    /// told twice about one file.
+    ///
+    /// Confined to targets under `$ROOT`, which is what "discoverable instead
+    /// of this file" means: `../other-project/chorefile` is outside the
+    /// project, is another project's root by construction, and walking up from
+    /// it was never going to land here.
+    fn discoverable(&mut self, include: &Include, resolved: &Path, at: &Location) {
+        if resolved.file_name() != Some(FILE_NAME.as_ref()) || !inside(&self.root, resolved) {
+            return;
+        }
+        let shown = self.relative(resolved);
+        let dir = resolved
+            .parent()
+            .map(|p| self.relative(p))
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| ".".to_string());
+        let instead = format!("{dir}/tasks.{FILE_EXT}");
+
+        self.push(
+            Diagnostic::warning(
+                format!(
+                    "`include {}` points at `{shown}`, which `chore` can also discover on its own",
+                    include.path
+                ),
+                at.clone(),
+            )
+            .with_help(format!(
+                "discovery walks up from the working directory to the first file named exactly \
+                 `{FILE_NAME}`, so `cd {dir} && chore list` stops at `{shown}` instead of this \
+                 file: it shows only the tasks written there, with `$ROOT` at `{dir}/` rather \
+                 than the project root, so a relative path inside it — say `download vendor/thing` \
+                 — means a different place depending on which directory it was run from. If that \
+                 file only means anything merged into this one, rename it to something ending in \
+                 `.{FILE_EXT}` — `{instead}` — and point the include at that; discovery never \
+                 finds those. If it is a standalone subproject, meant to work on its own from \
+                 `{dir}/`, then the second view is deliberate and there is nothing to fix here"
+            )),
+        );
+    }
+
+    /// A path as a message should show it: relative to `$ROOT` when it is
+    /// under it, so a finding reads `libs/chorefile` rather than an absolute
+    /// path the reader has to scan to the end of.
+    fn relative(&self, path: &Path) -> String {
+        vars::display(path.strip_prefix(&self.root).unwrap_or(path))
     }
 
     // -- statements ---------------------------------------------------------
@@ -1686,6 +1785,20 @@ fn resolve_include(from: &Path, path: &str) -> PathBuf {
         joined
     };
     normalize(&joined)
+}
+
+/// Is `path` under `root`, both already normalized?
+///
+/// An empty `root` is the working directory — what a bare `chorefile` with no
+/// directory in front of it has — and there is no prefix to match against, so
+/// the test becomes the one that survives normalization: a relative path that
+/// never climbed out.
+fn inside(root: &Path, path: &Path) -> bool {
+    if root.as_os_str().is_empty() {
+        !path.is_absolute() && !path.starts_with("..")
+    } else {
+        path.starts_with(root)
+    }
 }
 
 /// Collapse `.` and `foo/..` so two spellings of one path compare equal.

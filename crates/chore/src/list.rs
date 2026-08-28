@@ -64,6 +64,79 @@ pub fn text(out: &mut dyn Write, merged: &Merged, style: Style) -> io::Result<()
     Ok(())
 }
 
+/// The chorefile this listing came from, and the `$ROOT` its tasks will see.
+///
+/// Why this line exists at all: `chore` uses the *nearest* chorefile at or
+/// above the working directory, so in a tree with more than one, the same
+/// command means different things depending on where you stand. From `repo/`
+/// the listing is the whole project and `$ROOT` is `repo/`; from
+/// `repo/handoff/`, where `handoff` keeps a chorefile of its own, it is a
+/// different set of tasks and `$ROOT` is `repo/handoff/` — so a task that says
+/// `download vendor/thing` lands in a different directory, with no error
+/// either way. A real subproject genuinely wants that, which is why it stays
+/// allowed rather than forbidden; this line is what stops it being silent.
+///
+/// The chorefile is spelled relative to the working directory, because that is
+/// the form that answers "am I where I think I am": `../chorefile` says at a
+/// glance that the file governing this listing is not the one here. `$ROOT` is
+/// absolute, because a relative `$ROOT` would print `.` both from the repo
+/// root and from inside a subproject — the two cases this line exists to tell
+/// apart. Printed always, never only when it looks surprising: a line that
+/// appears only sometimes makes its own absence load-bearing, and an absence
+/// is exactly what nobody notices.
+///
+/// Dim, one line, above the list: it is the frame around the answer, not the
+/// answer, and it has to be read before the tasks are, not after.
+pub fn source(out: &mut dyn Write, path: &Path, root: &Path, style: Style) -> io::Result<()> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    writeln!(
+        out,
+        "{}",
+        style.dim(&format!(
+            "using {}, $ROOT = {}",
+            relative(path, &cwd),
+            chorefile::vars::display(root)
+        ))
+    )
+}
+
+/// `path` as written from `cwd`: `chorefile`, `../chorefile`,
+/// `handoff/chorefile`.
+///
+/// Hand-rolled because `std` has no relative-path operation and the rule is
+/// four lines: drop the components the two share, one `..` for each component
+/// of `cwd` left over, then what is left of `path`. The one fallback is when
+/// nothing at all is shared — a different Windows drive — where no number of
+/// `..` connects the two and the absolute path is the only true answer.
+///
+/// Deliberately no "use the shorter one" rule: `../../../chorefile` is longer
+/// than the absolute path in a shallow tree and is still the spelling that
+/// says you walked up, which is the whole point of the line. One rule also
+/// means the output does not change shape as a project moves down a disk.
+///
+/// Separators are `/` on every platform, the way `vars::display` reports a
+/// path everywhere else in the output.
+fn relative(path: &Path, cwd: &Path) -> String {
+    let absolute = chorefile::vars::display(path);
+    let shared = cwd
+        .components()
+        .zip(path.components())
+        .take_while(|(here, there)| here == there)
+        .count();
+    if shared == 0 {
+        return absolute;
+    }
+    let up = cwd.components().count() - shared;
+    let rest: Vec<String> = path
+        .components()
+        .skip(shared)
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let mut out = "../".repeat(up);
+    out.push_str(&rest.join("/"));
+    if out.is_empty() { absolute } else { out }
+}
+
 /// One task per line, `name<TAB>description`, for a shell completion script.
 ///
 /// The completion scripts run this on every Tab, so the format is whatever is
@@ -77,6 +150,28 @@ pub fn names(out: &mut dyn Write, merged: &Merged) -> io::Result<()> {
     Ok(())
 }
 
+/// The listing as JSON: which chorefile it came from, what `$ROOT` is, and
+/// the tasks.
+///
+/// The two top-level fields are about the **top-level** chorefile and nothing
+/// else — `chorefile` is the file that was discovered by walking up from the
+/// working directory, and `root` is its directory, which is `$ROOT` for every
+/// task in the run no matter which file the task was written in. A task's own
+/// file stays where it always was, in that task's `file`; with `include` the
+/// two differ, and the top-level pair is the one that answers "which project
+/// is this, and where will its paths land".
+///
+/// This is why the document is an object and no longer a bare array: an array
+/// has nowhere to put a fact about the whole listing, and a tool that reads
+/// `list --json` needs the same thing the text listing now says.
+/// The document is an **array of tasks**, and stays one.
+///
+/// The text listing gained a line naming the chorefile and `$ROOT`, and the
+/// same two facts belong here — but an array has nowhere to put a fact about
+/// the whole listing, so adding them means an object, and that breaks every
+/// consumer doing `jq '.[]'`. This is a published contract; it changes in a
+/// major release with a note, not quietly in a minor one. Until then a tool
+/// reads the per-task `file` field, which is unchanged.
 pub fn json(out: &mut dyn Write, merged: &Merged) -> io::Result<()> {
     let tasks = &merged.file.tasks;
     writeln!(out, "[")?;
@@ -193,6 +288,32 @@ mod tests {
     #[test]
     fn escapes_json_strings() {
         assert_eq!(quote("a\"b\\c\n"), r#""a\"b\\c\n""#);
+    }
+
+    /// Unix spellings, because the components are what the function works on
+    /// and a `\`-separated string is not a path on this host. The `/` in the
+    /// output is the contract, and it holds on Windows too: every component
+    /// is re-joined with `/` rather than with the host separator.
+    #[test]
+    fn spells_a_chorefile_relative_to_the_working_directory() {
+        let rel = |path: &str, cwd: &str| relative(Path::new(path), Path::new(cwd));
+        // Here.
+        assert_eq!(rel("/repo/chorefile", "/repo"), "chorefile");
+        // Found by walking up, from one level down and from three.
+        assert_eq!(rel("/repo/chorefile", "/repo/handoff"), "../chorefile");
+        assert_eq!(rel("/repo/chorefile", "/repo/a/b/c"), "../../../chorefile");
+        // A subproject's own file, seen from the root above it.
+        assert_eq!(rel("/repo/handoff/chorefile", "/repo"), "handoff/chorefile");
+    }
+
+    #[test]
+    fn falls_back_to_the_absolute_path_only_when_nothing_is_shared() {
+        let rel = |path: &str, cwd: &str| relative(Path::new(path), Path::new(cwd));
+        // Nothing shared: no number of `..` connects the two.
+        assert_eq!(rel("/repo/chorefile", "relative/cwd"), "/repo/chorefile");
+        // Sharing only the root still climbs, longer than the absolute path
+        // and still the spelling that says which way the file was found.
+        assert_eq!(rel("/chorefile", "/a/b/c/d"), "../../../../chorefile");
     }
 
     #[test]
