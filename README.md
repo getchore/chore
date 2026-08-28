@@ -19,48 +19,24 @@ the binary. The same file does the same thing on macOS, Linux and Windows.
 
 ## Install
 
-```sh
+```console
 curl -fsSL https://getchore.github.io/install.sh | sh
 ```
 
-```powershell
+```console
 irm https://getchore.github.io/install.ps1 | iex
 ```
 
 ## A chorefile
 
-```sh
-DIST=$ROOT/dist/$PLATFORM
-
-# build the compiler
-task build {
-    if !exists vendor/llvm {
-        download $LLVM vendor/llvm.tar.zst --sha256 4f9c2a
-        extract vendor/llvm.tar.zst vendor/llvm --strip 1
-    }
-    cmake --build build --parallel
-    copy build/sona$EXE $DIST/sona$EXE
-}
-
-# package the release archive for this platform
-task package {
-    build
-    archive $DIST sona-$PLATFORM.tar.gz
-}
-```
+<img src="assets/chorefile.png" alt="A chorefile with build and package tasks" width="760">
 
 `download`, `extract`, `archive` and `copy` are builtins, so this needs nothing
 installed and behaves the same everywhere.
 
 ## It tells you what won't work on Windows
 
-```console
-$ chore check
-chorefile:3:5: `curl` is not portable: it is missing, or spelled differently, on at least one platform this chorefile can run on
-  help: use the `download` builtin — it speaks https and `gh://owner/repo/tag/asset`, takes `--retries`, `--timeout` and `--sha256`, and needs nothing installed on the machine
-
-1 problem
-```
+<img src="assets/check.png" alt="chore check reporting that curl is not portable and suggesting the download builtin" width="760">
 
 Nothing runs. Errors exit nonzero; a command missing only from *this* machine
 is a warning, so a CI-only tool doesn't break the gate.
