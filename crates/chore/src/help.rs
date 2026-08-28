@@ -66,7 +66,10 @@ pub fn overview(out: &mut dyn Write, style: Style) -> Result<(), Exit> {
 
     section(out, "rules", style)?;
     for rule in spec::rules() {
-        writeln!(out, "  {}", rule.name)?;
+        // The name is the header someone scans for, so it gets the same
+        // colour a builtin name and a task name get. The rule under it is a
+        // paragraph and stays plain.
+        writeln!(out, "  {}", style.accent(rule.name))?;
         writeln!(out, "{}\n", wrap(rule.rule, "    "))?;
     }
 

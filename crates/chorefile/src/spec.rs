@@ -646,14 +646,15 @@ only when handed to Windows. Paths printed back — by `find`, `which`, `$CWD`, 
     },
     Rule {
         name: "reserved tasks",
-        rule: "`list`, `help`, `check` and `spec` are subcommands, so a task may not take \
-those names. `::` is reserved in a task name for include namespaces.",
+        rule: "`list`, `help`, `check`, `spec`, `completions` and `init` are subcommands, \
+so a task may not take those names. `::` is reserved in a task name for include \
+namespaces.",
     },
     Rule {
         name: "top-level statements",
-        rule: "Top-level assignments are evaluated once, before the first task. `list`, \
-`help`, `check` and `spec` never evaluate them, so those subcommands do no I/O and work even \
-when a file a global reads is missing.",
+        rule: "Top-level assignments are evaluated once, before the first task. No \
+subcommand evaluates them, so `list` and `check` do no I/O and work even when a file a \
+global reads is missing.",
     },
     Rule {
         name: "failure",
@@ -904,5 +905,29 @@ mod tests {
         let mut out = String::new();
         write_json(&Json::Arr(vec![]), 0, &mut out);
         assert_eq!(out, "[]");
+    }
+}
+
+#[cfg(test)]
+mod reserved_tests {
+    use super::*;
+
+    /// The rule text used to name four reserved tasks while the binary
+    /// enforced six, so `chore check` rejected a task that `chore help` said
+    /// was fine. Naming them in prose is worth it, but only if the prose
+    /// cannot drift away from the list that is actually enforced.
+    #[test]
+    fn the_reserved_rule_names_every_reserved_task() {
+        let rule = RULES
+            .iter()
+            .find(|r| r.name == "reserved tasks")
+            .expect("a rule about reserved tasks");
+        for name in crate::RESERVED_TASKS {
+            assert!(
+                rule.rule.contains(&format!("`{name}`")),
+                "`{name}` is reserved but the rule does not mention it: {}",
+                rule.rule
+            );
+        }
     }
 }

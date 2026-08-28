@@ -108,7 +108,15 @@ task upgrade {
 
     cargo build --release --locked --bin chore
     mkdir $HOME/.local/bin
-    copy target/release/chore$EXE $HOME/.local/bin/chore$EXE
+    # Copy beside the target, then rename over it. Writing a Mach-O in place
+    # invalidates its signature while a process still has it mapped, and macOS
+    # kills whatever execs it next: running this task from the binary it was
+    # replacing killed the version check below. A rename swaps the directory
+    # entry instead, so the running process keeps the file it started with and
+    # the next one gets a whole new inode. install.sh and the download builtin
+    # both land their files this way for the same reason.
+    copy target/release/chore$EXE $HOME/.local/bin/chore.new$EXE
+    move $HOME/.local/bin/chore.new$EXE $HOME/.local/bin/chore$EXE
     $HOME/.local/bin/chore$EXE --version
 }
 
