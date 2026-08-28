@@ -442,7 +442,8 @@
     "list",
     "help",
     "check",
-    "spec"
+    "spec",
+    "completions"
   ],
   "namespace_separator": "::"
 }
