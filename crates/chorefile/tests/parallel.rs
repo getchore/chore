@@ -116,6 +116,22 @@ fn run_in(dir: &Dir, source: &str, task: &str, mode: Mode) -> Ran {
 // Concurrency
 // ---------------------------------------------------------------------------
 
+/// How long a run takes that sleeps once for `seconds`, on this machine.
+///
+/// Every timing assertion here is really "one sleep, not two", and a fixed
+/// millisecond budget answers that only on a fast machine: a windows-11-arm
+/// runner spends about 0.75s on process spawn and sleep granularity before
+/// any sleeping happens, which is more than the gap being measured. Measuring
+/// the same shape first turns the bound into a statement about the sleeps
+/// rather than about the hardware.
+fn baseline(tag: &str, seconds: &str) -> Duration {
+    let dir = Dir::new(&format!("{tag}-baseline"));
+    let source = format!("task once {{\n    sleep {seconds}\n}}\n");
+    let ran = run(&dir, &source, "once");
+    assert_eq!(ran.code, Ok(0), "baseline run failed: {}", ran.err);
+    ran.elapsed
+}
+
 #[test]
 fn two_tasks_really_run_at_the_same_time() {
     let dir = Dir::new("concurrent");
@@ -135,12 +151,15 @@ task b {
         "ci",
     );
     assert_eq!(ran.code, Ok(0), "{}", ran.err);
-    // Sequentially this is 1.2s. Well under the sum, and generous enough that
-    // a loaded machine does not make it flake.
+    // Sequentially this is two 0.6s sleeps; overlapped it is one. The bound is
+    // one sleep of headroom over a run that did exactly one, so it holds on a
+    // slow machine and still fails if the tasks ran one after the other.
+    let base = baseline("concurrent", "0.6");
     assert!(
-        ran.elapsed < Duration::from_millis(1000),
-        "took {:?}, so the tasks did not overlap",
-        ran.elapsed
+        ran.elapsed < base + Duration::from_millis(600),
+        "took {:?} against a {:?} baseline, so the tasks did not overlap",
+        ran.elapsed,
+        base
     );
 }
 
@@ -183,11 +202,14 @@ task deps {
     assert_eq!(lines.iter().filter(|l| **l == "a").count(), 1, "{log:?}");
     assert_eq!(lines.iter().filter(|l| **l == "b").count(), 1, "{log:?}");
     // The second sibling waited for the first rather than running its own
-    // copy: one 0.3s sleep between them, not two.
+    // copy: one 0.3s sleep between them, not two. Compared against a run that
+    // slept once, so the bound measures the sleeps and not the machine.
+    let base = baseline("shared-dep", "0.3");
     assert!(
-        ran.elapsed < Duration::from_millis(550),
-        "took {:?}",
-        ran.elapsed
+        ran.elapsed < base + Duration::from_millis(300),
+        "took {:?} against a {:?} baseline, so `deps` was slept through twice",
+        ran.elapsed,
+        base
     );
 }
 
