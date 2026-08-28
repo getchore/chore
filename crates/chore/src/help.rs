@@ -29,35 +29,35 @@ pub fn overview(out: &mut dyn Write, style: Style) -> Result<(), Exit> {
         .iter()
         .map(|form| (form.syntax, form.meaning))
         .collect();
-    columns(out, &rows)?;
+    columns(out, &rows, style)?;
 
     section(out, "conditions", style)?;
     let rows: Vec<_> = spec::conditions()
         .iter()
         .map(|c| (c.syntax, c.meaning))
         .collect();
-    columns(out, &rows)?;
+    columns(out, &rows, style)?;
 
     section(out, "chaining", style)?;
     let rows: Vec<_> = spec::chaining()
         .iter()
         .map(|op| (op.symbol, op.meaning))
         .collect();
-    columns(out, &rows)?;
+    columns(out, &rows, style)?;
 
     section(out, "variables", style)?;
     let rows: Vec<_> = spec::variables()
         .iter()
         .map(|v| (v.name, v.meaning))
         .collect();
-    columns(out, &rows)?;
+    columns(out, &rows, style)?;
 
     section(out, "builtins", style)?;
     let rows: Vec<_> = spec::builtins()
         .iter()
         .map(|b| (b.name, b.summary))
         .collect();
-    columns(out, &rows)?;
+    columns(out, &rows, style)?;
 
     section(out, "resolution", style)?;
     for rule in spec::resolution() {
@@ -102,7 +102,7 @@ pub fn builtin(out: &mut dyn Write, name: &str, style: Style) -> Result<(), Exit
             })
             .collect();
         let rows: Vec<(&str, &str)> = rows.iter().map(|(l, r)| (l.as_str(), r.as_str())).collect();
-        columns(out, &rows)?;
+        columns(out, &rows, style)?;
     }
     Ok(())
 }
@@ -118,21 +118,20 @@ fn section(out: &mut dyn Write, title: &str, style: Style) -> Result<(), Exit> {
 /// Two aligned columns. The right column is reflowed under itself, so a long
 /// explanation stays inside its column instead of wrapping back to column one
 /// and breaking the alignment that makes the listing readable.
-fn columns(out: &mut dyn Write, rows: &[(&str, &str)]) -> Result<(), Exit> {
+fn columns(out: &mut dyn Write, rows: &[(&str, &str)], style: Style) -> Result<(), Exit> {
     let width = rows.iter().map(|(left, _)| left.len()).max().unwrap_or(0);
     let indent = " ".repeat(2 + width + GAP);
     for (left, right) in rows {
         if right.is_empty() {
-            writeln!(out, "  {left}")?;
+            writeln!(out, "  {}", style.accent(left))?;
             continue;
         }
         let text = wrap(right, &indent);
-        writeln!(
-            out,
-            "  {left:width$}{}{}",
-            " ".repeat(GAP),
-            text.trim_start()
-        )?;
+        // Pad from the bare text, then colour. Formatting the coloured string
+        // to a width counts the escape bytes as characters, which pushes every
+        // description a few columns right of the one above it.
+        let pad = " ".repeat(width - left.len() + GAP);
+        writeln!(out, "  {}{pad}{}", style.accent(left), text.trim_start())?;
     }
     Ok(())
 }
