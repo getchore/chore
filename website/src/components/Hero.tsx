@@ -3,6 +3,7 @@ import { GITHUB_URL } from '../lib/detect'
 import { Install } from './Install'
 import { Terminal } from './Terminal'
 import { EXTERNAL, GitHubIcon, container } from './ui'
+import spec from '../spec.json'
 
 const STATS = [
   ['1 binary', 'no runtime'],
@@ -73,7 +74,7 @@ export function Hero() {
               })}
             >
               <span className={css({ w: '6px', h: '6px', rounded: 'full', bg: 'accent.solid' })} />
-              v0.1.0
+              v{spec.version}
               <span className={css({ color: 'fg.faint' })}>→</span>
             </a>
 

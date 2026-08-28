@@ -479,10 +479,11 @@ line directly above the `task` is its description, which `chore list` prints.",
         name: "include",
         syntax: "include path [as name]",
         example: "include libs/chorefile as libs",
-        meaning: "Deferred to v1.1, with settled semantics: paths resolve relative to the \
-including file, a directory means the chorefile inside it, `as` namespaces both tasks and \
-globals as `libs::build`, and without `as` everything merges flat where any duplicate is a \
-`check` error.",
+        meaning: "Pull another chorefile in and merge it. Paths resolve relative to the \
+including file, a directory means the chorefile inside it, and `$ROOT` stays the top-level \
+chorefile's directory. `as` namespaces both tasks and globals as `libs::build`; without it \
+everything merges flat, where a duplicate name across two files is an error. A cycle names the \
+whole loop.",
     },
 ];
 

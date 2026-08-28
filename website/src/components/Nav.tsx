@@ -1,15 +1,26 @@
-import { css } from 'styled-system/css'
+import { css, cx } from 'styled-system/css'
 import { GITHUB_URL } from '../lib/detect'
+import type { Route } from '../lib/router'
 import { useTheme } from '../lib/useTheme'
+import { Link } from './Link'
 import { EXTERNAL, GitHubIcon, container } from './ui'
 
+/**
+ * Anchors into the landing page. Off the landing page they are dead links, so
+ * from anywhere else they route home carrying the hash.
+ */
 const LINKS = [
   ['Why', '#features'],
   ['Compare', '#replaces'],
   ['Example', '#example'],
-  ['Dogfooding', '#dogfood'],
-  ['Reference', '#reference'],
 ]
+
+const linkStyle = css({
+  fontSize: '14px',
+  color: 'fg.muted',
+  transition: 'color .15s',
+  _hover: { color: 'fg.default' },
+})
 
 function SunMoon({ dark }: { dark: boolean }) {
   return dark ? (
@@ -24,7 +35,7 @@ function SunMoon({ dark }: { dark: boolean }) {
   )
 }
 
-export function Nav() {
+export function Nav({ route }: { route: Route }) {
   const { theme, toggle } = useTheme()
 
   return (
@@ -40,8 +51,9 @@ export function Nav() {
     >
       <div className={container}>
         <div className={css({ display: 'flex', alignItems: 'center', gap: '8', h: '60px' })}>
-              <a
-                href="#top"
+              <Link
+                to="home"
+                hash="#top"
                 className={css({ display: 'flex', alignItems: 'center', gap: '2.5', fontWeight: '700', letterSpacing: '-0.02em' })}
               >
                 <span
@@ -61,23 +73,26 @@ export function Nav() {
                   ❯
                 </span>
                 chore
-              </a>
+              </Link>
 
               <nav className={css({ display: { base: 'none', md: 'flex' }, gap: '7', ml: '2' })}>
-                {LINKS.map(([label, href]) => (
-                  <a
-                    key={href}
-                    href={href}
-                    className={css({
-                      fontSize: '14px',
-                      color: 'fg.muted',
-                      transition: 'color .15s',
-                      _hover: { color: 'fg.default' },
-                    })}
-                  >
-                    {label}
-                  </a>
-                ))}
+                {LINKS.map(([label, hash]) =>
+                  route === 'home' ? (
+                    <a key={hash} href={hash} className={linkStyle}>
+                      {label}
+                    </a>
+                  ) : (
+                    <Link key={hash} to="home" hash={hash} className={linkStyle}>
+                      {label}
+                    </Link>
+                  ),
+                )}
+                <Link
+                  to="reference"
+                  className={cx(linkStyle, route === 'reference' && css({ color: 'fg.accent', fontWeight: '600' }))}
+                >
+                  Reference
+                </Link>
               </nav>
 
               <div className={css({ ml: 'auto', display: 'flex', alignItems: 'center', gap: '2' })}>

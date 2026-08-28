@@ -1,0 +1,449 @@
+{
+  "version": "1.2.0",
+  "builtins": [
+    {
+      "name": "download",
+      "usage": "download <url> <dest> [--retries n] [--timeout s] [--sha256 h]",
+      "summary": "fetch a URL to a file",
+      "description": "Accepts http(s) and gh://owner/repo/tag/asset, which expands to the GitHub release-asset URL. A `dest` ending in `/`, or naming an existing directory, means \"into this directory under the remote filename\"; anything else is the output path. The bytes stream into a temp file beside the destination and are renamed into place at the end, so an interrupted download never leaves a half-file a later run would trust. GITHUB_TOKEN or GH_TOKEN, if set, is sent as a bearer token. 5xx and 429 are retried; other 4xx are not.",
+      "effects": true,
+      "flags": [
+        {
+          "name": "--retries",
+          "argument": "n",
+          "default": "3",
+          "meaning": "extra attempts after the first, with 1s/2s/4s/8s backoff"
+        },
+        {
+          "name": "--timeout",
+          "argument": "s",
+          "default": "60",
+          "meaning": "seconds for the whole request, not per byte"
+        },
+        {
+          "name": "--sha256",
+          "argument": "h",
+          "default": "no check",
+          "meaning": "64-character hex digest; a mismatch deletes the file and fails"
+        }
+      ]
+    },
+    {
+      "name": "extract",
+      "usage": "extract <archive> <dest> [--member name] [--strip n] [--flatten]",
+      "summary": "unpack a zip or tar, compressed or not",
+      "description": "Handles zip, tar, and .gz, .xz and .zst streams holding either a tar or a single file. The format comes from the extension, and from the leading bytes when the name says nothing. Entry names are checked before they become paths: an absolute name, or one that climbs out of `dest`, aborts the whole extraction. For a compressed single file, --member and --strip are an error, and a `dest` ending in `/` means \"into this directory, under the name with the compression extension removed\". Without --flatten an entry keeps the directory path it had inside the archive, so `--member sona` can land at `dest/pkg/bin/sona`.",
+      "effects": true,
+      "flags": [
+        {
+          "name": "--member",
+          "argument": "name",
+          "default": "every entry",
+          "meaning": "extract only this entry, matched against its full path in the archive or just its filename, so `--member chore` finds `bin/chore`"
+        },
+        {
+          "name": "--strip",
+          "argument": "n",
+          "default": "0",
+          "meaning": "drop n leading path components from each entry; entries with fewer components are skipped"
+        },
+        {
+          "name": "--flatten",
+          "argument": "",
+          "default": "off",
+          "meaning": "write every entry directly into `dest` under its base name, dropping the directory path it had inside the archive; two entries that would collide is an error, and it cannot be combined with --strip"
+        }
+      ]
+    },
+    {
+      "name": "archive",
+      "usage": "archive <src...> <dest>",
+      "summary": "pack files and directories",
+      "description": "The last argument is the destination, and the format comes from its extension: .zip, .tar, .tar.gz or .tgz, .tar.xz or .txz, .tar.zst or .tzst. Anything else is an error. Each source's own name is a top-level entry, as with `tar cf` and `zip -r`, so extracting gives the directory back rather than its contents loose; a source written with a trailing `/` contributes its contents instead, with no directory of its own, the way `extract` reads a trailing slash on its `dest`. Several sources pack side by side into one archive, and two of them claiming the same top-level name is an error. Entries are sorted, so the same tree packs to the same bytes twice.",
+      "effects": true,
+      "flags": []
+    },
+    {
+      "name": "copy",
+      "usage": "copy <src> <dest>",
+      "summary": "copy a file or a whole directory tree",
+      "description": "Missing parent directories of `dest` are created. When `dest` is an existing directory the source lands inside it under its own name, as `cp` does; otherwise `dest` is the exact path written.",
+      "effects": true,
+      "flags": []
+    },
+    {
+      "name": "move",
+      "usage": "move <src> <dest>",
+      "summary": "rename or move a file or directory",
+      "description": "A rename where the filesystem allows one, a copy-then-delete across volumes. Same `dest`-is-a-directory rule as `copy`. A missing source is an error, unlike `remove`.",
+      "effects": true,
+      "flags": []
+    },
+    {
+      "name": "remove",
+      "usage": "remove <path...>",
+      "summary": "delete paths, recursively",
+      "description": "Recursive, and silent about paths that are already gone, so a cleanup task is safe to run twice. Refuses the filesystem root and $ROOT itself; everything under $ROOT is fair game.",
+      "effects": true,
+      "flags": []
+    },
+    {
+      "name": "mkdir",
+      "usage": "mkdir <path...>",
+      "summary": "create directories",
+      "description": "Always -p: parent directories are created, and a directory that already exists is not an error.",
+      "effects": true,
+      "flags": []
+    },
+    {
+      "name": "chmod",
+      "usage": "chmod <mode> <path>",
+      "summary": "set permission bits",
+      "description": "An octal mode, with or without a leading 0 or 0o. Windows has no mode to set, so only the owner-write bit is read there: clearing it marks the file read-only, setting it clears the flag. The execute bit is ignored on Windows, where a file is executable by extension.",
+      "effects": true,
+      "flags": []
+    },
+    {
+      "name": "which",
+      "usage": "which <name>",
+      "summary": "resolve a program on PATH",
+      "description": "Prints the resolved path and exits 0, or prints nothing and exits 1, so `if which cargo { }` works. A name containing `/` is treated as a path rather than a PATH lookup. On Windows every PATHEXT suffix is tried, the name as written first.",
+      "effects": false,
+      "flags": []
+    },
+    {
+      "name": "find",
+      "usage": "find <root> <name...>",
+      "summary": "list matching paths under a directory",
+      "description": "Every entry under `root` whose filename matches one of the patterns, one per line, depth-first and sorted. Patterns support `*` and `?` and match the filename only, case-sensitively on every platform. Results are printed with `root` as it was written, so they can be fed straight back to another command. A `root` that is not a directory is an error. Symlinked directories are not followed.",
+      "effects": false,
+      "flags": []
+    },
+    {
+      "name": "read",
+      "usage": "read <file>",
+      "summary": "print a file's contents",
+      "description": "Contents with surrounding whitespace removed, which is what `$(...)` would do to them anyway.",
+      "effects": false,
+      "flags": []
+    },
+    {
+      "name": "write",
+      "usage": "write <file> <text>",
+      "summary": "write text to a file",
+      "description": "Overwrites, creating parent directories, and adds the trailing newline that `read` trims back off. Appending is the interpreter's `>>`, so there is no flag for it.",
+      "effects": true,
+      "flags": []
+    },
+    {
+      "name": "sha256",
+      "usage": "sha256 <file>",
+      "summary": "print a file's SHA-256",
+      "description": "Lowercase hex, the spelling `download --sha256` and every checksum file use.",
+      "effects": false,
+      "flags": []
+    },
+    {
+      "name": "exists",
+      "usage": "exists <path>",
+      "summary": "test whether a path exists",
+      "description": "Exits 0 when the path is there and 1 when it is not, and prints nothing: it exists to be the condition of an `if`. A broken symlink still exists.",
+      "effects": false,
+      "flags": []
+    },
+    {
+      "name": "echo",
+      "usage": "echo <text...>",
+      "summary": "print its arguments",
+      "description": "Arguments joined with single spaces and one newline. What separates the arguments is word splitting at the call site, not the original spacing.",
+      "effects": false,
+      "flags": []
+    },
+    {
+      "name": "env",
+      "usage": "env <NAME> [value]",
+      "summary": "read or set an environment variable",
+      "description": "With one argument it prints the value, or exits 1 when the name is unset — a nonzero exit rather than an error, so `if env CI { }` works. With two it sets the variable for the rest of the run and for every process the run spawns. Reading still happens under --dry; setting does not.",
+      "effects": true,
+      "flags": []
+    },
+    {
+      "name": "fail",
+      "usage": "fail <msg>",
+      "summary": "stop the task with a message",
+      "description": "Under `try`, or as a condition, it is just a command that exited nonzero. It has no effects, so --dry runs it and the preview stops where the real run would.",
+      "effects": false,
+      "flags": []
+    },
+    {
+      "name": "sleep",
+      "usage": "sleep <seconds>",
+      "summary": "wait",
+      "description": "Fractional seconds are allowed. Skipped under --dry, which is meant to be instant.",
+      "effects": true,
+      "flags": []
+    }
+  ],
+  "variables": [
+    {
+      "name": "OS",
+      "values": "macos | linux | windows",
+      "meaning": "the host operating system",
+      "scope": "run"
+    },
+    {
+      "name": "ARCH",
+      "values": "x86_64 | arm64",
+      "meaning": "the host architecture",
+      "scope": "run"
+    },
+    {
+      "name": "ENV",
+      "values": "gnu | msvc | \"\"",
+      "meaning": "the Windows toolchain; empty everywhere else",
+      "scope": "run"
+    },
+    {
+      "name": "PLATFORM",
+      "values": "$OS-$ARCH",
+      "meaning": "the pair, for naming release artifacts",
+      "scope": "run"
+    },
+    {
+      "name": "TRIPLE",
+      "values": "e.g. aarch64-apple-darwin",
+      "meaning": "the rustc target triple, for anything handed to a toolchain",
+      "scope": "run"
+    },
+    {
+      "name": "EXE",
+      "values": "\"\" | .exe",
+      "meaning": "the executable suffix, so `build/tool$EXE` is portable",
+      "scope": "run"
+    },
+    {
+      "name": "HOME",
+      "values": "a path",
+      "meaning": "the user's home directory, from HOME or USERPROFILE; empty if unset",
+      "scope": "run"
+    },
+    {
+      "name": "ROOT",
+      "values": "a path",
+      "meaning": "the directory holding the top-level chorefile; one per invocation, and unchanged inside included files",
+      "scope": "run"
+    },
+    {
+      "name": "CWD",
+      "values": "a path",
+      "meaning": "the interpreter's current directory. `cd` moves it, and the move dies with the task that made it, so it is per-task rather than per-run",
+      "scope": "task"
+    },
+    {
+      "name": "TASK",
+      "values": "a task name",
+      "meaning": "the task currently running; a called task sees its own name, not its caller's",
+      "scope": "task"
+    },
+    {
+      "name": "NOW",
+      "values": "YYYY-MM-DDTHH:MM:SSZ",
+      "meaning": "UTC timestamp, taken once per invocation so two lines of one recipe cannot disagree",
+      "scope": "run"
+    }
+  ],
+  "syntax": [
+    {
+      "name": "assignment",
+      "syntax": "name=value",
+      "example": "target=$PLATFORM",
+      "meaning": "Set a variable. Inside a task it is local to that task; at the top level it is a global, evaluated once before the first task runs."
+    },
+    {
+      "name": "interpolation",
+      "syntax": "$name  \"$name/lib\"  $1  $@  $#",
+      "example": "cargo build --target-dir \"$ROOT/target\"",
+      "meaning": "Substitute a variable. `$1`, `$2`, ... are a task's parameters, `$@` all of them as separate words, `$#` the count."
+    },
+    {
+      "name": "capture",
+      "syntax": "$(cmd)",
+      "example": "version=$(read VERSION)",
+      "meaning": "Run the command and substitute its stdout with surrounding whitespace removed. A nonzero exit fails the statement unless it is wrapped in `try`."
+    },
+    {
+      "name": "if",
+      "syntax": "if cond { } else if cond { } else { }",
+      "example": "if $OS == windows { echo msvc } else if $OS == macos { echo apple } else { echo other }",
+      "meaning": "Branch on a condition. `else if` and `else` are both optional."
+    },
+    {
+      "name": "for",
+      "syntax": "for name in words { }",
+      "example": "for f in $(find src *.rs) { echo $f }",
+      "meaning": "Iterate. Each word is split on whitespace after interpolation, so one `$(find ...)` yields one iteration per match."
+    },
+    {
+      "name": "try",
+      "syntax": "try cmd",
+      "example": "try remove build/stale.lock",
+      "meaning": "Run the command and continue even if it exits nonzero."
+    },
+    {
+      "name": "exit",
+      "syntax": "exit [code]",
+      "example": "exit 1",
+      "meaning": "Stop the run with the given code, 0 by default. A called task's `exit` unwinds its caller too."
+    },
+    {
+      "name": "return",
+      "syntax": "return [code]",
+      "example": "if exists $out { return }",
+      "meaning": "End the current task and hand control back to its caller, which carries on. An optional code becomes the task's exit status, so `&&`, `||`, `try`, a condition and a capture read it as they read any command's. Inside a `for` it leaves the task, not the loop."
+    },
+    {
+      "name": "task",
+      "syntax": "task name [param[=default]...] { }",
+      "example": "# Build the release binary\ntask build target { cargo build --release --target $target }",
+      "meaning": "Define a task. Parameters bind to `$1`, `$2`, ... in the body. The comment line directly above the `task` is its description, which `chore list` prints."
+    },
+    {
+      "name": "include",
+      "syntax": "include path [as name]",
+      "example": "include libs/chorefile as libs",
+      "meaning": "Pull another chorefile in and merge it. Paths resolve relative to the including file, a directory means the chorefile inside it, and `$ROOT` stays the top-level chorefile's directory. `as` namespaces both tasks and globals as `libs::build`; without it everything merges flat, where a duplicate name across two files is an error. A cycle names the whole loop."
+    }
+  ],
+  "conditions": [
+    {
+      "syntax": "$a == $b",
+      "meaning": "string equality; compare against \"\" to test for empty"
+    },
+    {
+      "syntax": "$a != $b",
+      "meaning": "string inequality"
+    },
+    {
+      "syntax": "$a contains x",
+      "meaning": "substring"
+    },
+    {
+      "syntax": "$a starts-with x",
+      "meaning": "prefix"
+    },
+    {
+      "syntax": "$a ends-with x",
+      "meaning": "suffix"
+    },
+    {
+      "syntax": "cmd",
+      "meaning": "any command, true when it exits 0. `exists path` and `which name` are the two written for this position."
+    },
+    {
+      "syntax": "!cond",
+      "meaning": "negation"
+    },
+    {
+      "syntax": "cond && cond",
+      "meaning": "both"
+    },
+    {
+      "syntax": "cond || cond",
+      "meaning": "either"
+    }
+  ],
+  "chaining": [
+    {
+      "symbol": "&&",
+      "meaning": "run the right side only if the left exited 0"
+    },
+    {
+      "symbol": "||",
+      "meaning": "run the right side only if the left exited nonzero"
+    },
+    {
+      "symbol": "|",
+      "meaning": "pipe the left side's stdout into the right side's stdin; the pipeline's status is the last command's"
+    },
+    {
+      "symbol": ">",
+      "meaning": "write stdout to a file, truncating it"
+    },
+    {
+      "symbol": ">>",
+      "meaning": "append stdout to a file"
+    },
+    {
+      "symbol": "2>",
+      "meaning": "write stderr to a file"
+    }
+  ],
+  "resolution": [
+    {
+      "name": "task",
+      "rule": "A task defined in the chorefile wins, so a project can name a task `build` and call it from another task."
+    },
+    {
+      "name": "builtin",
+      "rule": "Then a builtin. Builtins are reserved: `check` reports a task that shadows one."
+    },
+    {
+      "name": "PATH",
+      "rule": "Then a program on PATH, run directly — never through a shell."
+    },
+    {
+      "name": "^",
+      "rule": "A leading `^` skips straight to PATH: `^find src -name '*.rs'` runs the system find rather than the builtin."
+    },
+    {
+      "name": "cd",
+      "rule": "`cd` is neither a task nor a builtin: it moves the interpreter's directory, not the process's, and the move is undone when the task that made it returns."
+    }
+  ],
+  "rules": [
+    {
+      "name": "word splitting",
+      "rule": "A quoted word is always exactly one argument. An unquoted `$var` splits on whitespace, as in sh. There are no arrays and no quoting inside a variable, so an argument that contains a space must be written quoted at the call site: `-G \"MinGW Makefiles\"`, not `-G $generator`."
+    },
+    {
+      "name": "no shell",
+      "rule": "argv is handed to the OS directly. Nothing is re-quoted, re-expanded, or globbed by a shell, so shell metacharacters in an argument reach the program as literal characters."
+    },
+    {
+      "name": "run once",
+      "rule": "A task runs once per invocation, keyed on name AND arguments, so a parameterised task called twice with different arguments runs twice. `--force` disables it."
+    },
+    {
+      "name": "--dry",
+      "rule": "Echoes every command and skips the ones with effects, but captures and conditions still run: a `$(...)` that did not execute would leave every interpolated path downstream empty and the preview would describe a run that could never happen."
+    },
+    {
+      "name": "paths",
+      "rule": "Paths are always written with `/`, on every platform, and converted to `\\` only when handed to Windows. Paths printed back — by `find`, `which`, `$CWD`, `$ROOT` — use `/` too."
+    },
+    {
+      "name": "reserved tasks",
+      "rule": "`list`, `help`, `check` and `spec` are subcommands, so a task may not take those names. `::` is reserved in a task name for include namespaces."
+    },
+    {
+      "name": "top-level statements",
+      "rule": "Top-level assignments are evaluated once, before the first task. `list`, `help`, `check` and `spec` never evaluate them, so those subcommands do no I/O and work even when a file a global reads is missing."
+    },
+    {
+      "name": "failure",
+      "rule": "Fail fast: a nonzero exit stops the task unless it is wrapped in `try` or being used as a condition. Output streams as it is produced rather than being buffered to the end."
+    },
+    {
+      "name": "portability",
+      "rule": "`check` flags non-portable commands — curl, wget, unzip, tar, cp, mv, rm, cat, shasum, test — and names the builtin that replaces each."
+    }
+  ],
+  "reserved_tasks": [
+    "list",
+    "help",
+    "check",
+    "spec"
+  ],
+  "namespace_separator": "::"
+}
+

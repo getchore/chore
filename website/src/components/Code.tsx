@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode } from 'react'
 import { css } from 'styled-system/css'
+import { spec } from '../lib/spec'
 
 export type Lang = 'chore' | 'yaml' | 'make' | 'json' | 'cmake'
 
@@ -15,10 +16,9 @@ const KEYWORDS: Record<Lang, Set<string>> = {
   ]),
 }
 
-const BUILTINS = new Set([
-  'download', 'extract', 'archive', 'copy', 'move', 'remove', 'mkdir', 'chmod',
-  'which', 'find', 'read', 'write', 'sha256', 'exists', 'echo', 'env', 'fail', 'sleep',
-])
+// From the spec, so a builtin added to the language highlights without anyone
+// remembering to edit this file.
+const BUILTINS = new Set(spec.builtins.map((b) => b.name))
 
 const tone = {
   comment: css({ color: 'fg.faint', fontStyle: 'italic' }),
