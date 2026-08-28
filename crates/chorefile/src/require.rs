@@ -37,8 +37,8 @@ use crate::spec;
 
 /// The one-liner that installs the current release, which is the whole
 /// remedy for every failure this module reports.
-const INSTALL: &str = "curl -fsSL https://getchore.github.io/chore/install.sh | sh";
-const INSTALL_PS: &str = "irm https://getchore.github.io/chore/install.ps1 | iex";
+const INSTALL: &str = "curl -fsSL https://getchore.github.io/install.sh | sh";
+const INSTALL_PS: &str = "irm https://getchore.github.io/install.ps1 | iex";
 
 /// A `major.minor.patch` version.
 ///
