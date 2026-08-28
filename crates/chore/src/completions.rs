@@ -227,7 +227,7 @@ _chore() {
     fi
     local names
     names="$(chore list --names 2>/dev/null | cut -f1)"
-    COMPREPLY=($(compgen -W "$names list help check spec completions" -- "$cur"))
+    COMPREPLY=($(compgen -W "$names list help check spec completions init" -- "$cur"))
 }
 complete -F _chore chore
 "#;
@@ -243,7 +243,7 @@ _chore() {
     done < <(chore list --names 2>/dev/null)
     tasks+=('list:tasks and descriptions' 'help:syntax and builtins'
             'check:lint without running' 'spec:full reference as JSON'
-            'completions:shell completion')
+            'completions:shell completion' 'init:write a starter chorefile')
     _describe -t chore-tasks 'task' tasks
 }
 compdef _chore chore
@@ -258,6 +258,7 @@ complete -c chore -f -n '__fish_use_subcommand' -a 'help' -d 'syntax and builtin
 complete -c chore -f -n '__fish_use_subcommand' -a 'check' -d 'lint without running'
 complete -c chore -f -n '__fish_use_subcommand' -a 'spec' -d 'full reference as JSON'
 complete -c chore -f -n '__fish_use_subcommand' -a 'completions' -d 'shell completion'
+complete -c chore -f -n '__fish_use_subcommand' -a 'init' -d 'write a starter chorefile'
 complete -c chore -l dry -d 'echo commands without side effects'
 complete -c chore -l force -d 'disable run-once'
 "#;
@@ -272,6 +273,7 @@ Register-ArgumentCompleter -Native -CommandName chore -ScriptBlock {
     $lines += "check`tlint without running"
     $lines += "spec`tfull reference as JSON"
     $lines += "completions`tshell completion"
+    $lines += "init`twrite a starter chorefile"
     foreach ($line in $lines) {
         $parts = $line -split "`t", 2
         $name = $parts[0]

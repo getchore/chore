@@ -8,6 +8,7 @@
 mod args;
 mod completions;
 mod help;
+mod init;
 mod lint;
 mod list;
 mod style;
@@ -37,6 +38,7 @@ const SUBCOMMANDS: &[(&str, &str, &str)] = &[
     ("check", "", "lint without running"),
     ("spec", "", "full reference as JSON, for agents"),
     ("completions", "[shell]", "tab completion for task names"),
+    ("init", "", "write a starter chorefile here"),
 ];
 
 /// The two flags `chore` keeps for itself, and what they do.
@@ -260,6 +262,20 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
                 completions::guide(out, completions::Shell::detect())?;
             }
             Ok(OK)
+        }
+        // `init` is the one subcommand that exists precisely because there is
+        // no chorefile yet, so it never discovers one. It writes into the
+        // working directory the user is standing in, and a chorefile a parent
+        // directory happens to own is none of its business.
+        Command::Init => {
+            let dir = std::env::current_dir().map_err(|e| Exit::usage(e.to_string()))?;
+            if init::write(out, &dir, style)? {
+                Ok(OK)
+            } else {
+                // Refusing to overwrite is a usage error, not a failed run:
+                // nothing about the request was ever going to be carried out.
+                Err(Exit::usage(init::occupied(&dir)))
+            }
         }
         Command::Check => {
             // `check` resolves for itself rather than going through `Loaded`:

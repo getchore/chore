@@ -1139,3 +1139,85 @@ fn completions_cannot_be_shadowed_by_a_task() {
     assert_eq!(run.code, 1, "{}", run.stdout);
     assert!(run.stdout.contains("completions"), "{}", run.stdout);
 }
+
+// ---------------------------------------------------------------------------
+// init
+// ---------------------------------------------------------------------------
+
+#[test]
+fn init_writes_a_chorefile_with_no_chorefile_anywhere() {
+    // The whole point of the command: someone standing in an empty directory,
+    // with nothing to discover, ends up with a file to edit.
+    let dir = Dir::new();
+    let run = chore(&dir, &["init"]).ok();
+    assert!(dir.exists("chorefile"), "init wrote nothing");
+    assert!(run.stdout.contains("chorefile"), "{}", run.stdout);
+    // It must be a starting point, not a tutorial.
+    let written = dir.read("chorefile");
+    assert!(
+        written.lines().count() < 25,
+        "starter is {} lines:\n{written}",
+        written.lines().count()
+    );
+}
+
+#[test]
+fn what_init_writes_passes_check_with_no_findings() {
+    // A first chorefile that chore's own linter complains about would be the
+    // worst possible introduction, so the file is checked by the same binary
+    // that wrote it rather than by inspection.
+    let dir = Dir::new();
+    chore(&dir, &["init"]).ok();
+    let run = chore(&dir, &["check"]).ok();
+    assert!(!run.stdout.contains("warning"), "{}", run.stdout);
+    assert!(!run.stdout.contains("error"), "{}", run.stdout);
+}
+
+#[test]
+fn what_init_writes_runs_and_describes_itself() {
+    // `chore list` reads the comment above a task as its description, and the
+    // starter exists partly to teach that convention: every task it defines
+    // must therefore come back out of `list` with words after its name.
+    let dir = Dir::new();
+    chore(&dir, &["init"]).ok();
+    let names = chore(&dir, &["list", "--names"]).ok().stdout;
+    for line in names.lines() {
+        let (name, description) = line.split_once('\t').expect("name<TAB>description");
+        assert!(!description.is_empty(), "`{name}` has no description");
+    }
+    // And the tasks are real: one of them calls the other two.
+    let run = chore(&dir, &["ci"]).ok();
+    assert!(
+        run.stdout.contains("nothing to build yet"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn init_refuses_to_overwrite_an_existing_chorefile() {
+    // Hand-written work, and there is no undo, so the refusal is the feature.
+    let dir = Dir::new();
+    let mine = "task keep {\n    echo mine\n}\n";
+    dir.chorefile(mine);
+    let run = chore(&dir, &["init"]);
+    assert_eq!(run.code, 2, "{}", run.stderr);
+    assert!(run.stderr.contains("already exists"), "{}", run.stderr);
+    assert_eq!(dir.read("chorefile"), mine, "init overwrote the file");
+}
+
+#[test]
+fn init_cannot_be_shadowed_by_a_task() {
+    // Reserved like `list` and `completions`: the subcommand wins wherever it
+    // is typed, and `check` is where the author of the task is told why.
+    let dir = Dir::new();
+    dir.chorefile("task init {\n    echo shadowed\n}\n");
+    let run = chore(&dir, &["init"]);
+    assert!(!run.stdout.contains("shadowed"), "{}", run.stdout);
+    // A chorefile is already there, so the subcommand it ran was `init`
+    // declining to overwrite it.
+    assert_eq!(run.code, 2, "{}", run.stderr);
+    let check = chore(&dir, &["check"]);
+    assert_eq!(check.code, 1, "{}", check.stdout);
+    assert!(check.stdout.contains("init"), "{}", check.stdout);
+}

@@ -30,6 +30,8 @@ pub enum Command {
     Spec,
     /// `chore completions [shell] [--write]`
     Completions { shell: Option<Shell>, write: bool },
+    /// `chore init`
+    Init,
     /// `chore` with nothing to do: usage, plus the task list.
     Usage,
     /// `chore --version`
@@ -145,6 +147,10 @@ fn subcommand(name: &str, args: Vec<String>) -> Result<Command, UsageError> {
             _ => Err(UsageError("usage: chore help [builtin]".into())),
         },
         "check" if args.is_empty() => Ok(Command::Check),
+        // `init` takes nothing: there is one starter chorefile and one place
+        // it goes, so an argument here is a misunderstanding worth naming
+        // rather than something to quietly ignore.
+        "init" if args.is_empty() => Ok(Command::Init),
         "completions" => completions(args),
         "spec" if args.is_empty() => Ok(Command::Spec),
         other => Err(UsageError(format!("usage: chore {other}"))),
@@ -293,6 +299,12 @@ mod tests {
             parse_args(&["completions"]).command,
             Command::Completions { .. }
         ));
+    }
+
+    #[test]
+    fn init_takes_no_arguments() {
+        assert_eq!(parse_args(&["init"]).command, Command::Init);
+        assert!(parse(["init".into(), "--force".into()]).is_err());
     }
 
     #[test]
