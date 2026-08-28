@@ -48,6 +48,17 @@ prints one to stdout for a package manager to redirect. PowerShell resolves
 `chore list --names` in the current directory, so completion works in every
 project with nothing to set up per repo.
 
+## Syntax highlighting
+
+```sh
+curl -fsSL https://github.com/getchore/chorefile-vscode/releases/latest/download/chorefile.vsix -o /tmp/chorefile.vsix \
+  && code --install-extension /tmp/chorefile.vsix
+```
+
+Colors `chorefile` and `.chore` files in VS Code, Cursor and VSCodium. Source
+and other install options are in
+[getchore/chorefile-vscode](https://github.com/getchore/chorefile-vscode).
+
 ## In GitHub Actions
 
 ```yaml
