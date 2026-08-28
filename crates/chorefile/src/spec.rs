@@ -500,6 +500,18 @@ echo other }",
 unwinds its caller too.",
     },
     Form {
+        name: "script",
+        syntax: "script <command...> { <raw text> }",
+        example: "v=$(script uv run - {\n    print(1 + 1)\n})",
+        meaning: "Run the command and write the block to its stdin. The command is expanded \
+like any other; the block is raw -- no variables, no escapes, no quoting rules -- and reaches \
+the interpreter on stdin, so `uv run -`, `python3 -`, `node -` and `nu --stdin` all work. It \
+composes like any command: captured, piped, redirected, chained. Chore values reach a block \
+through the environment. The shared indentation is stripped. `check` reads nothing inside a \
+block and `--dry` skips it rather than running it, which is the trade for keeping the rest of \
+the language small enough to check and preview.",
+    },
+    Form {
         name: "return",
         syntax: "return [code]",
         example: "if exists $out { return }",

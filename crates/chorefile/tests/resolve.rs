@@ -106,6 +106,12 @@ fn calls(block: &ast::Block) -> Vec<String> {
                     words(arg, out);
                 }
             }
+            // The interpreter's argv counts; the body is another language.
+            Chain::Script(script) => {
+                for w in &script.command {
+                    words(w, out);
+                }
+            }
             Chain::And(a, b) | Chain::Or(a, b) | Chain::Pipe(a, b) => {
                 chain(a, out);
                 chain(b, out);
@@ -178,6 +184,12 @@ fn reads(block: &ast::Block) -> Vec<String> {
                 }
                 for redirect in &cmd.redirects {
                     word(&redirect.target, out);
+                }
+            }
+            // Only the interpreter's argv reads chore variables.
+            Chain::Script(script) => {
+                for w in &script.command {
+                    word(w, out);
                 }
             }
             Chain::And(a, b) | Chain::Or(a, b) | Chain::Pipe(a, b) => {

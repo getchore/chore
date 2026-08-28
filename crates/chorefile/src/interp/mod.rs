@@ -74,6 +74,21 @@
 //! None of this applies to [`Mode::Run`], where a failing command is a failing
 //! run. A preview is a preview of the commands, not a claim that the run would
 //! succeed.
+//!
+//! A `script` block is the one thing a preview refuses outright, and it obeys
+//! the rules above while doing so: a skipped block answers like a skipped
+//! program on `PATH` — successfully, with nothing on stdout — so a capture of
+//! one takes the empty string and an `if` around one is left undecided. See
+//! [`Interpreter::script`].
+//!
+//! # A `script` block is a command
+//!
+//! It is a [`Chain`](crate::ast::Chain), not a statement, so it is captured,
+//! piped, redirected and chained through exactly the code every other command
+//! goes through — `Interpreter::chain` gained one arm and nothing else moved.
+//! The single thing it will not do is read a pipe: its stdin is already the
+//! block, and `run::piped_into_script` explains why that makes
+//! `cmd | script ... { }` an error rather than a quiet drop.
 
 mod expand;
 mod memo;

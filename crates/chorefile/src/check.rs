@@ -11,6 +11,9 @@
 //! and nothing is evaluated: `check` works on a file whose globals read paths
 //! that do not exist yet.
 //!
+//! A `script` block is the one construct this module deliberately says almost
+//! nothing about — see [`Checker::script`].
+//!
 //! The one place platform matters is that `PATH` lookup, and it is skipped
 //! inside an `if` that this machine's `$OS`, `$ARCH` or `$ENV` decides against
 //! — see [`host_value`].
@@ -43,7 +46,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ast::{
-    Block, Chain, Command, CompareOp, Cond, File, If, Param, PartKind, Stmt, Task, VarRef, Word,
+    Block, Chain, Command, CompareOp, Cond, File, If, Param, PartKind, Script, Stmt, Task, VarRef,
+    Word,
 };
 use crate::error::{Error, Location, Span};
 use crate::resolve::Merged;
@@ -282,6 +286,11 @@ struct Checker<'a> {
     /// `PATH` lookups are filesystem hits; a chorefile calls `cargo` dozens of
     /// times and one answer is enough.
     on_path: HashMap<String, bool>,
+    /// How many `script` blocks this file has, and where the first one is —
+    /// the two things the once-per-file summary in [`Checker::unchecked`]
+    /// needs.
+    scripts: usize,
+    first_script: Option<Span>,
     out: Vec<Diagnostic>,
 }
 
@@ -304,6 +313,8 @@ impl<'a> Checker<'a> {
             prefix,
             merged,
             on_path: HashMap::new(),
+            scripts: 0,
+            first_script: None,
             out: Vec::new(),
         }
     }
@@ -346,6 +357,7 @@ impl<'a> Checker<'a> {
             };
             self.block(&task.body, &mut scope);
         }
+        self.unchecked();
 
         let mut out = std::mem::take(&mut self.out);
         out.sort_by_key(|d| (d.at.line_col(source), d.at.span.start));
@@ -808,9 +820,21 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Every chain, wherever one appears.
+    ///
+    /// There is exactly one of these, and every walk that reaches something
+    /// runnable goes through it: a statement, a `try`, an `if` condition,
+    /// either side of a `&&`, `||` or `|`, and a `$( ... )` capture inside any
+    /// word — a command's name, its arguments, a redirect target, an
+    /// assignment's value, a parameter's default, a `for`'s items. That is what
+    /// makes [`Script`] living in [`Chain`] rather than in [`Stmt`] cost this
+    /// module one arm: a block gets the same treatment in every one of those
+    /// positions, and there is no position a block can reach that does not come
+    /// through here.
     fn chain(&mut self, chain: &Chain, scope: &Scope) {
         match chain {
             Chain::Single(cmd) => self.command(cmd, scope),
+            Chain::Script(script) => self.script(script, scope),
             Chain::And(a, b) | Chain::Or(a, b) | Chain::Pipe(a, b) => {
                 self.chain(a, scope);
                 self.chain(b, scope);
@@ -834,17 +858,182 @@ impl<'a> Checker<'a> {
         };
         let args: Vec<&str> = cmd.args.iter().filter_map(literal).collect();
         self.portability(name, &args, cmd);
-        self.resolution(name, cmd, scope);
+        self.resolution(name, cmd.force_path, cmd.span, scope);
         if !cmd.force_path && name == "parallel" {
-            self.parallel_tasks(&args, cmd);
+            self.parallel_tasks(&args, cmd.span);
         }
+    }
+
+    // -- script blocks ------------------------------------------------------
+
+    /// `script <command...> { ... }`: the command is checked, the body is not.
+    ///
+    /// A block is a [`Chain`], so it can appear wherever anything else that
+    /// runs can — a statement, a pipe, a `$( ... )` capture, an `if` condition,
+    /// nested in any combination of those. Everything below holds in all of
+    /// them and is written once, because [`Checker::chain`] is the only way to
+    /// get here: the position a block was written in decides what happens to
+    /// its *value*, and nothing about what `check` may say about it.
+    ///
+    /// **The body is another language.** Nothing in it is looked at — not for
+    /// undefined variables, not for non-portable commands, not for anything
+    /// else. A `$PATH` inside a Python string is not a chore variable and a
+    /// `curl` inside a shell block is not a chore command, and a checker that
+    /// guessed otherwise would produce confident nonsense about text it cannot
+    /// parse. The rule is not "be careful with the body", it is "never read
+    /// it": there is no span here that a finding may point into.
+    ///
+    /// The command is an ordinary command, and gets the ordinary treatment. Its
+    /// words are expanded, so an undefined variable in the argv is a finding
+    /// exactly as it is anywhere else, and the name resolves task → builtin →
+    /// `PATH` with a miss reported as a warning that a platform guard can
+    /// silence — `script pwsh -` under `if $OS == windows` says nothing on a
+    /// Mac.
+    ///
+    /// Two things it does *not* do to the command:
+    ///
+    /// - No portability finding. [`builtins::REPLACEMENTS`] answers a
+    ///   non-portable command with the builtin that replaces it, and no builtin
+    ///   is an interpreter — none of them reads a program on stdin. Offering
+    ///   `read` in place of `script cat -` would be advice that cannot be
+    ///   taken. The one real portability trap here is the interpreter being a
+    ///   host shell, which [`Checker::host_shell`] reports in its own terms.
+    /// - No claim about the body reaching it. Whether the named command reads
+    ///   stdin at all is knowable only by running it.
+    fn script(&mut self, script: &Script, scope: &Scope) {
+        self.scripts += 1;
+        // The earliest block *in the file*, by position rather than by the
+        // order this walk happens to reach it. The two agreed while a block was
+        // a statement; a block in a capture is now reached while its enclosing
+        // command is being walked, and comparing positions is true by
+        // construction instead of by an argument about traversal order.
+        let earliest = self
+            .first_script
+            .is_none_or(|first| script.span.start < first.start);
+        if earliest {
+            self.first_script = Some(script.span);
+        }
+
+        for word in &script.command {
+            self.word(word, scope);
+        }
+
+        // A name built from a variable or a capture is only knowable at run
+        // time, exactly as for any other command.
+        let Some(first) = script.command.first().and_then(literal) else {
+            return;
+        };
+        // `^` forces `PATH` wherever a command name is written; if the parser
+        // hands it over still attached, read it the same way rather than
+        // reporting a program called `^sh`.
+        let (force_path, name) = match first.strip_prefix('^') {
+            Some(rest) => (true, rest),
+            None => (false, first),
+        };
+        if name.is_empty() {
+            return;
+        }
+        self.host_shell(name, script);
+        self.resolution(name, force_path, script.span, scope);
+    }
+
+    /// An interpreter that is the host's shell.
+    ///
+    /// `script uv run -` and `script nu --stdin` hand the block to a program
+    /// that behaves the same wherever it is installed. `script sh -` and
+    /// `script bash -` hand it to the host shell, which is the one thing
+    /// `chore` exists to remove: `sh` is dash on one machine and bash on
+    /// another, `cmd` and `powershell` exist only on Windows, and none of the
+    /// POSIX ones exist there at all. A chorefile whose portable builtins are
+    /// wrapped around one `script sh` block is as unportable as the shell
+    /// script it replaced, and nothing else in `check` will say so — the body
+    /// is unread, so the `rm -rf` and the `curl` inside it that would each be
+    /// an error in a chorefile are invisible.
+    ///
+    /// A warning, per block, and never an error: a deliberate author writing a
+    /// shell block behind `if $OS == windows` has done the honest thing, and
+    /// this is a fact worth stating rather than a mistake. It is not silenced
+    /// by a platform guard, because unlike a `PATH` miss it is not a fact about
+    /// the machine running `check` — the guard is in the help text instead, as
+    /// the shape a deliberate author is aiming for.
+    fn host_shell(&mut self, name: &str, script: &Script) {
+        let Some(shell) = shell_family(name) else {
+            return;
+        };
+        let note = match shell {
+            ShellFamily::Posix => format!(
+                "`{name}` is a different program from platform to platform — dash here, bash \
+                 there — and Windows has none of them"
+            ),
+            ShellFamily::Windows => format!("`{name}` runs on Windows and nowhere else"),
+        };
+        self.push(
+            Diagnostic::warning(
+                format!("`script {name}` hands the block to a host shell: {note}"),
+                self.at(script.span),
+            )
+            .with_help(
+                "a `script` block is for a language that behaves the same everywhere — `python3`, \
+                 `uv run`, `node`, `nu`. If the shell is deliberate, guard it with `if $OS == ...` \
+                 and give every platform a block; if it is only doing what a builtin does, write \
+                 the builtin, which `check` and `--dry` can still see",
+            ),
+        );
+    }
+
+    /// The one thing `check` says about `script` blocks in general: that they
+    /// exist, and that they are where its two guarantees stop.
+    ///
+    /// **Once per file, whatever the count.** A per-block warning was the
+    /// obvious design and is the wrong one: a chorefile with ten legitimate
+    /// blocks would emit ten permanent warnings that no edit can ever clear,
+    /// and a warning nobody can act on is how a reader learns to skim past the
+    /// ones that matter. Saying nothing is worse still — the whole point is
+    /// that a reader should be *told* the guarantees have a hole rather than
+    /// left to assume they hold everywhere, and reporting only when something
+    /// else about the block is suspect would tell them exactly when the tool
+    /// happened to notice something, which is not the same statement at all.
+    ///
+    /// So: one line, carrying the count, pointing at the first block. The count
+    /// is the part a reader needs — it says how much of this file is outside
+    /// the analysis — and the position gives them somewhere to start reading.
+    /// A file with no `script` block gets nothing, so nobody pays for a feature
+    /// they do not use.
+    ///
+    /// The count is every block in the file, not every block written as a
+    /// statement: one inside a `$( ... )` capture or on the far side of a pipe
+    /// is exactly as unread as any other, and a summary that quietly excluded
+    /// them would understate how much of the file is outside the analysis.
+    ///
+    /// Per *file* rather than per tree, so an included chorefile reports its
+    /// own blocks against its own path, like every other finding here.
+    fn unchecked(&mut self) {
+        let (Some(span), n) = (self.first_script, self.scripts) else {
+            return;
+        };
+        let message = if n == 1 {
+            "this file has a `script` block: `check` reads none of its body, and `--dry` skips it \
+             whole"
+                .to_string()
+        } else {
+            format!(
+                "this file has {n} `script` blocks: `check` reads none of their bodies, and \
+                 `--dry` skips them whole"
+            )
+        };
+        self.push(Diagnostic::warning(message, self.at(span)).with_help(
+            "nothing to fix — this is the escape hatch working as intended. It is said once \
+                 per file, at the first block, because both guarantees stop at the opening brace: \
+                 an undefined variable, a non-portable command or a missing program inside is not \
+                 reported, and `--dry` skips the block rather than running it",
+        ));
     }
 
     /// `parallel`'s arguments are task names, not paths, so a typo in one is
     /// a mistake `check` can see: the run would otherwise get as far as the
     /// call before saying so. A name built from a variable is skipped, like
     /// every other name only knowable at run time.
-    fn parallel_tasks(&mut self, args: &[&str], cmd: &Command) {
+    fn parallel_tasks(&mut self, args: &[&str], span: Span) {
         for arg in args {
             if arg.starts_with("--") || self.is_task(arg) {
                 continue;
@@ -852,12 +1041,12 @@ impl<'a> Checker<'a> {
             if let Some((ns, task)) = arg.split_once(NAMESPACE_SEP) {
                 // The same reading a call gets: an unfollowed include's
                 // namespace is taken on trust rather than called wrong.
-                self.namespaced(arg, ns, task, cmd);
+                self.namespaced(arg, ns, task, span);
                 continue;
             }
             let mut d = Diagnostic::error(
                 format!("`parallel {arg}`: `{arg}` is not a task"),
-                self.at(cmd.span),
+                self.at(span),
             );
             d = match self.suggestion(arg) {
                 Some(similar) => d.with_help(format!("did you mean `{similar}`?")),
@@ -907,13 +1096,13 @@ impl<'a> Checker<'a> {
     ///
     /// The `PATH` step is the only one that depends on the machine running
     /// `check`, so it is the only one a platform guard can silence.
-    fn resolution(&mut self, name: &str, cmd: &Command, scope: &Scope) {
-        if !cmd.force_path {
+    fn resolution(&mut self, name: &str, force_path: bool, span: Span, scope: &Scope) {
+        if !force_path {
             if name == "cd" || self.is_task(name) || builtins::is_builtin(name) {
                 return;
             }
             if let Some((ns, task)) = name.split_once(NAMESPACE_SEP) {
-                if self.namespaced(name, ns, task, cmd) {
+                if self.namespaced(name, ns, task, span) {
                     return;
                 }
             }
@@ -928,7 +1117,7 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        let called = if cmd.force_path {
+        let called = if force_path {
             format!("^{name}")
         } else {
             name.to_string()
@@ -937,7 +1126,7 @@ impl<'a> Checker<'a> {
             "`check` looked on this machine's `PATH`, which is not necessarily the machine that \
              runs the task — if `{name}` is installed only in CI or in a container, this is fine"
         );
-        if !cmd.force_path {
+        if !force_path {
             if let Some(similar) = self.suggestion(name) {
                 help = format!("did you mean `{similar}`? Otherwise: {help}");
             }
@@ -945,7 +1134,7 @@ impl<'a> Checker<'a> {
         self.push(
             Diagnostic::warning(
                 format!("`{called}` is not a task, not a builtin, and was not found on `PATH`"),
-                self.at(cmd.span),
+                self.at(span),
             )
             .with_help(help),
         );
@@ -961,7 +1150,7 @@ impl<'a> Checker<'a> {
     /// Never a `PATH` fallback: `::` is not a character a program on `PATH` is
     /// spelled with, so "not found on `PATH`" would be a misleading way to
     /// report a name that was only ever going to be a task.
-    fn namespaced(&mut self, name: &str, ns: &str, task: &str, cmd: &Command) -> bool {
+    fn namespaced(&mut self, name: &str, ns: &str, task: &str, span: Span) -> bool {
         let known = self.names.namespaces.contains(ns)
             || self
                 .names
@@ -977,7 +1166,7 @@ impl<'a> Checker<'a> {
         let d = if known {
             let mut d = Diagnostic::error(
                 format!("`{name}` is not a task: namespace `{ns}` has no task `{task}`"),
-                self.at(cmd.span),
+                self.at(span),
             );
             if let Some(similar) = self.in_namespace(ns, task) {
                 d = d.with_help(format!("did you mean `{similar}`?"));
@@ -986,7 +1175,7 @@ impl<'a> Checker<'a> {
         } else {
             let d = Diagnostic::error(
                 format!("`{name}` names the namespace `{ns}`, which no `include` defines"),
-                self.at(cmd.span),
+                self.at(span),
             );
             // The namespace itself is the likeliest typo here, and
             // `suggestion` will only offer one whose task half already
@@ -1318,6 +1507,39 @@ fn literal(word: &Word) -> Option<&str> {
             PartKind::Literal(text) => Some(text.as_str()),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// Which kind of host shell an interpreter is, if it is one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellFamily {
+    /// `sh` and its relatives: present on Unix, absent on Windows, and not the
+    /// same program twice.
+    Posix,
+    /// Windows' own: absent everywhere else.
+    Windows,
+}
+
+/// Is this interpreter a host shell?
+///
+/// The list is deliberately the shells a machine *hands you* — the ones whose
+/// behavior is a property of the host rather than of the chorefile. A
+/// cross-platform interpreter that happens to be a shell, `nu` above all, is
+/// not here: it is installed on purpose and behaves the same wherever it is,
+/// which is the whole difference this finding is about. `fish` is left out for
+/// the same reason, and because being wrong here costs a warning on a correct
+/// file.
+///
+/// Matched on the file name, so `/bin/sh` and `C:/Windows/System32/cmd.exe`
+/// are recognised as readily as `sh` and `cmd`.
+fn shell_family(name: &str) -> Option<ShellFamily> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    let base = base.to_ascii_lowercase();
+    match base.as_str() {
+        "sh" | "bash" | "zsh" | "dash" | "ash" | "ksh" | "csh" | "tcsh" => Some(ShellFamily::Posix),
+        "cmd" | "command" | "powershell" => Some(ShellFamily::Windows),
         _ => None,
     }
 }

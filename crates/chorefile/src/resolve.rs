@@ -572,6 +572,14 @@ impl Renamer<'_> {
     fn chain(&self, chain: &mut ast::Chain, locals: &HashSet<String>) {
         match chain {
             ast::Chain::Single(cmd) => self.command(cmd, locals),
+            // The interpreter's argv is namespaced like any other command's,
+            // so `script $tool -` inside an included file still resolves. The
+            // body is another language and is left exactly as written.
+            ast::Chain::Script(script) => {
+                for word in &mut script.command {
+                    self.word(word, locals);
+                }
+            }
             ast::Chain::And(a, b) | ast::Chain::Or(a, b) | ast::Chain::Pipe(a, b) => {
                 self.chain(a, locals);
                 self.chain(b, locals);

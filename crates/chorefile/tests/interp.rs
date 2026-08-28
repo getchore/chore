@@ -2540,3 +2540,635 @@ fn a_namespaced_name_echoes_unquoted() {
     ]);
     assert_eq!(go(&f, "t", &[]).echoed(), ["$ libs::build release"]);
 }
+
+// ---------------------------------------------------------------------------
+// `script` blocks
+//
+// The command is a real program on `PATH` — there is no way to hand a block of
+// text to a builtin — so these tests need one that is guaranteed present and
+// reads its input from stdin. On unix that is `sh` and `cat`; there is no
+// equivalent pair to rely on elsewhere, so the section is unix-only.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+mod script_blocks {
+    use super::*;
+
+    fn script_chain(command: Vec<Word>, body: &str) -> Chain {
+        script_with(command, body, Vec::new())
+    }
+
+    fn script_with(command: Vec<Word>, body: &str, redirects: Vec<Redirect>) -> Chain {
+        Chain::Script(Script {
+            command,
+            body: body.into(),
+            redirects,
+            span: sp(),
+            body_span: sp(),
+        })
+    }
+
+    /// A block on a line of its own — the plainest of the places one can now
+    /// appear, and a statement like any other command statement.
+    fn script(command: Vec<Word>, body: &str) -> Stmt {
+        run(script_chain(command, body))
+    }
+
+    /// `$( <chain> )` as a word part, for capturing a block.
+    fn capture(chain: Chain) -> WordPart {
+        part(PartKind::Capture(Box::new(chain)))
+    }
+
+    /// `sh -c "cat > <path>"`: the block reaches `cat` on stdin and lands in a
+    /// file, which is the only way a test can read bytes a streamed command
+    /// wrote.
+    fn write_body_to(path: &Path) -> Vec<Word> {
+        vec![
+            lit("sh"),
+            lit("-c"),
+            quoted(vec![text(&format!(
+                "cat > {}",
+                chorefile::vars::display(path)
+            ))]),
+        ]
+    }
+
+    /// The block's own text is the program `sh` runs, so whatever it prints is
+    /// the block's stdout — which is what a capture, a pipe or a `>` reads.
+    fn sh() -> Vec<Word> {
+        vec![lit("sh")]
+    }
+
+    fn shown(path: &Path) -> String {
+        chorefile::vars::display(path)
+    }
+
+    // -- the block reaches the interpreter ---------------------------------
+
+    #[test]
+    fn the_body_reaches_the_interpreter_on_stdin() {
+        let dir = Temp::new("script-stdin");
+        let out = dir.path().join("out.txt");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![script(write_body_to(&out), "hello from the block\n")],
+        )]);
+        let ran = go(&f, "t", &[]);
+        ran.ok();
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "hello from the block\n"
+        );
+    }
+
+    #[test]
+    fn the_body_arrives_byte_for_byte_with_no_interpolation() {
+        // Quotes, `$var`, `$(...)` and a backslash: every one of them means
+        // something to chore in a word and nothing at all in a block. If any
+        // of it were expanded on the way out, the block would reach the
+        // interpreter saying something its author did not write.
+        let dir = Temp::new("script-verbatim");
+        let out = dir.path().join("out.txt");
+        let body = "print(\"$HOME\", '$(rm -rf /)', $count, \"a\\tb\")\n#\u{00e9}\n";
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![script(write_body_to(&out), body)],
+        )]);
+        go(&f, "t", &[]).ok();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), body);
+    }
+
+    #[test]
+    fn the_echo_names_the_command_and_counts_the_lines_but_never_shows_them() {
+        let dir = Temp::new("script-echo");
+        let out = dir.path().join("out.txt");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![script(write_body_to(&out), "one\ntwo\nthree\n")],
+        )]);
+        let ran = go(&f, "t", &[]);
+        let echoed = ran.echoed();
+        assert_eq!(echoed.len(), 1);
+        assert!(echoed[0].starts_with("$ script sh -c "), "{echoed:?}");
+        assert!(echoed[0].ends_with("(3 lines on stdin)"), "{echoed:?}");
+        assert!(!ran.ok().contains("two"), "the body must not be echoed");
+    }
+
+    #[test]
+    fn the_command_is_expanded_like_any_other_command() {
+        // `$var` in the argv still interpolates: only the body is raw.
+        let dir = Temp::new("script-expand");
+        let out = dir.path().join("out.txt");
+        let f = file(vec![task(
+            "t",
+            &["dest"],
+            vec![
+                assign("SH", lit("sh")),
+                script(
+                    vec![
+                        unquoted(vec![var("SH")]),
+                        lit("-c"),
+                        quoted(vec![
+                            text("cat > "),
+                            part(PartKind::Var(VarRef::Positional(1))),
+                        ]),
+                    ],
+                    "expanded\n",
+                ),
+            ],
+        )]);
+        let ran = exec(&f, "t", &[&shown(&out)], Mode::Run, Repeat::Once, &root());
+        ran.ok();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "expanded\n");
+    }
+
+    #[test]
+    fn a_missing_interpreter_says_it_came_from_a_script_block() {
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![script(
+                vec![lit("chore-no-such-interpreter"), lit("run")],
+                "print(1)\n",
+            )],
+        )]);
+        let message = go(&f, "t", &[]).err_text();
+        assert!(message.contains("chore-no-such-interpreter"), "{message}");
+        assert!(message.contains("script"), "{message}");
+        assert!(message.contains("PATH"), "{message}");
+    }
+
+    #[test]
+    fn a_large_body_does_not_hang() {
+        // The child writes as it reads, so a body bigger than a pipe buffer
+        // deadlocks anything that writes the whole of it before waiting.
+        let dir = Temp::new("script-large");
+        let out = dir.path().join("out.txt");
+        let body = "0123456789abcdef".repeat(24 * 1024); // ~384 KiB
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![script(
+                vec![
+                    lit("sh"),
+                    lit("-c"),
+                    quoted(vec![text(&format!("cat | cat > {}", shown(&out)))]),
+                ],
+                &body,
+            )],
+        )]);
+        go(&f, "t", &[]).ok();
+        assert_eq!(std::fs::metadata(&out).unwrap().len() as usize, body.len());
+    }
+
+    // -- captured ----------------------------------------------------------
+
+    #[test]
+    fn a_capture_binds_what_the_block_printed() {
+        // The headline case: compute a value in another language and use it in
+        // the task. Trimmed like any other capture, and echoed like any other
+        // capture — which is to say not at all, because a capture is machinery
+        // rather than a step of the recipe.
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![
+                assign("v", unquoted(vec![capture(script_chain(sh(), "echo 7\n"))])),
+                run(cmd("say", vec![quoted(vec![text("v="), var("v")])])),
+            ],
+        )]);
+        let ran = go(&f, "t", &[]);
+        assert_eq!(ran.printed(), ["v=7"]);
+        assert_eq!(ran.echoed(), ["$ say v=7"]);
+    }
+
+    #[test]
+    fn a_captured_body_is_still_raw() {
+        // The same guarantee as on a bare statement, in the position where it
+        // is easiest to lose: a `$HOME` here is not a chore variable, and a
+        // chore that expanded it would fail on the undefined name rather than
+        // hand the text to `sh`. The single quotes are `sh`'s, so `sh` does not
+        // expand it either — what comes back is exactly what was written.
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![
+                assign(
+                    "v",
+                    unquoted(vec![capture(script_chain(
+                        sh(),
+                        "printf '%s' '$HOME \"quoted\" $(rm -rf /)'\n",
+                    ))]),
+                ),
+                run(cmd("say", vec![quoted(vec![var("v")])])),
+            ],
+        )]);
+        assert_eq!(go(&f, "t", &[]).printed(), ["$HOME \"quoted\" $(rm -rf /)"]);
+    }
+
+    #[test]
+    fn a_capture_of_a_failing_block_fails_the_run() {
+        // `Mode::Run`: an empty value here would be wrong rather than merely
+        // unknown, the same as for any other capture.
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![assign(
+                "v",
+                unquoted(vec![capture(script_chain(sh(), "exit 3\n"))]),
+            )],
+        )]);
+        let message = go(&f, "t", &[]).err_text();
+        assert!(message.contains("capture failed"), "{message}");
+    }
+
+    // -- piped -------------------------------------------------------------
+
+    #[test]
+    fn a_block_pipes_its_stdout_on() {
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![run(Chain::Pipe(
+                Box::new(script_chain(sh(), "echo hi\n")),
+                Box::new(cmd("upper", vec![])),
+            ))],
+        )]);
+        assert_eq!(go(&f, "t", &[]).printed(), ["HI"]);
+    }
+
+    #[test]
+    fn a_pipe_into_a_block_is_refused_before_its_left_side_runs() {
+        // Two candidate stdins, one slot. The block wins — it is the program
+        // being run — which leaves the pipe's bytes nowhere to go, so the
+        // pipeline is refused rather than half-honoured. Refused *early*: the
+        // left side has not run, so nothing was done and then thrown away.
+        let dir = Temp::new("script-pipe-in");
+        let out = dir.path().join("out.txt");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![run(Chain::Pipe(
+                Box::new(cmd("hit", vec![lit("left")])),
+                Box::new(script_chain(write_body_to(&out), "x\n")),
+            ))],
+        )]);
+        let message = go(&f, "t", &[]).err_text();
+        assert!(message.contains("right of a `|`"), "{message}");
+        assert!(message.contains("script sh"), "{message}");
+        assert!(trace().is_empty(), "the left side of the pipe must not run");
+        assert!(!out.exists(), "the block must not run either");
+    }
+
+    #[test]
+    fn the_refusal_finds_the_block_that_would_have_been_fed() {
+        // A pipe's bytes go to the leftmost thing that runs on the right, so
+        // `a | script { } && b` is refused and `a | b && script { }` is not:
+        // the block in the second is not the command reading the pipe.
+        let fed = file(vec![task(
+            "t",
+            &[],
+            vec![run(Chain::Pipe(
+                Box::new(cmd("hit", vec![lit("left")])),
+                Box::new(Chain::And(
+                    Box::new(script_chain(sh(), "true\n")),
+                    Box::new(cmd("hit", vec![lit("after")])),
+                )),
+            ))],
+        )]);
+        assert!(go(&fed, "t", &[]).err_text().contains("right of a `|`"));
+
+        // The block runs, and its stdin is its own body — the pipe's bytes
+        // reached `upper` and stopped there. It streams to the real stdout, so
+        // the file is what the test can see.
+        let dir = Temp::new("script-unfed");
+        let out = dir.path().join("out.txt");
+        let unfed = file(vec![task(
+            "t",
+            &[],
+            vec![run(Chain::Pipe(
+                Box::new(cmd("say", vec![lit("left")])),
+                Box::new(Chain::And(
+                    Box::new(cmd("upper", vec![])),
+                    Box::new(script_chain(write_body_to(&out), "after\n")),
+                )),
+            ))],
+        )]);
+        assert_eq!(go(&unfed, "t", &[]).printed(), ["LEFT"]);
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "after\n");
+    }
+
+    // -- redirected --------------------------------------------------------
+
+    #[test]
+    fn a_block_redirects_its_stdout() {
+        let dir = Temp::new("script-redirect");
+        let out = dir.path().join("out.txt");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![run(script_with(
+                sh(),
+                "echo one\n",
+                vec![redirect(RedirectKind::Stdout, &shown(&out))],
+            ))],
+        )]);
+        let ran = go(&f, "t", &[]);
+        ran.ok();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "one\n");
+        // The redirection is echoed, and the stdin note stays last.
+        let echoed = ran.echoed();
+        assert!(
+            echoed[0].contains(&format!("> {}", shown(&out))),
+            "{echoed:?}"
+        );
+        assert!(echoed[0].ends_with("(1 line on stdin)"), "{echoed:?}");
+    }
+
+    #[test]
+    fn a_block_appends_with_a_double_arrow() {
+        let dir = Temp::new("script-append");
+        let out = dir.path().join("out.txt");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![
+                run(script_with(
+                    sh(),
+                    "echo one\n",
+                    vec![redirect(RedirectKind::Stdout, &shown(&out))],
+                )),
+                run(script_with(
+                    sh(),
+                    "echo two\n",
+                    vec![redirect(RedirectKind::StdoutAppend, &shown(&out))],
+                )),
+            ],
+        )]);
+        go(&f, "t", &[]).ok();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "one\ntwo\n");
+    }
+
+    #[test]
+    fn a_block_redirects_its_stderr() {
+        let dir = Temp::new("script-stderr");
+        let err = dir.path().join("err.txt");
+        let out = dir.path().join("out.txt");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![run(script_with(
+                sh(),
+                "echo kept; echo diagnostic >&2\n",
+                vec![
+                    redirect(RedirectKind::Stdout, &shown(&out)),
+                    redirect(RedirectKind::Stderr, &shown(&err)),
+                ],
+            ))],
+        )]);
+        go(&f, "t", &[]).ok();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "kept\n");
+        assert_eq!(std::fs::read_to_string(&err).unwrap(), "diagnostic\n");
+    }
+
+    // -- chained -----------------------------------------------------------
+
+    #[test]
+    fn a_nonzero_interpreter_fails_the_run() {
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![
+                script(sh(), "exit 3\n"),
+                run(cmd("hit", vec![lit("unreachable")])),
+            ],
+        )]);
+        let ran = go(&f, "t", &[]);
+        let message = ran.err_text();
+        assert!(message.contains("exited with code 3"), "{message}");
+        assert!(message.contains("script sh"), "{message}");
+        assert!(trace().is_empty(), "the statement after it must not run");
+    }
+
+    #[test]
+    fn and_carries_on_only_when_the_block_succeeded() {
+        let ok = file(vec![task(
+            "t",
+            &[],
+            vec![run(Chain::And(
+                Box::new(script_chain(sh(), "exit 0\n")),
+                Box::new(cmd("hit", vec![lit("after")])),
+            ))],
+        )]);
+        go(&ok, "t", &[]).ok();
+        assert_eq!(trace(), ["after"]);
+
+        let bad = file(vec![task(
+            "t",
+            &[],
+            vec![run(Chain::And(
+                Box::new(script_chain(sh(), "exit 3\n")),
+                Box::new(cmd("hit", vec![lit("after")])),
+            ))],
+        )]);
+        let message = go(&bad, "t", &[]).err_text();
+        assert!(message.contains("exited with code 3"), "{message}");
+        assert!(trace().is_empty(), "`&&` must not reach the right side");
+    }
+
+    #[test]
+    fn or_takes_over_when_the_block_failed() {
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![run(Chain::Or(
+                Box::new(script_chain(sh(), "exit 3\n")),
+                Box::new(cmd("hit", vec![lit("fallback")])),
+            ))],
+        )]);
+        go(&f, "t", &[]).ok();
+        assert_eq!(trace(), ["fallback"]);
+    }
+
+    #[test]
+    fn try_swallows_a_failing_block() {
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![
+                Stmt::Try(script_chain(sh(), "exit 3\n")),
+                run(cmd("say", vec![lit("carried on")])),
+            ],
+        )]);
+        assert_eq!(go(&f, "t", &[]).printed(), ["carried on"]);
+    }
+
+    #[test]
+    fn try_around_the_task_swallows_a_failing_block() {
+        // The other way round: a block inside a task the caller forgives. It
+        // works for the same reason `try` directly around the block does — the
+        // block fails the way any command does.
+        let f = file(vec![
+            task(
+                "t",
+                &[],
+                vec![
+                    Stmt::Try(cmd("risky", vec![])),
+                    run(cmd("say", vec![lit("carried on")])),
+                ],
+            ),
+            task("risky", &[], vec![script(sh(), "exit 3\n")]),
+        ]);
+        let ran = go(&f, "t", &[]);
+        assert_eq!(ran.printed(), ["carried on"]);
+    }
+
+    #[test]
+    fn a_block_is_an_if_condition() {
+        let build = |body: &str| {
+            file(vec![task(
+                "t",
+                &[],
+                vec![if_stmt(
+                    Cond::Command(script_chain(sh(), body)),
+                    vec![run(cmd("hit", vec![lit("then")]))],
+                    Some(vec![run(cmd("hit", vec![lit("else")]))]),
+                )],
+            )])
+        };
+
+        let yes = build("exit 0\n");
+        let ran = go(&yes, "t", &[]);
+        ran.ok();
+        assert_eq!(trace(), ["then"]);
+        // A condition is machinery: the block echoes no more there than
+        // `if which cargo` does.
+        let echoed = ran.echoed();
+        assert!(
+            !echoed.iter().any(|l| l.starts_with("$ script")),
+            "{echoed:?}"
+        );
+
+        let no = build("exit 3\n");
+        go(&no, "t", &[]).ok();
+        assert_eq!(trace(), ["else"]);
+    }
+
+    // -- `--dry` -----------------------------------------------------------
+
+    #[test]
+    fn dry_reports_the_block_and_does_not_run_it() {
+        let dir = Temp::new("script-dry");
+        let out = dir.path().join("out.txt");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![script(write_body_to(&out), "one\ntwo\n")],
+        )]);
+        let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+        ran.ok();
+        assert!(!out.exists(), "--dry must not run a script block");
+        assert_eq!(ran.echoed().len(), 1);
+        let note = ran.printed().join("\n");
+        assert!(note.contains("skipped by --dry"), "{note}");
+    }
+
+    #[test]
+    fn a_dry_capture_of_a_block_is_the_empty_string() {
+        // The existing rule for a capture a preview could not evaluate: the
+        // empty string and a note, never an abort. The note goes to stderr
+        // here rather than stdout, because a capture's stdout is a value
+        // somebody is about to read.
+        let dir = Temp::new("script-dry-capture");
+        let out = dir.path().join("out.txt");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![
+                assign(
+                    "v",
+                    unquoted(vec![capture(script_chain(write_body_to(&out), "echo 7\n"))]),
+                ),
+                run(cmd(
+                    "say",
+                    vec![quoted(vec![text("v=["), var("v"), text("]")])],
+                )),
+            ],
+        )]);
+        let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+        ran.ok();
+        assert_eq!(ran.printed(), ["v=[]"]);
+        assert!(!out.exists(), "--dry must not run a captured block either");
+        assert!(ran.err.contains("skipped"), "{}", ran.err);
+        assert!(
+            !ran.ok().contains("skipped"),
+            "the note belongs on stderr here: {}",
+            ran.ok()
+        );
+    }
+
+    #[test]
+    fn a_dry_redirect_of_a_block_writes_nothing() {
+        let dir = Temp::new("script-dry-redirect");
+        let out = dir.path().join("out.txt");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![run(script_with(
+                sh(),
+                "echo one\n",
+                vec![redirect(RedirectKind::Stdout, &shown(&out))],
+            ))],
+        )]);
+        let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+        ran.ok();
+        assert!(
+            !out.exists(),
+            "a skipped block must not create its `>` file"
+        );
+        assert!(
+            ran.echoed()[0].contains(&format!("> {}", shown(&out))),
+            "{:?}",
+            ran.echoed()
+        );
+    }
+
+    #[test]
+    fn a_dry_condition_on_a_block_previews_the_then_branch() {
+        // The block never ran, so there is no verdict: previewing the work the
+        // author wrote beats previewing nothing.
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![if_stmt(
+                Cond::Command(script_chain(sh(), "exit 3\n")),
+                vec![run(cmd("hit", vec![lit("then")]))],
+                Some(vec![run(cmd("hit", vec![lit("else")]))]),
+            )],
+        )]);
+        exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root()).ok();
+        assert_eq!(trace(), ["then"]);
+    }
+
+    #[test]
+    fn a_dry_block_does_not_stop_the_preview_around_it() {
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![
+                run(Chain::And(
+                    Box::new(script_chain(sh(), "exit 3\n")),
+                    Box::new(cmd("hit", vec![lit("after")])),
+                )),
+                run(cmd("hit", vec![lit("last")])),
+            ],
+        )]);
+        exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root()).ok();
+        // A skipped block answers like a skipped program on `PATH`, so the
+        // rest of the recipe is still previewed.
+        assert_eq!(trace(), ["after", "last"]);
+    }
+}

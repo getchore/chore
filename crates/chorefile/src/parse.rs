@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::ast::{
     Assign, Block, Chain, Command, CompareOp, Cond, File, For, If, Include, Param, PartKind,
-    Redirect, RedirectKind, Require, Stmt, Task, VarRef, Word, WordPart,
+    Redirect, RedirectKind, Require, Script, Stmt, Task, VarRef, Word, WordPart,
 };
 use crate::error::{Error, Location, Result, Span};
 use crate::lex::{self, Spanned, Token};
@@ -19,9 +19,14 @@ use crate::lex::{self, Spanned, Token};
 /// happen in one place.
 pub fn parse(source: &str, file: &Path) -> Result<File> {
     let tokens = lex::lex(source).map_err(|e| locate(e, file))?;
-    Parser { tokens, i: 0, file }
-        .file()
-        .map_err(|e| locate(e, file))
+    Parser {
+        tokens,
+        i: 0,
+        file,
+        src: source,
+    }
+    .file()
+    .map_err(|e| locate(e, file))
 }
 
 /// The lexer and the inner parsers report spans without a path; only [`parse`]
@@ -52,6 +57,10 @@ struct Parser<'a> {
     tokens: Vec<Spanned>,
     i: usize,
     file: &'a Path,
+    /// The whole file. A `$( )` is re-lexed from the middle of it, and the
+    /// lexer needs the file rather than the fragment to measure a `script`
+    /// block's indentation by — see [`lex::lex_offset`].
+    src: &'a str,
 }
 
 impl<'a> Parser<'a> {
@@ -198,6 +207,15 @@ impl<'a> Parser<'a> {
                     return self.err(
                         "`return` is only valid inside a task; \
                          at the top level, use `exit` to end the run",
+                    );
+                }
+                // Same reasoning as `return`: the keyword is spelled right and
+                // reads as a stray word here, so saying where it belongs beats
+                // the generic message and its guess about a stale binary.
+                Token::Word { .. } if self.at_keyword("script") => {
+                    return self.err(
+                        "`script` is only valid inside a task; \
+                         a chorefile runs nothing at the top level",
                     );
                 }
                 ref other => {
@@ -560,6 +578,109 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `script <command...> { <raw text> }`.
+    ///
+    /// **Where the block ends.** At the first line that begins with the
+    /// indentation of the line the `script` keyword sits on and then a `}`.
+    /// Everything before that line is the body, whatever it contains.
+    ///
+    /// The unit is the *line*, not the keyword's own column, and that is what
+    /// makes the rule survive nesting. A block is a chain element, so the
+    /// keyword need not start its line: `version=$(script uv run - {` opens
+    /// one part way along, and the block still closes at
+    ///
+    /// ```sh
+    /// task version {
+    ///     version=$(script uv run - {
+    ///         print("...")
+    ///     })
+    /// }
+    /// ```
+    ///
+    /// — the `})` written where the `version=` was. Keying on the keyword's
+    /// column would have demanded a `}` under the `s` of `script`, which no
+    /// one writes and no editor indents to; keying on the line asks for the
+    /// alignment the author already used, in a capture exactly as in a
+    /// statement. Being a property of the line, it is also read out of the
+    /// whole file rather than out of the `$( )` fragment the lexer is working
+    /// on, which would have measured from the `(` and thought column zero.
+    ///
+    /// The body is text chore does not read, and real bodies are full of
+    /// braces — a dict, an object literal, a JSON blob — so counting them is
+    /// out: the first `}` inside a string would end the block early, and
+    /// chore would have to know that language to know it was in a string.
+    /// Ending at the first line that is only `}` is nearly as bad, because
+    /// closing a dedented brace on its own line is exactly what such a body
+    /// does. Indentation is what survives both: the block already sits inside
+    /// a task, so its body is indented past its `script`, and a `}` the body
+    /// owns is indented with the code it closes. A `}` back at the keyword's
+    /// column is the one thing that cannot belong to the body — which is also
+    /// how the reader picks it out, so the rule agrees with the eye.
+    ///
+    /// It costs one restriction, stated rather than inferred: a body line may
+    /// not be outdented to the `script`'s own column. That is the price of
+    /// never having to parse the body, and an explicit terminator the author
+    /// picks would cost more — a second thing to invent, spell and get wrong
+    /// in a language whose blocks are otherwise all braces.
+    ///
+    /// Unterminated blocks are caught while scanning, not two hundred lines
+    /// later by whatever eventually failed to parse: reaching the end of the
+    /// file without that `}` names the line the block opened on — the line in
+    /// the file, so a block inside a capture is reported where it was written
+    /// and not at the capture's first line.
+    fn script(&mut self) -> Result<Script> {
+        let kw = self.bump().span;
+        let mut command = Vec::new();
+        while matches!(self.kind(), Token::Word { .. }) {
+            command.push(self.word("a command after `script`")?);
+        }
+        if command.is_empty() {
+            return self.err_at(
+                "`script` needs the command to run the block, as in \
+                 `script python3 - { ... }`; the block is fed to it on stdin, \
+                 so the command usually ends in whatever means \"read stdin\"",
+                kw,
+            );
+        }
+        self.expect(Token::LBrace, "`{` to open the script block")?;
+        let body_tok = self.bump();
+        let Token::ScriptBody(raw) = &body_tok.token else {
+            // The lexer only opens a block once a command word has followed
+            // the keyword, and always emits the three tokens together.
+            return self.err_at("expected a script block", body_tok.span);
+        };
+        let body = dedent(raw);
+        let end = self.expect(Token::RBrace, "`}` to close the script block")?;
+        Ok(Script {
+            command,
+            body,
+            redirects: self.redirects()?,
+            // The keyword through the closing brace. A redirect after it is
+            // not part of the block: it carries its own span, and this one is
+            // what a diagnostic about the block should underline.
+            span: Span::new(kw.start, end.span.end),
+            body_span: body_tok.span,
+        })
+    }
+
+    /// The `>`, `>>` and `2>` redirections written after a script block, which
+    /// take their targets exactly as a command's do.
+    fn redirects(&mut self) -> Result<Vec<Redirect>> {
+        let mut out = Vec::new();
+        loop {
+            let kind = match self.kind() {
+                Token::Gt => RedirectKind::Stdout,
+                Token::GtGt => RedirectKind::StdoutAppend,
+                Token::ErrGt => RedirectKind::Stderr,
+                _ => return Ok(out),
+            };
+            let op = self.bump().span;
+            let target = self.word("a file to redirect to")?;
+            let span = Span::new(op.start, target.span.end);
+            out.push(Redirect { kind, target, span });
+        }
+    }
+
     // --- conditions -----------------------------------------------------
 
     fn cond(&mut self) -> Result<Cond> {
@@ -638,11 +759,25 @@ impl<'a> Parser<'a> {
 
     /// `|` binds tighter than `&&` and `||`, as in sh.
     fn pipeline(&mut self) -> Result<Chain> {
-        let mut left = Chain::Single(self.command()?);
+        let mut left = self.chain_atom()?;
         while self.eat(&Token::Pipe) {
-            left = Chain::Pipe(Box::new(left), Box::new(Chain::Single(self.command()?)));
+            left = Chain::Pipe(Box::new(left), Box::new(self.chain_atom()?));
         }
         Ok(left)
+    }
+
+    /// One thing that runs: a command, or a `script` block.
+    ///
+    /// The two are alternatives at exactly this level, which is what makes a
+    /// block compose — captured, piped, redirected, `&&`-ed — everywhere a
+    /// command composes, and nowhere else. `script` is a keyword here rather
+    /// than a command name: nothing on `PATH` can be reached by writing it,
+    /// and `^script` is how you would reach one if it existed.
+    fn chain_atom(&mut self) -> Result<Chain> {
+        if self.at_keyword("script") {
+            return Ok(Chain::Script(self.script()?));
+        }
+        Ok(Chain::Single(self.command()?))
     }
 
     fn command(&mut self) -> Result<Command> {
@@ -841,11 +976,12 @@ impl<'a> Parser<'a> {
 
     /// Parse the inside of a `$(...)`, keeping spans in the enclosing file.
     fn sub_chain(&self, source: &str, base: usize) -> Result<Chain> {
-        let tokens = lex::lex_offset(source, base).map_err(|e| locate(e, self.file))?;
+        let tokens = lex::lex_offset(source, self.src, base).map_err(|e| locate(e, self.file))?;
         let mut inner = Parser {
             tokens,
             i: 0,
             file: self.file,
+            src: self.src,
         };
         let chain = inner.chain()?;
         match inner.kind() {
@@ -945,6 +1081,54 @@ fn capture_end(b: &[u8], start: usize) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+/// Remove the indentation every non-blank line of a script body shares.
+///
+/// A block written inside a task is indented by the task, and that indentation
+/// is chore's, not the body's: handing Python a uniformly indented program
+/// gets an `IndentationError` for something the author never wrote. So the
+/// longest whitespace prefix common to every non-blank line comes off, and
+/// what remains — including the relative indentation, which is the body's own
+/// and load-bearing — is untouched.
+///
+/// The prefix is compared byte for byte, so a tab is not four spaces. Two
+/// lines indented differently agree only on what they literally share, which
+/// is the same rule the other interpreter will apply to them.
+///
+/// A blank line need not carry the prefix, and loses whatever whitespace it
+/// has: trailing spaces on an empty line are not indentation, and no language
+/// downstream reads them as such.
+fn dedent(body: &str) -> String {
+    let common = body
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(indent_of)
+        .reduce(common_prefix)
+        .unwrap_or_default();
+    if common.is_empty() {
+        return body.to_string();
+    }
+    body.split_inclusive('\n')
+        .map(|line| {
+            line.strip_prefix(common)
+                // Only a blank line can be shorter than the common prefix.
+                .unwrap_or_else(|| line.trim_start_matches([' ', '\t']))
+        })
+        .collect()
+}
+
+/// The leading spaces and tabs of one line.
+fn indent_of(line: &str) -> &str {
+    let end = line.find(|c| c != ' ' && c != '\t').unwrap_or(line.len());
+    &line[..end]
+}
+
+/// The longer prefix the two strings share, as bytes — safe to slice with,
+/// because both are runs of spaces and tabs.
+fn common_prefix<'a>(a: &'a str, b: &'a str) -> &'a str {
+    let end = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+    &a[..end]
 }
 
 /// The whole word as plain text, when it holds no interpolation.

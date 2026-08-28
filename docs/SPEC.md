@@ -173,6 +173,68 @@ In the task named on the command line there is no caller left, so `return`
 ends the run, successfully unless it named a code. `return` outside a task is
 a syntax error: there is no task to leave, and `exit` is what ends a run.
 
+### script
+
+The escape hatch. It hands a block of raw text to another interpreter on that
+program's stdin.
+
+```sh
+version=$(script uv run - {
+    import tomllib, pathlib
+    print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])
+})
+```
+
+The command in front is expanded like any other, so `script $PYTHON -`
+interpolates. **The block is not.** No variables, no escapes, no quoting rules:
+a `$`, a backslash or a quote inside it means whatever the interpreter you
+handed it to says it means. Chore values reach a block through the environment:
+
+```sh
+env TARGET $TRIPLE
+script uv run - {
+    import os
+    print(os.environ["TARGET"])
+}
+```
+
+It composes like any other command — captured as above, piped, redirected,
+joined with `&&`. The text arrives on stdin rather than in argv, which is what
+lets `uv run -`, `python3 -`, `node -` and `nu --stdin` all work without chore
+knowing anything about any of them, and keeps quoting out of it entirely.
+
+**Where the block ends.** At the first line that begins with the indentation of
+the line the `script` sits on, followed by `}`. Everything before it is the
+body, whatever it holds: a dict closing on its own line, a `}` inside a string,
+another language's braces — chore never looks inside.
+
+The unit is the line, not the keyword's column, so nesting changes nothing: in
+the capture above, `script` does not start its line and the block still closes
+at the `})` written where `version=` was, which is the alignment you would have
+used anyway. It costs one restriction — a body line may not be outdented as far
+as its `script`'s line — and that is the price of chore never parsing the body.
+The body starts on the line after `{`; nothing else may follow that brace.
+
+The shared indentation is then removed, so a block indented inside a task
+reaches Python as a program at column zero; relative indentation is kept
+exactly.
+
+**Everything chore does for you stops at the opening brace.** Under `--dry` a
+block is skipped, so a captured one yields the empty string — the same as any
+capture a preview could not evaluate. `check` reads
+nothing inside a block — an undefined variable, a non-portable command or a
+missing program in there is never reported — and `--dry` skips it rather than
+running it, because nothing can say what it would do. That is the trade: the
+rest of the language stays small enough to be checked and previewed, and the
+work that needs a real language has somewhere to live that is not a separate
+file. `check` says so once per file, so the hole is visible rather than
+assumed.
+
+Prefer an interpreter that behaves the same wherever it is installed — `uv`,
+`python3`, `node`, `nu`. `script sh -` gets a warning of its own: `sh` is a
+different program from platform to platform and Windows has none of them,
+which is the thing chore exists to remove.
+
 ### Task parameters
 
 A declared parameter is **required** unless it carries a default. A default

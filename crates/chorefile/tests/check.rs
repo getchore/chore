@@ -1740,3 +1740,513 @@ fn a_require_of_the_running_version_is_met() {
     );
     assert!(run(&source).is_empty(), "{:#?}", run(&source));
 }
+
+// --- 14. script blocks -----------------------------------------------------
+//
+// A `script` block hands raw text to another interpreter. The command in front
+// of it is an ordinary command and is checked like one; the body is another
+// language and is checked for *nothing*. The tests below pin both halves, and
+// the second half is the one that matters: a checker that went looking inside
+// the body would report confident nonsense about text it cannot parse.
+
+/// The `check` warnings, which is where every script finding lives.
+fn warnings(source: &str) -> Vec<Diagnostic> {
+    run(source)
+        .into_iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .collect()
+}
+
+/// The once-per-file summary: `script` blocks are unchecked and unpreviewable.
+fn unchecked(source: &str) -> Vec<Diagnostic> {
+    matching(source, "--dry")
+}
+
+fn shell_findings(source: &str) -> Vec<Diagnostic> {
+    matching(source, "host shell")
+}
+
+#[test]
+fn a_script_block_with_a_clean_command_is_not_an_error() {
+    let source = "\
+task gen {
+    script python3 - {
+        print('hello')
+    }
+}
+";
+    assert!(errors(source).is_empty(), "{:#?}", run(source));
+}
+
+#[test]
+fn an_undefined_variable_in_the_command_is_reported() {
+    // The command words are expanded like any other command's, so a `$nope`
+    // in the argv is exactly the finding it would be anywhere else.
+    let source = "\
+task gen {
+    script python3 $nope {
+        print('hello')
+    }
+}
+";
+    let found = matching(source, "undefined variable");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Error);
+    assert!(found[0].message.contains("$nope"), "{found:#?}");
+}
+
+#[test]
+fn the_body_is_never_checked() {
+    // The test that pins the whole rule. Every line of this body would be a
+    // finding if it were chorefile source: an undefined variable, two
+    // non-portable commands, a command no `PATH` has. None of it is chorefile
+    // source, so none of it is reported — a `$PATH` in a shell string is not a
+    // chore variable and a `curl` in a shell block is not a chore command.
+    let source = "\
+task gen {
+    script python3 - {
+        echo $nope
+        curl https://example.com -o out.txt
+        rm -rf build
+        cp a b
+        definitely-not-a-real-program --x
+        exit 1
+    }
+}
+";
+    for needle in [
+        "undefined variable",
+        "not portable",
+        "definitely-not-a-real-program",
+        "nope",
+        "curl",
+        "rm",
+    ] {
+        assert!(
+            matching(source, needle).is_empty(),
+            "the body was read: {needle} in {:#?}",
+            run(source)
+        );
+    }
+    assert!(errors(source).is_empty(), "{:#?}", run(source));
+    // And the one thing that *is* said about it is said about the block, not
+    // about anything inside it.
+    assert_eq!(unchecked(source).len(), 1, "{:#?}", run(source));
+}
+
+#[test]
+fn a_missing_interpreter_is_a_warning() {
+    let source = format!("task gen {{\n    script {MISSING} - {{\n        whatever\n    }}\n}}\n");
+    let found = path_misses(&source);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Warning);
+    // A missing interpreter is a `PATH` miss like any other: this machine is
+    // not necessarily the machine that runs the task.
+    assert!(found[0].help.as_ref().unwrap().contains("CI"), "{found:#?}");
+    // It points at the block, starting at the keyword.
+    assert!(
+        source[found[0].at.span.range()].starts_with("script"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn an_interpreter_guarded_off_this_platform_is_not_reported() {
+    // The MinGW rule, applied to `script`: a block that this host never enters
+    // says nothing about whether this host has the interpreter.
+    let source = format!(
+        "\
+task gen {{
+    if $OS == {} {{
+        script {MISSING} - {{
+            whatever
+        }}
+    }}
+}}
+",
+        other_os()
+    );
+    assert!(path_misses(&source).is_empty(), "{:#?}", run(&source));
+}
+
+#[test]
+fn a_guard_that_names_this_host_still_reports_the_interpreter() {
+    let source = format!(
+        "\
+task gen {{
+    if $OS == {} {{
+        script {MISSING} - {{
+            whatever
+        }}
+    }}
+}}
+",
+        vars::OS
+    );
+    assert_eq!(path_misses(&source).len(), 1, "{:#?}", run(&source));
+}
+
+#[test]
+fn a_task_or_builtin_named_as_the_interpreter_resolves_first() {
+    // task → builtin → `PATH`, exactly as for any other command.
+    let source = "\
+task run-it {
+    echo hi
+}
+
+task gen {
+    script run-it {
+        whatever
+    }
+}
+";
+    assert!(path_misses(source).is_empty(), "{:#?}", run(source));
+}
+
+// --- 14a. the once-per-file summary ----------------------------------------
+//
+// A reader has to be told that `check` and `--dry` stop at the opening brace,
+// or they will assume the usual guarantees hold everywhere. They are told
+// once, with a count — not once per block, which would make a chorefile with
+// ten legitimate blocks emit ten permanent warnings nobody can act on.
+
+#[test]
+fn a_script_block_is_reported_as_unchecked() {
+    let source = "\
+task gen {
+    script python3 - {
+        print('hello')
+    }
+}
+";
+    let found = unchecked(source);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Warning);
+    // Both guarantees, named.
+    assert!(found[0].message.contains("`check`"), "{found:#?}");
+    assert!(found[0].message.contains("--dry"), "{found:#?}");
+    // Never an error: a `script` block is a documented feature, not a mistake.
+    assert!(errors(source).is_empty(), "{:#?}", run(source));
+}
+
+#[test]
+fn many_script_blocks_are_reported_once_with_a_count() {
+    let source = "\
+task a {
+    script python3 - {
+        print(1)
+    }
+}
+
+task b {
+    script python3 - {
+        print(2)
+    }
+}
+
+task c {
+    script python3 - {
+        print(3)
+    }
+}
+";
+    let found = unchecked(source);
+    assert_eq!(
+        found.len(),
+        1,
+        "one per file, whatever the count: {found:#?}"
+    );
+    assert!(found[0].message.contains('3'), "{found:#?}");
+    // At the first block, so a reader has somewhere to start.
+    assert_eq!(found[0].at.line_col(source).0, 2);
+}
+
+#[test]
+fn a_file_without_a_script_block_pays_nothing() {
+    let source = "task build {\n    echo hi\n}\n";
+    assert!(unchecked(source).is_empty(), "{:#?}", run(source));
+    assert!(run(source).is_empty(), "{:#?}", run(source));
+}
+
+// --- 14b. a host shell as the interpreter ----------------------------------
+//
+// `script sh -` reintroduces the one thing `chore` exists to remove. A
+// warning, per block, and never an error: a deliberate author is allowed to
+// do it.
+
+#[test]
+fn a_shell_interpreter_is_warned_about() {
+    for shell in ["sh", "bash", "zsh", "cmd", "powershell"] {
+        let source = format!("task gen {{\n    script {shell} - {{\n        echo hi\n    }}\n}}\n");
+        let found = shell_findings(&source);
+        assert_eq!(found.len(), 1, "{shell}: {:#?}", run(&source));
+        assert_eq!(found[0].severity, Severity::Warning);
+        assert!(found[0].message.contains(shell), "{found:#?}");
+        // Never an error, however deliberate or otherwise.
+        assert!(errors(&source).is_empty(), "{shell}: {:#?}", run(&source));
+        // The help names the shape a deliberate author is aiming for.
+        let help = found[0].help.as_deref().expect("no help line");
+        assert!(help.contains("$OS"), "help was: {help}");
+    }
+}
+
+#[test]
+fn a_shell_by_path_is_still_a_shell() {
+    let source = "\
+task gen {
+    script /bin/sh - {
+        echo hi
+    }
+}
+";
+    assert_eq!(shell_findings(source).len(), 1, "{:#?}", run(source));
+}
+
+#[test]
+fn a_portable_interpreter_is_not_warned_about() {
+    // The whole point of the distinction: these behave the same wherever they
+    // are installed, so there is nothing to say about them.
+    for command in ["python3 -", "node -", "nu --stdin", "uv run -"] {
+        let source =
+            format!("task gen {{\n    script {command} {{\n        print(1)\n    }}\n}}\n");
+        assert!(
+            shell_findings(&source).is_empty(),
+            "{command}: {:#?}",
+            run(&source)
+        );
+    }
+}
+
+#[test]
+fn a_platform_guard_does_not_silence_the_shell_finding() {
+    // Unlike a `PATH` miss, this is not a fact about the machine running
+    // `check`, so it must not depend on which machine that is: a chorefile
+    // checked on a Mac and on Windows says the same thing about `script sh`.
+    let source = format!(
+        "\
+task gen {{
+    if $OS == {} {{
+        script sh - {{
+            echo hi
+        }}
+    }}
+}}
+",
+        other_os()
+    );
+    assert_eq!(shell_findings(&source).len(), 1, "{:#?}", run(&source));
+}
+
+#[test]
+fn shell_blocks_still_get_exactly_one_summary() {
+    // Two findings about two different things: `sh` per block, the unchecked
+    // summary once.
+    let source = "\
+task a {
+    script sh - {
+        echo one
+    }
+}
+
+task b {
+    script sh - {
+        echo two
+    }
+}
+";
+    assert_eq!(shell_findings(source).len(), 2, "{:#?}", run(source));
+    assert_eq!(unchecked(source).len(), 1, "{:#?}", run(source));
+    // Nothing else: `sh` may or may not be on this machine's `PATH`, and that
+    // miss is the only other finding a host is allowed to contribute.
+    let other = warnings(source).len() - shell_findings(source).len() - unchecked(source).len();
+    assert_eq!(other, path_misses(source).len(), "{:#?}", run(source));
+}
+
+// --- 14c. blocks in every position a chain can take -------------------------
+//
+// A `script` block is a chain, not a statement: it composes like anything else
+// that runs, and `x=$(script uv run - { ... })` — computing a value in another
+// language and using it in the task — is the main reason to reach for one. So
+// every rule above has to hold in the new positions too, and none of them may
+// be reached by a path that skips the block. The walk goes through one place
+// (`Checker::chain`), and these are what pin that.
+
+#[test]
+fn a_block_in_a_capture_reports_an_undefined_variable_in_its_argv() {
+    // The command words are expanded wherever the block is written, so the
+    // finding is the same one a statement block gives.
+    let source = "\
+task gen {
+    x=$(script python3 $nope {
+        print('hello')
+    })
+    echo $x
+}
+";
+    let found = matching(source, "undefined variable");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Error);
+    assert!(found[0].message.contains("$nope"), "{found:#?}");
+}
+
+#[test]
+fn a_body_in_a_capture_is_still_never_checked() {
+    // `the_body_is_never_checked`, moved into a capture. The position decides
+    // what happens to the block's *value*; it decides nothing about whether
+    // the body is read, and the answer there is still never.
+    let source = "\
+task gen {
+    version=$(script python3 - {
+        echo $nope
+        curl https://example.com -o out.txt
+        rm -rf build
+        cp a b
+        definitely-not-a-real-program --x
+        exit 1
+    })
+    echo $version
+}
+";
+    for needle in [
+        "undefined variable",
+        "not portable",
+        "definitely-not-a-real-program",
+        "nope",
+        "curl",
+        "rm",
+    ] {
+        assert!(
+            matching(source, needle).is_empty(),
+            "the body was read: {needle} in {:#?}",
+            run(source)
+        );
+    }
+    assert!(errors(source).is_empty(), "{:#?}", run(source));
+    assert_eq!(unchecked(source).len(), 1, "{:#?}", run(source));
+}
+
+#[test]
+fn a_body_in_a_capture_in_a_condition_is_still_never_checked() {
+    // The deepest nesting there is: a capture inside an `if` condition. The
+    // walk reaches the block through the condition, through the word and
+    // through the capture, and still reads none of the body.
+    let source = "\
+task gen {
+    if $(script python3 - {
+        echo $nope
+        curl https://example.com
+    }) == yes {
+        echo ok
+    }
+}
+";
+    for needle in ["undefined variable", "not portable", "nope", "curl"] {
+        assert!(
+            matching(source, needle).is_empty(),
+            "the body was read: {needle} in {:#?}",
+            run(source)
+        );
+    }
+    assert!(errors(source).is_empty(), "{:#?}", run(source));
+    // And it is still counted: a block a reader cannot see from the statement
+    // list is exactly as unread as one they can.
+    assert_eq!(unchecked(source).len(), 1, "{:#?}", run(source));
+}
+
+#[test]
+fn the_count_includes_blocks_in_captures_and_pipes() {
+    // Three blocks, three positions, one summary carrying `3`. A count that
+    // only saw statement blocks would understate how much of the file is
+    // outside the analysis, which is the one thing the summary is for.
+    let source = "\
+task gen {
+    script python3 - {
+        print(1)
+    }
+    x=$(script python3 - {
+        print(2)
+    })
+    script python3 - {
+        print(3)
+    } | echo
+}
+";
+    let found = unchecked(source);
+    assert_eq!(found.len(), 1, "one per file: {found:#?}");
+    assert!(found[0].message.contains('3'), "{found:#?}");
+    // Still the first one in the file, which here is the statement block.
+    assert_eq!(found[0].at.line_col(source).0, 2);
+}
+
+#[test]
+fn the_summary_points_at_the_first_block_even_inside_a_capture() {
+    // File order, not walk order: the earliest block is the one in the
+    // capture, and that is where a reader is sent.
+    let source = "\
+task gen {
+    x=$(script python3 - {
+        print(1)
+    })
+    script python3 - {
+        print(2)
+    }
+}
+";
+    let found = unchecked(source);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains('2'), "{found:#?}");
+    assert_eq!(found[0].at.line_col(source).0, 2);
+}
+
+#[test]
+fn a_shell_in_a_capture_is_still_a_host_shell() {
+    // The form the feature exists for is also the form that makes reaching for
+    // `sh` tempting, so the warning has to survive the move into a capture.
+    let source = "\
+task gen {
+    x=$(script sh - {
+        echo hi
+    })
+    echo $x
+}
+";
+    let found = shell_findings(source);
+    assert_eq!(found.len(), 1, "{:#?}", run(source));
+    assert_eq!(found[0].severity, Severity::Warning);
+    assert!(found[0].message.contains("sh"), "{found:#?}");
+    assert!(errors(source).is_empty(), "{:#?}", run(source));
+}
+
+#[test]
+fn a_missing_interpreter_is_still_a_warning_on_the_far_side_of_a_pipe() {
+    let source =
+        format!("task gen {{\n    echo hi | script {MISSING} - {{\n        whatever\n    }}\n}}\n");
+    let found = path_misses(&source);
+    assert_eq!(found.len(), 1, "{:#?}", run(&source));
+    assert_eq!(found[0].severity, Severity::Warning);
+    assert!(
+        source[found[0].at.span.range()].starts_with("script"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn a_platform_guard_still_silences_an_interpreter_miss_in_a_capture() {
+    // The suppression follows the scope, not the statement form: a capture
+    // inside a branch this host never enters is off-platform like anything
+    // else in it.
+    let source = format!(
+        "\
+task gen {{
+    if $OS == {} {{
+        x=$(script {MISSING} - {{
+            whatever
+        }})
+        echo $x
+    }}
+}}
+",
+        other_os()
+    );
+    assert!(path_misses(&source).is_empty(), "{:#?}", run(&source));
+}

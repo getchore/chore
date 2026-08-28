@@ -21,6 +21,11 @@ pub enum Token {
     /// A `#` comment. Kept, because the one directly above a task is its
     /// description.
     Comment(String),
+    /// The raw text between the braces of a `script` block, verbatim and
+    /// undecoded: the span is exactly the bytes it came from. It always sits
+    /// between the [`LBrace`](Self::LBrace) and [`RBrace`](Self::RBrace) of
+    /// the block, so the parser reads the three as one shape.
+    ScriptBody(String),
     Assign,
     LBrace,
     RBrace,
@@ -44,6 +49,7 @@ impl Token {
         match self {
             Self::Word { text, .. } => format!("`{text}`"),
             Self::Comment(_) => "a comment".into(),
+            Self::ScriptBody(_) => "a script block".into(),
             Self::Assign => "`=`".into(),
             Self::LBrace => "`{`".into(),
             Self::RBrace => "`}`".into(),
@@ -74,19 +80,30 @@ pub struct Spanned {
 /// Errors carry an empty path; [`parse`](crate::parse::parse) is what knows
 /// which file the source came from and fills it in.
 pub fn lex(source: &str) -> Result<Vec<Spanned>> {
-    lex_offset(source, 0)
+    lex_offset(source, source, 0)
 }
 
 /// Tokenize a fragment whose first byte sits at `base` in the enclosing file,
 /// so tokens inside a `$(...)` still point at the original source.
-pub(crate) fn lex_offset(source: &str, base: usize) -> Result<Vec<Spanned>> {
+///
+/// `full` is that enclosing file. A fragment is enough to cut into tokens, but
+/// not to measure a `script` block's indentation by: the fragment inside
+/// `$(script uv run - {` begins part way through a line, and its own first
+/// column is not the line's. Everything about a block that is a property of
+/// the *line* — the indentation its closing `}` must match, the line number an
+/// unterminated block is reported at — is read out of `full` instead.
+pub(crate) fn lex_offset(source: &str, full: &str, base: usize) -> Result<Vec<Spanned>> {
     Lexer {
         src: source,
+        full,
         base,
         i: 0,
         out: Vec::new(),
         stmt_start: true,
+        cmd_start: true,
         task_header: false,
+        script_kw: None,
+        script_argv: false,
         depth: 0,
     }
     .run()
@@ -104,6 +121,9 @@ pub(crate) fn syntax<T>(message: impl Into<String>, span: Span) -> Result<T> {
 
 struct Lexer<'a> {
     src: &'a str,
+    /// The whole file `src` is a fragment of; `src` is `full[base..]` clipped
+    /// to the fragment. Only the `script` rules read it — see [`lex_offset`].
+    full: &'a str,
     base: usize,
     i: usize,
     out: Vec<Spanned>,
@@ -111,6 +131,16 @@ struct Lexer<'a> {
     /// into `Word` `Assign` `Word` there, so `cmake -DFOO=ON` and `a=b=c` keep
     /// their `=` inside the word.
     stmt_start: bool,
+    /// Whether the next word could begin a command. Every statement start is
+    /// one, and so is the position after `|`, `&&`, `||`, `(` and `!`, because
+    /// a command may follow each of them.
+    ///
+    /// It is a second flag rather than a wider [`stmt_start`](Self::stmt_start)
+    /// because the two questions differ: `a=b` splits into an assignment only
+    /// at a statement start, while `script` is the keyword anywhere a command
+    /// can be written — including inside a `$( )`, which is lexed as its own
+    /// fragment and so starts in command position anyway.
+    cmd_start: bool,
     /// Whether we are between `task` and the `{` that opens its body. A task
     /// header is the one other place `name=value` splits, because that is how
     /// a parameter declares a default. Each word of the header gets the split
@@ -118,6 +148,22 @@ struct Lexer<'a> {
     /// at every space — so `target=$TRIPLE` splits but `a=b=c` still keeps its
     /// second `=` inside the value.
     task_header: bool,
+    /// Where the `script` keyword of the statement being lexed starts, if we
+    /// are in one. The body of a `script` block is raw text that no other rule
+    /// in this lexer applies to, so the block has to be recognised here, on
+    /// the way past — by the time the parser saw it, the body would already
+    /// have been chopped into words.
+    ///
+    /// It holds the keyword's offset rather than a flag because the
+    /// terminating `}` is found by indentation, and the indentation that
+    /// counts is that of the line the keyword sits on. See
+    /// [`Lexer::script_block`].
+    script_kw: Option<usize>,
+    /// Whether a word has followed that `script` yet. Without one there is no
+    /// command to feed the block to, and reading `script { }` as a block would
+    /// answer a missing command with a complaint about the body; leaving the
+    /// braces ordinary lets the parser say what is actually missing.
+    script_argv: bool,
     /// Open `{` blocks, so that only a `task` at the top level opens a header.
     /// Inside a body, `task` is an ordinary command name.
     depth: usize,
@@ -136,16 +182,25 @@ impl Lexer<'_> {
                 b'\n' => {
                     self.punct(Token::Newline, 1);
                     self.stmt_start = true;
+                    self.cmd_start = true;
                 }
                 b'#' => self.comment(),
+                b'{' if self.script_argv => {
+                    // `script cmd... {` — the brace opens raw text, not a block
+                    // of statements.
+                    let kw = self.script_kw.unwrap_or(self.i);
+                    self.script_block(kw)?;
+                }
                 b'{' => {
                     self.punct(Token::LBrace, 1);
                     self.stmt_start = true;
+                    self.cmd_start = true;
                     self.depth += 1;
                 }
                 b'}' => {
                     self.punct(Token::RBrace, 1);
                     self.stmt_start = true;
+                    self.cmd_start = true;
                     self.depth = self.depth.saturating_sub(1);
                 }
                 b'(' => self.punct(Token::LParen, 1),
@@ -194,9 +249,20 @@ impl Lexer<'_> {
     fn punct(&mut self, token: Token, len: usize) {
         let start = self.i;
         self.i += len;
+        // The operators that join commands leave a command expected, so the
+        // word after them may still be the `script` keyword.
+        self.cmd_start = matches!(
+            token,
+            Token::AndAnd | Token::OrOr | Token::Pipe | Token::LParen | Token::Bang
+        );
         self.push(token, start, start + len);
         self.stmt_start = false;
         self.task_header = false;
+        // A `script` header runs from the keyword to the `{`, and holds only
+        // words: anything else — a newline, an operator — ends it, and the
+        // parser reports whatever that made ungrammatical.
+        self.script_kw = None;
+        self.script_argv = false;
     }
 
     fn comment(&mut self) {
@@ -230,8 +296,11 @@ impl Lexer<'_> {
                     self.push(Token::Word { text, quoted }, start, self.i);
                     self.push(Token::Assign, self.i, self.i + 1);
                     self.i += 1;
-                    // The value that follows is one word, `=` and all.
+                    // The value that follows is one word, `=` and all — and a
+                    // word, not a command: the `script` in `x=$(script ...)`
+                    // is found when that capture is lexed as its own fragment.
                     self.stmt_start = false;
+                    self.cmd_start = false;
                     return Ok(());
                 }
                 _ => self.i += 1,
@@ -241,9 +310,88 @@ impl Lexer<'_> {
         // A top-level `task` opens a header, where the words that follow are
         // parameters and may carry `=` defaults. It stays open until the `{`.
         self.task_header |= self.stmt_start && self.depth == 0 && text == "task" && !quoted;
+        // `script` opens one too, and this word is either that keyword or one
+        // of the argv words after it.
+        match self.script_kw {
+            Some(_) => self.script_argv = true,
+            None if self.cmd_start && text == "script" && !quoted => {
+                self.script_kw = Some(start);
+            }
+            None => {}
+        }
+        // A word ends the command position, except for the two keywords that
+        // take a command of their own: `try script sh - { }` and `if script
+        // sh - { }` both still open a block. Only a keyword that was itself in
+        // command position counts, so `echo try` is an argument and a word.
+        self.cmd_start = self.cmd_start && !quoted && matches!(text.as_str(), "try" | "if");
         self.push(Token::Word { text, quoted }, start, self.i);
         self.stmt_start = false;
         Ok(())
+    }
+
+    /// Consume the `{`, the raw body and the `}` of a `script` block, given
+    /// the offset of the `script` keyword that opened it.
+    ///
+    /// The body is emitted as one [`Token::ScriptBody`] holding the source
+    /// verbatim, so nothing in it is ever a token: quotes stay unbalanced, `<`
+    /// and `&` stay ordinary characters, and a `#` is a comment in whatever
+    /// language the block is written in rather than in this one. The rule that
+    /// finds the closing brace is documented on
+    /// [`Parser::script`](crate::parse) — it is the subtle part.
+    fn script_block(&mut self, kw: usize) -> Result<()> {
+        self.punct(Token::LBrace, 1);
+        // The body starts on the next line, so that the closing `}` can be
+        // recognised by its indentation and the first line by nothing at all.
+        let Some(nl) = self.src[self.i..].find('\n').map(|n| self.i + n) else {
+            return self.unterminated_script(kw);
+        };
+        if !self.src[self.i..nl].trim().is_empty() {
+            return syntax(
+                "a `script` block's body starts on the line after `{`; \
+                 nothing else may follow the brace",
+                self.span(self.i, nl - self.i),
+            );
+        }
+        // Measured in the whole file, not in the fragment being lexed: see
+        // [`Parser::script`](crate::parse) for why the line is the unit.
+        let indent = line_indent(self.full, self.base + kw);
+        let body_start = nl + 1;
+        let mut pos = body_start;
+        loop {
+            if pos >= self.src.len() {
+                return self.unterminated_script(kw);
+            }
+            let end = self.src[pos..]
+                .find('\n')
+                .map_or(self.src.len(), |n| pos + n);
+            // The closing brace is the first `}` sitting at exactly the
+            // keyword's indentation. A `}` the body owns is indented past it.
+            if let Some(rest) = self.src[pos..end].strip_prefix(indent)
+                && rest.starts_with('}')
+            {
+                let text = self.src[body_start..pos].to_string();
+                self.push(Token::ScriptBody(text), body_start, pos);
+                self.i = pos + indent.len();
+                self.punct(Token::RBrace, 1);
+                return Ok(());
+            }
+            pos = end + 1;
+        }
+    }
+
+    fn unterminated_script<T>(&self, kw: usize) -> Result<T> {
+        // Both are facts about the file, so a block opened inside a `$( )`
+        // names the line it was written on rather than a line of the capture.
+        let at = self.base + kw;
+        let line = self.full[..at].bytes().filter(|&b| b == b'\n').count() + 1;
+        let column = line_indent(self.full, at).chars().count() + 1;
+        syntax(
+            format!(
+                "unterminated script block, opened at line {line}; it ends at the first \
+                 `}}` written at column {column}, indented exactly like its `script`"
+            ),
+            self.span(kw, "script".len()),
+        )
     }
 
     /// Consume a `'...'` or `"..."` run, including the delimiters.
@@ -306,6 +454,24 @@ impl Lexer<'_> {
             None => syntax("unterminated `${`", self.span(start, 2)),
         }
     }
+}
+
+/// The leading whitespace of the line `at` sits on, up to `at` itself.
+///
+/// A `script` opened part way through a line — `task t { script sh - {`, or
+/// `version=$(script uv run - {` — has only its line's indentation to be
+/// measured by, which is what a reader closing the block by eye would line up
+/// against too.
+///
+/// `at` is an offset in the whole file, never in a fragment: the leading
+/// whitespace of a capture's first line belongs to the line, and the capture
+/// starts after it.
+pub(crate) fn line_indent(source: &str, at: usize) -> &str {
+    let start = source[..at].rfind('\n').map_or(0, |n| n + 1);
+    let end = source[start..at]
+        .find(|c| c != ' ' && c != '\t')
+        .map_or(at, |n| start + n);
+    &source[start..end]
 }
 
 /// A shell identifier: the name half of an assignment, or a `$name`.

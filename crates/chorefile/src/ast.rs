@@ -77,6 +77,26 @@ impl Param {
     }
 }
 
+/// A `script <command...> { ... }` statement.
+#[derive(Debug)]
+pub struct Script {
+    /// The command and its arguments, expanded like any other command's, so
+    /// `script uv run -` and `script python3 -` both work and a `$var` in the
+    /// argv still interpolates. Only the *body* is raw.
+    pub command: Vec<Word>,
+    /// The block, exactly as written, minus the common indentation.
+    pub body: String,
+    /// The `script` keyword through the closing brace.
+    pub span: Span,
+    /// Where `body` starts in the source, so a diagnostic about the block can
+    /// point into it rather than at the keyword.
+    pub body_span: Span,
+    /// `> out.txt` and friends. A script block is not a [`Command`], so its
+    /// redirects live here rather than there; `span` stops at the closing
+    /// brace and each redirect carries its own.
+    pub redirects: Vec<Redirect>,
+}
+
 pub type Block = Vec<Stmt>;
 
 #[derive(Debug)]
@@ -91,6 +111,7 @@ pub enum Stmt {
     /// this code. Nothing after it happens, in this task or in the one that
     /// called it.
     Exit(Option<Word>),
+
     /// `return [code]` — ends the **enclosing task** and hands control back to
     /// its caller, which carries on with the next statement. The code becomes
     /// the task's exit status, so `&&`, `||`, `try`, an `if` condition and a
@@ -185,6 +206,27 @@ pub enum CompareOp {
 #[derive(Debug)]
 pub enum Chain {
     Single(Command),
+    /// `script <command...> { <raw text> }` — hand a block of text to another
+    /// interpreter on its stdin.
+    ///
+    /// It lives in `Chain` rather than in `Stmt` so that it composes like
+    /// anything else that runs: `x=$(script uv run - { ... })`, a pipe, a
+    /// redirect, `&&`. Computing a value in another language and using it in
+    /// the task is the main reason to reach for this, and a form that could
+    /// not hand the value back would have sent every author to a temporary
+    /// file instead.
+    ///
+    /// The escape hatch, and deliberately a narrow one. `check` can tell you
+    /// `curl` will not work on Windows because it knows every builtin, and
+    /// `--dry` can skip effects because every builtin says whether it has any.
+    /// Neither is knowable about text handed to another program, so a block is
+    /// checked for nothing and never previewed — and `check` says so rather
+    /// than letting a reader assume the usual guarantees hold.
+    ///
+    /// The text is raw: no interpolation, no quoting rules. It reaches the
+    /// command on stdin rather than in argv, so a quote or a `$` inside it
+    /// means whatever that interpreter says it means.
+    Script(Script),
     And(Box<Chain>, Box<Chain>),
     Or(Box<Chain>, Box<Chain>),
     Pipe(Box<Chain>, Box<Chain>),
@@ -196,6 +238,7 @@ impl Chain {
     pub fn span(&self) -> Span {
         match self {
             Self::Single(cmd) => cmd.span,
+            Self::Script(script) => script.span,
             Self::And(a, b) | Self::Or(a, b) | Self::Pipe(a, b) => {
                 Span::new(a.span().start, b.span().end)
             }

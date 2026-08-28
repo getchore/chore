@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::rc::Rc;
 
-use crate::ast::{Chain, Command, Redirect, RedirectKind, Task, Word};
+use crate::ast::{Chain, Command, Redirect, RedirectKind, Script, Task, Word};
 use crate::error::{Error, Result};
 use crate::exec::{Builtin, Ctx, Output};
 use crate::{builtins, vars};
@@ -31,6 +31,7 @@ impl Interpreter<'_> {
     ) -> Result<Output> {
         match chain {
             Chain::Single(cmd) => self.command(cmd, dest, stdin, flags),
+            Chain::Script(script) => self.script(script, dest, stdin, flags),
             Chain::And(a, b) => {
                 let left = self.chain(a, borrow(&dest), stdin, flags)?;
                 if left.success() {
@@ -54,6 +55,19 @@ impl Interpreter<'_> {
                 }
             }
             Chain::Pipe(a, b) => {
+                // A `script` block on the right of a `|` has two candidate
+                // stdins — the pipe's bytes and the block's text — and one
+                // slot to put them in. See [`piped_into_script`] for why the
+                // block wins and why that makes the pipeline an error rather
+                // than a silent drop. It is caught here, before the left side
+                // runs, so the refusal costs nothing: discovering the clash
+                // after the fact would mean the left command's effects had
+                // already happened and its output had already been thrown
+                // away.
+                if let Some(script) = fed_script(b) {
+                    let named = script_command(script, &mut |w| self.preview(w));
+                    return Err(piped_into_script(&named));
+                }
                 // The left side is captured whole and handed to the right as
                 // stdin, rather than the two running concurrently on real OS
                 // pipes. A chorefile pipe joins short, finite commands, and a
@@ -172,6 +186,16 @@ impl Interpreter<'_> {
             line.push(' ');
             line.push_str(&quote(arg));
         }
+        self.echo_redirects(&mut line, redirects)?;
+        writeln!(self.out, "{line}")?;
+        self.out.flush()?;
+        Ok(())
+    }
+
+    /// Append `> f`, `>> f` and `2> f` to an echo line, targets expanded.
+    /// Shared with `echo_script`, so a redirected block reads the same as a
+    /// redirected command.
+    fn echo_redirects(&mut self, line: &mut String, redirects: &[Redirect]) -> Result<()> {
         for r in redirects {
             let target = self.expand_to_string(&r.target)?;
             line.push_str(match r.kind {
@@ -181,8 +205,6 @@ impl Interpreter<'_> {
             });
             line.push_str(&quote(&target));
         }
-        writeln!(self.out, "{line}")?;
-        self.out.flush()?;
         Ok(())
     }
 
@@ -383,22 +405,36 @@ impl Interpreter<'_> {
             }
             Err(e) => return Err(e),
         };
-        if let (Some(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) {
-            // A short write here means the child exited early; that is its
-            // verdict to give through the exit code, not an error of ours.
-            let _ = pipe.write_all(bytes);
-        }
-        drop(child.stdin.take());
-
+        // Fed from a thread, and read back on this one. A pipe holds only a
+        // page or two before it blocks, so writing the whole input here and
+        // waiting afterwards deadlocks as soon as *both* sides are large: the
+        // child stops reading to flush its own output, we are still blocked on
+        // the write, and neither ever drains the other. A `script` block's
+        // body is unbounded — hundreds of kilobytes of Python is an ordinary
+        // thing to write — so this is not a corner case.
+        let feed = child.stdin.take().zip(stdin);
         let mut out = Output::default();
-        if capture || streamed {
-            let finished = child.wait_with_output()?;
-            out.code = finished.status.code().unwrap_or(1);
-            out.stdout = finished.stdout;
-            out.stderr = finished.stderr;
-        } else {
-            out.code = child.wait()?.code().unwrap_or(1);
-        }
+        std::thread::scope(|scope| -> Result<()> {
+            if let Some((mut pipe, bytes)) = feed {
+                scope.spawn(move || {
+                    // A short write means the child exited early; that is its
+                    // verdict to give through the exit code, not a fault of
+                    // ours. Dropping the pipe as this closure ends is what
+                    // closes the child's stdin — without the EOF, an
+                    // interpreter reading a program from stdin waits forever.
+                    let _ = pipe.write_all(bytes);
+                });
+            }
+            if capture || streamed {
+                let finished = child.wait_with_output()?;
+                out.code = finished.status.code().unwrap_or(1);
+                out.stdout = finished.stdout;
+                out.stderr = finished.stderr;
+            } else {
+                out.code = child.wait()?.code().unwrap_or(1);
+            }
+            Ok(())
+        })?;
         if streamed {
             // The command was streaming: its bytes are the run's output, not
             // a value, so they go where the interpreter's output goes and
@@ -409,6 +445,168 @@ impl Interpreter<'_> {
             out.stderr.clear();
         }
         Ok(out)
+    }
+
+    /// `script <command...> { <raw text> }`: run the command and hand it the
+    /// block on **stdin**.
+    ///
+    /// # Why stdin and not argv
+    ///
+    /// Every interpreter worth handing a block to already reads a program from
+    /// its standard input — `uv run -`, `python3 -`, `node -`, `nu --stdin`,
+    /// `sh` — so stdin is the one interface chore can use without knowing
+    /// anything about the language on the other end. Putting the block in argv
+    /// instead would mean quoting it for the target's command line, which is
+    /// exactly the layer of escaping a raw block exists to avoid: a `"` or a
+    /// `$` in the body would have to be spelled differently depending on which
+    /// interpreter, and on which platform, was going to see it. On stdin the
+    /// bytes arrive as written and mean whatever that interpreter says they
+    /// mean.
+    ///
+    /// The command itself is expanded like any other command's — word rules,
+    /// splitting, `$var` — so `script $PYTHON -` works. Only the body is raw.
+    ///
+    /// # A command, not a statement
+    ///
+    /// A block is a [`Chain`], so it goes wherever anything else that runs
+    /// goes, and it gets there by taking the same three arguments every other
+    /// command in this module takes. `dest` is what `$( ... )`, `|` and `>`
+    /// each ask for and is honoured unchanged — a captured block's stdout is
+    /// piped back and trimmed exactly as a program's is. `flags.echo` is off
+    /// inside a capture or a condition, for the same reason it is off for a
+    /// command there: those are machinery, not steps of the recipe. And the
+    /// exit status comes back in the [`Output`] rather than as an error, which
+    /// is what lets `&&`, `||`, `try` and an `if` condition read it; a bare
+    /// statement turns a nonzero one into the run's failure in `Interpreter::stmt`,
+    /// through the same path a bare command takes.
+    ///
+    /// # Stdin, and a pipe
+    ///
+    /// The body *is* this command's stdin, which is the one thing about a
+    /// block that cannot be negotiated: it is the program being run, and a
+    /// command with no program is not a command. So `cmd | script uv run - {
+    /// ... }` — two candidate stdins, one slot — is refused rather than
+    /// resolved, in `chain`'s pipe arm and again here for any route that
+    /// reaches this function with bytes in hand. [`piped_into_script`] carries
+    /// the reasoning.
+    ///
+    /// A pipe into a *task* whose body contains a block does not reach it
+    /// either: `run_task_command` takes no stdin, so a task never forwards a
+    /// pipe's bytes to the commands inside it.
+    ///
+    /// # Why `--dry` will not run it
+    ///
+    /// Every other command in a chorefile is something chore can reason about:
+    /// a builtin declares whether it has effects, and a program on `PATH` is
+    /// skipped unless something needs its answer. The text inside a script
+    /// block is opaque — it may format a file, publish a release or do
+    /// nothing, and chore cannot tell which. Running it to find out would make
+    /// `--dry` cause the effects it exists to avoid, and running it "because
+    /// it is probably read-only" would be a guess. So a preview skips it and
+    /// says plainly that it did, rather than printing a line that lets a
+    /// reader assume the usual guarantees held here too.
+    ///
+    /// Being a command changes where that has to be said, not whether. A
+    /// skipped block answers `Output::ok()` with nothing on stdout, the same
+    /// answer a skipped program on `PATH` gives, so `x=$(script ... )` under
+    /// `--dry` binds the empty string instead of ending the preview — the
+    /// existing rule for a capture that could not be evaluated. The run is
+    /// marked `unevaluated` so an `if` around it is left undecided and previews
+    /// its `then` branch, and the skip is reported once: on stdout beside the
+    /// echo where the block is a step of the recipe, and on stderr where it is
+    /// not, since there stdout is somebody's value and must not be written to.
+    pub(super) fn script(
+        &mut self,
+        script: &Script,
+        dest: Dest,
+        stdin: Option<&[u8]>,
+        flags: Flags,
+    ) -> Result<Output> {
+        let mut argv = Vec::new();
+        for word in &script.command {
+            argv.extend(self.expand(word)?);
+        }
+        if argv.is_empty() {
+            return Err(Error::Run {
+                message: "`script` block has no command to run".into(),
+            });
+        }
+        if stdin.is_some() {
+            return Err(piped_into_script(&format!("script {}", quoted(&argv))));
+        }
+
+        // `>`, `>>` and `2>` are applied here rather than by the caller, and
+        // before the echo, for the same reasons they are in `command`: a `>`
+        // overrides the destination the caller asked for, and the echo shows
+        // the redirection that actually took effect.
+        let (dest, stderr) = self.redirects(&script.redirects, dest)?;
+
+        // The body is not echoed. It is the one part of a chorefile with no
+        // upper bound on its size, and forty lines of Python between two
+        // command lines would bury the output the run is there to produce. The
+        // line count is enough to tie the echo to the block in the source.
+        let echoing = flags.echo && !self.quiet;
+        if echoing {
+            let lines = script.body.lines().count();
+            self.echo_script(&argv, lines, &script.redirects)?;
+        }
+
+        if self.mode == Mode::Dry {
+            return self.dry_skipped(&argv, echoing);
+        }
+
+        // `needed` only matters under `--dry`, which has already returned, and
+        // the echo has been dealt with above in the block's own terms.
+        let inner = Flags {
+            echo: false,
+            needed: true,
+        };
+        self.run_program(&argv, dest, stderr, Some(script.body.as_bytes()), inner)
+            .map_err(|e| missing_interpreter(e, &argv[0]))
+    }
+
+    /// Report a block `--dry` refused to run, and answer for it.
+    ///
+    /// `Output::ok()` with an empty stdout, because that is what a skipped
+    /// program on `PATH` answers and a block should not preview differently
+    /// from the command it stands in for: `&&` carries on to the next step,
+    /// `||` does not, and a capture takes the empty string. The `unevaluated`
+    /// flag is what keeps the answer honest where it matters — an `if` whose
+    /// condition never ran is undecided, and `Interpreter::stmt` previews the
+    /// `then` branch rather than believing a verdict nobody gave.
+    fn dry_skipped(&mut self, argv: &[String], echoed: bool) -> Result<Output> {
+        self.unevaluated = true;
+        let why = "chore cannot tell what a `script` block does, so a preview never runs one";
+        if echoed {
+            writeln!(self.out, "  skipped by --dry: {why}")?;
+            self.out.flush()?;
+        } else {
+            // No echo means a capture, a condition or a captured task: stdout
+            // there is a value somebody is about to read.
+            let _ = writeln!(self.err, "--dry: `script {}` skipped: {why}", quoted(argv));
+            let _ = self.err.flush();
+        }
+        Ok(Output::ok())
+    }
+
+    /// `$ script uv run - > out.txt (12 lines on stdin)` — the command as it
+    /// would have to be typed, where its output went, and the size of the block
+    /// it was handed, but never the block itself.
+    ///
+    /// The stdin note stays last, after any redirection, because it is an
+    /// annotation about the command rather than a part of it: everything before
+    /// it is text a chorefile could contain.
+    fn echo_script(&mut self, argv: &[String], lines: usize, redirects: &[Redirect]) -> Result<()> {
+        let mut line = String::from("$ script");
+        for arg in argv {
+            line.push(' ');
+            line.push_str(&quote(arg));
+        }
+        self.echo_redirects(&mut line, redirects)?;
+        let plural = if lines == 1 { "" } else { "s" };
+        writeln!(self.out, "{line} ({lines} line{plural} on stdin)")?;
+        self.out.flush()?;
+        Ok(())
     }
 
     /// A task used as a command. Its output goes wherever the caller asked,
@@ -710,6 +908,79 @@ impl Interpreter<'_> {
     }
 }
 
+/// The block a pipe's bytes would land on, if the right-hand side of the pipe
+/// begins with one.
+///
+/// A pipe hands its bytes to the command that runs *first* on the right, which
+/// is the leftmost leaf of that side: in `a | b && c` it is `b` that reads the
+/// pipe, and `c` never sees it. So the search follows left edges and stops at
+/// the first thing that runs.
+fn fed_script(chain: &Chain) -> Option<&Script> {
+    match chain {
+        Chain::Script(script) => Some(script),
+        Chain::Single(_) => None,
+        Chain::And(a, _) | Chain::Or(a, _) | Chain::Pipe(a, _) => fed_script(a),
+    }
+}
+
+/// `cmd | script uv run - { ... }`: two candidate stdins, one slot.
+///
+/// The block wins, and it is not a close call. The text *is* the program the
+/// interpreter is being asked to run; hand it the pipe's bytes instead and
+/// there is nothing left to execute, so the only reading on which the pipeline
+/// means anything is the one where the pipe's bytes are dropped. That is the
+/// choice this function refuses to make silently.
+///
+/// The three candidate answers, and why this is the one:
+///
+/// - **Silently drop the pipe's bytes.** The pipeline looks like it works. The
+///   left-hand command still runs, still has its effects, and its output goes
+///   nowhere — a `build | script python3 - { ... }` that quietly ignores half
+///   of what it was written to do is an afternoon of somebody's life, and
+///   nothing in the output would ever point at the cause.
+/// - **Warn and carry on.** Better, but a warning is only worth writing when
+///   the surviving behaviour is one an author might have wanted. Nobody writes
+///   a pipe in order for its bytes to be discarded, so there is no reading of
+///   this pipeline to preserve, and a warning on a CI log with a thousand other
+///   lines is a drop with extra steps.
+/// - **Refuse it.** The chorefile asked for something that has no meaning. Say
+///   so, name both ways to say what was probably meant, and cost the author a
+///   minute instead of an afternoon. There is no compatibility to keep — a
+///   block could not appear in a chain at all until now — so refusing costs
+///   nobody a working file.
+///
+/// The refusal happens *before* the left-hand side runs, so a rejected
+/// pipeline has no effects at all rather than half of them.
+fn piped_into_script(command: &str) -> Error {
+    Error::Run {
+        message: format!(
+            "`{command}` cannot be on the right of a `|`: a script block's stdin is the block \
+             itself, so the piped bytes would have nowhere to go. Capture the left side into a \
+             variable the block's command line can read, or write it to a file the block opens"
+        ),
+    }
+}
+
+/// Explain a `script` block whose interpreter is not installed.
+///
+/// `run_program` reports a program it cannot spawn as ``unknown command
+/// `uv` ``, which is the right message for a command the chorefile wrote on a
+/// line of its own and the wrong one here: nothing in the block mentions `uv`,
+/// and a reader who has just written twenty lines of Python needs to be told
+/// that the missing thing is the interpreter the block is handed to. An
+/// [`Error::Io`] is left alone — it is a fault of ours, not a missing program.
+fn missing_interpreter(error: Error, name: &str) -> Error {
+    match error {
+        Error::Run { .. } => Error::Run {
+            message: format!(
+                "`script` block: cannot run `{name}` — the interpreter a script block \
+                 hands its text to must be installed and on `PATH`"
+            ),
+        },
+        other => other,
+    }
+}
+
 fn concat(mut a: Vec<u8>, b: Vec<u8>) -> Vec<u8> {
     a.extend(b);
     a
@@ -760,6 +1031,23 @@ fn quote(arg: &str) -> String {
     }
 }
 
+/// A whole argv, echo-quoted and joined.
+fn quoted(argv: &[String]) -> String {
+    argv.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
+}
+
+/// `script <command...>`, without the block: the header of a block as it would
+/// have to be typed. The body is never rendered — see `Interpreter::echo_script`
+/// for why.
+fn script_command(script: &Script, word: &mut dyn FnMut(&Word) -> String) -> String {
+    let mut s = String::from("script");
+    for w in &script.command {
+        s.push(' ');
+        s.push_str(&word(w));
+    }
+    s
+}
+
 /// Render a chain for an error message.
 pub(super) fn describe(chain: &Chain, word: &mut dyn FnMut(&Word) -> String) -> String {
     match chain {
@@ -771,6 +1059,9 @@ pub(super) fn describe(chain: &Chain, word: &mut dyn FnMut(&Word) -> String) -> 
             }
             s
         }
+        // The command and the shape of the block, never its text: a failing
+        // block's message must fit on a line beside every other command's.
+        Chain::Script(script) => format!("{} {{ ... }}", script_command(script, word)),
         Chain::And(a, b) => format!("{} && {}", describe(a, word), describe(b, word)),
         Chain::Or(a, b) => format!("{} || {}", describe(a, word), describe(b, word)),
         Chain::Pipe(a, b) => format!("{} | {}", describe(a, word), describe(b, word)),

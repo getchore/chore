@@ -71,6 +71,61 @@ fn render_stmt(stmt: &Stmt) -> String {
     }
 }
 
+/// The first `script` block anywhere in a block: inside `if` and `for`, and
+/// inside a chain or a `$( )` capture, which is where one may now sit.
+fn find_script(block: &Block) -> Option<&Script> {
+    block.iter().find_map(script_in_stmt)
+}
+
+fn script_in_stmt(stmt: &Stmt) -> Option<&Script> {
+    match stmt {
+        Stmt::Assign(a) => script_in_word(&a.value),
+        Stmt::Command(c) | Stmt::Try(c) => script_in_chain(c),
+        Stmt::Exit(w) | Stmt::Return(w) => w.as_ref().and_then(script_in_word),
+        Stmt::For(f) => f
+            .items
+            .iter()
+            .find_map(script_in_word)
+            .or_else(|| find_script(&f.body)),
+        Stmt::If(i) => script_in_cond(&i.cond)
+            .or_else(|| find_script(&i.then))
+            .or_else(|| {
+                i.otherwise
+                    .as_ref()
+                    .and_then(|otherwise| find_script(otherwise))
+            }),
+    }
+}
+
+fn script_in_chain(chain: &Chain) -> Option<&Script> {
+    match chain {
+        Chain::Script(s) => Some(s),
+        Chain::Single(c) => std::iter::once(&c.name)
+            .chain(&c.args)
+            .chain(c.redirects.iter().map(|r| &r.target))
+            .find_map(script_in_word),
+        Chain::And(a, b) | Chain::Or(a, b) | Chain::Pipe(a, b) => {
+            script_in_chain(a).or_else(|| script_in_chain(b))
+        }
+    }
+}
+
+fn script_in_cond(cond: &Cond) -> Option<&Script> {
+    match cond {
+        Cond::Compare { left, right, .. } => script_in_word(left).or_else(|| script_in_word(right)),
+        Cond::Command(c) => script_in_chain(c),
+        Cond::Not(c) => script_in_cond(c),
+        Cond::And(a, b) | Cond::Or(a, b) => script_in_cond(a).or_else(|| script_in_cond(b)),
+    }
+}
+
+fn script_in_word(word: &Word) -> Option<&Script> {
+    word.parts.iter().find_map(|part| match &part.kind {
+        PartKind::Capture(chain) => script_in_chain(chain),
+        _ => None,
+    })
+}
+
 fn render_if(i: &If) -> String {
     let head = format!("if {} {}", render_cond(&i.cond), render_block(&i.then));
     match &i.otherwise {
@@ -101,6 +156,7 @@ fn render_cond(cond: &Cond) -> String {
 fn render_chain(chain: &Chain) -> String {
     match chain {
         Chain::Single(c) => render_command(c),
+        Chain::Script(s) => render_script(s),
         Chain::And(a, b) => format!("({} && {})", render_chain(a), render_chain(b)),
         Chain::Or(a, b) => format!("({} || {})", render_chain(a), render_chain(b)),
         Chain::Pipe(a, b) => format!("({} | {})", render_chain(a), render_chain(b)),
@@ -117,7 +173,25 @@ fn render_command(cmd: &Command) -> String {
         out.push(' ');
         out.push_str(&render_word(arg));
     }
-    for r in &cmd.redirects {
+    out.push_str(&render_redirects(&cmd.redirects));
+    out
+}
+
+fn render_script(s: &Script) -> String {
+    let command: Vec<String> = s.command.iter().map(render_word).collect();
+    // The body is debug-printed, so a block's newlines stay on one line of
+    // assertion and every space in them is visible.
+    format!(
+        "script {} {:?}{}",
+        command.join(" "),
+        s.body,
+        render_redirects(&s.redirects)
+    )
+}
+
+fn render_redirects(redirects: &[Redirect]) -> String {
+    let mut out = String::new();
+    for r in redirects {
         let op = match r.kind {
             RedirectKind::Stdout => ">",
             RedirectKind::StdoutAppend => ">>",
@@ -929,6 +1003,410 @@ fn an_unknown_top_level_word_hints_at_a_stale_binary() {
     let message = error("{ echo hi }\n");
     assert!(
         !message.contains("may be too old"),
+        "message was: {message}"
+    );
+}
+
+// --- script blocks ------------------------------------------------------
+
+const DEPS: &str = r#"task deps {
+    script uv run - {
+        import tomllib, pathlib
+        data = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+        print(data["workspace"]["package"]["version"])
+    }
+}
+"#;
+
+#[test]
+fn script_hands_a_raw_body_to_another_interpreter() {
+    let f = file(DEPS);
+    let s = find_script(&f.tasks[0].body).expect("no script block parsed");
+
+    let command: Vec<String> = s.command.iter().map(render_word).collect();
+    assert_eq!(command, ["uv", "run", "-"]);
+    // Verbatim, minus the indentation the task put there: the quotes and
+    // brackets are Python's business, and chore has not touched them.
+    assert_eq!(
+        s.body,
+        "import tomllib, pathlib\n\
+         data = tomllib.loads(pathlib.Path(\"Cargo.toml\").read_text())\n\
+         print(data[\"workspace\"][\"package\"][\"version\"])\n"
+    );
+}
+
+#[test]
+fn a_script_command_is_expanded_but_its_body_is_not() {
+    let src = r#"task t {
+    script $PYTHON $(which -q flags) - {
+        print("$PYTHON is not interpolated, nor is $1 or $@")
+        path = "C:\Users\a"  # backslashes and quotes are Python's
+    }
+}
+"#;
+    let f = file(src);
+    let s = find_script(&f.tasks[0].body).expect("no script block parsed");
+
+    // argv goes through the ordinary word rules,
+    let command: Vec<String> = s.command.iter().map(render_word).collect();
+    assert_eq!(command, ["$PYTHON", "$(which -q flags)", "-"]);
+    // and the body goes through none of them: it is still one flat string,
+    // `$` and all.
+    assert_eq!(
+        s.body,
+        "print(\"$PYTHON is not interpolated, nor is $1 or $@\")\n\
+         path = \"C:\\Users\\a\"  # backslashes and quotes are Python's\n"
+    );
+}
+
+#[test]
+fn a_script_body_may_hold_braces_on_their_own_lines() {
+    // The case that decides the termination rule. A body that closes a dict on
+    // its own line has a `}` alone on a line — dedented, even — and the block
+    // still runs to the `}` that lines up with `script`.
+    let src = r#"task t {
+    script node - {
+        const data = {
+            "shape": "{}",
+        }
+        if (data) {
+            console.log("}")
+        }
+    }
+    echo after
+}
+"#;
+    let f = file(src);
+    let s = find_script(&f.tasks[0].body).expect("no script block parsed");
+    assert_eq!(
+        s.body,
+        "const data = {\n    \"shape\": \"{}\",\n}\nif (data) {\n    console.log(\"}\")\n}\n"
+    );
+    // The statement after the block is still seen, so the block ended where it
+    // should have and not at the file's end.
+    assert_eq!(
+        render_block(&f.tasks[0].body),
+        format!("{{ {}; echo after }}", render_stmt(&f.tasks[0].body[0]))
+    );
+}
+
+#[test]
+fn a_script_body_loses_only_the_indentation_every_line_shares() {
+    let src = "task t {\n\
+               \x20   script sh - {\n\
+               \x20       if true; then\n\
+               \x20           echo deep\n\
+               \n\
+               \x20       fi\n\
+               \x20   }\n\
+               }\n";
+    let f = file(src);
+    let s = find_script(&f.tasks[0].body).expect("no script block parsed");
+    // Eight spaces come off every line; the four that make `echo deep` a body
+    // stay, and the blank line stays blank.
+    assert_eq!(s.body, "if true; then\n    echo deep\n\nfi\n");
+}
+
+#[test]
+fn a_less_indented_first_line_sets_the_common_indentation() {
+    // The prefix is what every line shares, so an outdented line is the one
+    // that decides it and the rest keep the difference.
+    let src = "task t {\n\
+               \x20   script sh - {\n\
+               \x20     echo first\n\
+               \x20       echo second\n\
+               \x20   }\n\
+               }\n";
+    let f = file(src);
+    let s = find_script(&f.tasks[0].body).expect("no script block parsed");
+    assert_eq!(s.body, "echo first\n  echo second\n");
+}
+
+#[test]
+fn script_spans_slice_back_out_of_the_source() {
+    let f = file(DEPS);
+    let s = find_script(&f.tasks[0].body).expect("no script block parsed");
+
+    let text = &DEPS[s.span.range()];
+    assert!(text.starts_with("script uv run - {"), "span is {text:?}");
+    assert!(text.ends_with('}'), "span is {text:?}");
+
+    // The body span is the source the body was made from — indentation
+    // included, since that is what is actually written there.
+    let raw = &DEPS[s.body_span.range()];
+    assert!(
+        raw.starts_with("        import tomllib"),
+        "body span is {raw:?}"
+    );
+    assert!(raw.ends_with("\"version\"])\n"), "body span is {raw:?}");
+    // It starts at the first byte of the body, which is the line after the
+    // `{`, and stops before the line the closing `}` is on.
+    assert_eq!(DEPS.as_bytes()[s.body_span.start - 1], b'\n');
+    assert_eq!(&DEPS[s.body_span.end..s.body_span.end + 5], "    }");
+}
+
+#[test]
+fn an_empty_script_block_is_an_empty_body() {
+    let f = file("task t {\n    script sh - {\n    }\n}\n");
+    let s = find_script(&f.tasks[0].body).expect("no script block parsed");
+    assert_eq!(s.body, "");
+    assert_eq!(s.body_span.start, s.body_span.end);
+}
+
+#[test]
+fn script_blocks_nest_inside_if_and_for() {
+    let src = r#"task t {
+    if $OS == macos {
+        script python3 - {
+            print({"os": "macos"})
+        }
+    }
+    for f in a b {
+        script sh - {
+            echo one }
+            echo two
+        }
+    }
+}
+"#;
+    let f = file(src);
+    let block = &f.tasks[0].body;
+    let Stmt::If(i) = &block[0] else {
+        panic!("expected an if, got {:?}", block[0]);
+    };
+    assert_eq!(
+        render_stmt(&i.then[0]),
+        "script python3 - \"print({\\\"os\\\": \\\"macos\\\"})\\n\""
+    );
+    let Stmt::For(loop_) = &block[1] else {
+        panic!("expected a for, got {:?}", block[1]);
+    };
+    // A trailing `}` on a body line is body text, not the end of the block:
+    // only a `}` at the keyword's own indentation closes it.
+    assert_eq!(
+        render_stmt(&loop_.body[0]),
+        "script sh - \"echo one }\\necho two\\n\""
+    );
+}
+
+// --- script blocks compose ----------------------------------------------
+
+#[test]
+fn a_script_block_is_captured_by_a_dollar_paren() {
+    // The reason the block is a chain element and not a statement: computing a
+    // value in another language and using it here.
+    let src = r#"task version {
+    version=$(script uv run - {
+        import tomllib, pathlib
+        print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])
+    })
+    echo $version
+}
+"#;
+    let f = file(src);
+    let block = &f.tasks[0].body;
+    let Stmt::Assign(a) = &block[0] else {
+        panic!("expected an assignment, got {:?}", block[0]);
+    };
+    // The whole value is one capture, and the capture is the block itself.
+    let [part] = a.value.parts.as_slice() else {
+        panic!("expected one part, got {:?}", a.value.parts);
+    };
+    let PartKind::Capture(chain) = &part.kind else {
+        panic!("expected a capture, got {:?}", part.kind);
+    };
+    let Chain::Script(s) = chain.as_ref() else {
+        panic!("expected a script block, got {chain:?}");
+    };
+    let command: Vec<String> = s.command.iter().map(render_word).collect();
+    assert_eq!(command, ["uv", "run", "-"]);
+    assert_eq!(
+        s.body,
+        "import tomllib, pathlib\n\
+         print(tomllib.loads(pathlib.Path(\"Cargo.toml\").read_text())\
+         [\"workspace\"][\"package\"][\"version\"])\n"
+    );
+    // The block ended where the `})` is, so the statement after it is seen.
+    assert_eq!(render_stmt(&block[1]), "echo $version");
+}
+
+#[test]
+fn a_captured_block_ends_at_the_indentation_of_the_line_it_opened_on() {
+    // The `script` does not start its line here, so the rule is the line's
+    // indentation, not the keyword's column: the block closes at the `})`
+    // written where `version=` was, which is what an author would write and
+    // an editor would indent to.
+    let src = "task t {\n\
+               \x20   version=$(script sh - {\n\
+               \x20       echo 1\n\
+               \x20   })\n\
+               \x20   echo $version\n\
+               }\n";
+    let f = file(src);
+    let s = find_script(&f.tasks[0].body).expect("no script block parsed");
+    assert_eq!(s.body, "echo 1\n");
+    assert_eq!(render_stmt(&f.tasks[0].body[1]), "echo $version");
+}
+
+#[test]
+fn a_captured_block_closes_at_a_line_starting_with_the_paren() {
+    // A global at column zero: the line the `script` sits on has no
+    // indentation, so the `})` is written at the start of a line.
+    let src = "version=$(script uv run - {\n\
+               \x20   print(1)\n\
+               })\n\
+               task t {\n\
+               \x20   echo $version\n\
+               }\n";
+    let f = file(src);
+    let s = script_in_word(&f.globals[0].value).expect("no script block parsed");
+    assert_eq!(s.body, "print(1)\n");
+    // Everything after the capture still parses as itself.
+    assert_eq!(f.globals[0].name, "version");
+    assert_eq!(f.tasks[0].name, "t");
+}
+
+#[test]
+fn a_script_block_takes_either_side_of_a_pipe() {
+    let src = "task t {\n\
+               \x20   script node - {\n\
+               \x20       console.log(\"hi\")\n\
+               \x20   } | wc -l\n\
+               \x20   cat in.txt | script sh - {\n\
+               \x20       tr a-z A-Z\n\
+               \x20   }\n\
+               }\n";
+    let block = &file(src).tasks[0].body;
+    assert_eq!(
+        render_stmt(&block[0]),
+        "(script node - \"console.log(\\\"hi\\\")\\n\" | wc -l)"
+    );
+    assert_eq!(
+        render_stmt(&block[1]),
+        "(cat in.txt | script sh - \"tr a-z A-Z\\n\")"
+    );
+}
+
+#[test]
+fn a_script_block_takes_a_redirect() {
+    let src = "task t {\n\
+               \x20   script node - {\n\
+               \x20       console.log(\"hi\")\n\
+               \x20   } > out.txt 2> err.txt\n\
+               }\n";
+    let block = &file(src).tasks[0].body;
+    assert_eq!(
+        render_stmt(&block[0]),
+        "script node - \"console.log(\\\"hi\\\")\\n\" > out.txt 2> err.txt"
+    );
+    // The block's own span still stops at its closing brace: the redirect is
+    // written after the block, not part of it.
+    let s = find_script(block).expect("no script block parsed");
+    assert!(src[s.span.range()].ends_with('}'), "span is {:?}", s.span);
+}
+
+#[test]
+fn a_script_block_joins_with_and_and_or() {
+    let src = "task t {\n\
+               \x20   script uv run - {\n\
+               \x20       check()\n\
+               \x20   } && echo ok || echo failed\n\
+               }\n";
+    let block = &file(src).tasks[0].body;
+    assert_eq!(
+        render_stmt(&block[0]),
+        "((script uv run - \"check()\\n\" && echo ok) || echo failed)"
+    );
+}
+
+#[test]
+fn a_script_block_runs_under_try() {
+    let src = "task t {\n\
+               \x20   try script sh - {\n\
+               \x20       exit 1\n\
+               \x20   }\n\
+               }\n";
+    let block = &file(src).tasks[0].body;
+    assert_eq!(render_stmt(&block[0]), "try script sh - \"exit 1\\n\"");
+}
+
+#[test]
+fn a_script_block_is_a_condition() {
+    // A block exits like anything else, so it reads as a condition. The `}`
+    // that lines up with the `if` closes the block; the `{` after it opens the
+    // branch, as it would after any other command.
+    let src = "task t {\n\
+               \x20   if script sh - {\n\
+               \x20       test -f x\n\
+               \x20   } {\n\
+               \x20       echo yes\n\
+               \x20   }\n\
+               }\n";
+    let block = &file(src).tasks[0].body;
+    assert_eq!(
+        render_stmt(&block[0]),
+        "if script sh - \"test -f x\\n\" { echo yes }"
+    );
+}
+
+#[test]
+fn error_unterminated_script_block_inside_a_capture() {
+    // The `})` is at column zero and the `script` sits on a line indented by
+    // four, so nothing closes the block. The message names the line the block
+    // opened on — the line in the file, not the capture's first line, which is
+    // all a fragment could have offered.
+    let message = error("task t {\n    v=$(script sh - {\n        echo hi\n})\n}\n");
+    assert!(
+        message.contains("unterminated script block, opened at line 2"),
+        "message was: {message}"
+    );
+    // Column 5 is where the line's indentation ends, which is where the
+    // closing `}` had to be written.
+    assert!(message.contains("column 5"), "message was: {message}");
+}
+
+#[test]
+fn error_unterminated_script_block() {
+    // The task's `}` is at column 0 and the `script` is indented, so nothing
+    // closes the block — and the message names the line it opened on rather
+    // than complaining about the end of the file.
+    let message = error("task t {\n    script sh - {\n        echo hi\n}\n");
+    assert!(
+        message.contains("unterminated script block, opened at line 2"),
+        "message was: {message}"
+    );
+    assert!(message.contains("column 5"), "message was: {message}");
+}
+
+#[test]
+fn error_script_without_a_command() {
+    // Nothing to feed the block to. The braces stay ordinary here, so the
+    // message is about the missing command and not about the body.
+    let message = error("task t {\n    script {\n    }\n}\n");
+    assert!(
+        message.contains("`script` needs the command"),
+        "message was: {message}"
+    );
+    assert!(
+        message.contains("script python3 -"),
+        "message was: {message}"
+    );
+}
+
+#[test]
+fn error_script_body_must_start_on_its_own_line() {
+    let message = error("task t {\n    script sh - { echo hi }\n}\n");
+    assert!(
+        message.contains("starts on the line after `{`"),
+        "message was: {message}"
+    );
+}
+
+#[test]
+fn error_script_at_the_top_level() {
+    let message = error("script sh - {\n    echo hi\n}\n");
+    assert!(
+        message.contains("only valid inside a task"),
         "message was: {message}"
     );
 }
