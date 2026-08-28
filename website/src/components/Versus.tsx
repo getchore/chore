@@ -9,9 +9,7 @@ const ROWS: Row[] = [
   { label: 'download · extract · archive · sha256', chore: 'Builtins', just: 'Shell out to tools', edge: 'chore' },
   { label: 'Portability lint', chore: 'chore check', just: 'No equivalent', edge: 'chore' },
   { label: 'Flags and validation per task', chore: 'Positional arguments', just: 'Flags, patterns, help', edge: 'just' },
-  { label: 'Parallel and cached recipes', chore: 'Not yet', just: 'Both, caching unstable', edge: 'just' },
   { label: 'Python or Node inline', chore: 'Call them as commands', just: 'Inline with a shebang', edge: 'just' },
-  { label: 'Ecosystem', chore: 'New', just: 'Years of use, editors, completions', edge: 'just' },
 ]
 
 function Cell({ text, won }: { text: string; won: boolean }) {
@@ -111,7 +109,7 @@ export function Versus() {
           <Heading>just is the one to compare against.</Heading>
         </div>
         <p className={css({ fontSize: '14.5px', color: 'fg.faint', maxW: '300px', lineHeight: '1.55' })}>
-          It is a good tool and most of this table goes its way. One row is the reason chore exists.
+          It is a good tool, and where it wins it wins on breadth. One row is the reason chore exists.
         </p>
       </div>
 
