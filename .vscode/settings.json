@@ -1,0 +1,13 @@
+{
+  // A chorefile has no extension, so VS Code shows it as plain text. Shell is
+  // the closest built-in language: comments, strings, $vars, $(...), if/else
+  // and for all highlight correctly, and `#` becomes the comment toggle.
+  //
+  // It is an approximation. `task name { }` and `include x as y` are not shell,
+  // so a ShellCheck or Bash IDE extension will flag them. Remove this if you
+  // run one of those.
+  "files.associations": {
+    "**/chorefile": "shellscript",
+    "**/*.chore": "shellscript"
+  }
+}
