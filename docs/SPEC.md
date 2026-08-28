@@ -14,9 +14,11 @@ chore help [builtin]                # syntax and builtins, or one builtin
 chore check                         # lint without running
 chore spec                          # full reference as JSON, for agents
 chore completions [shell] [--write] # tab completion for task names
+chore init                          # write a starter chorefile here
 ```
 
-`list`, `help`, `check`, `spec` and `completions` are reserved task names.
+`list`, `help`, `check`, `spec`, `completions` and `init` are reserved task
+names.
 `completions` joined that list after the others, so a chorefile that already
 had a task of that name is now reported by `chore check`, and the subcommand
 is what `chore completions` runs.
@@ -30,6 +32,17 @@ One task per line, `name<TAB>description`, in the same order as `chore list`.
 It is the format a completion script reads: no padding to strip, no JSON, and
 so no dependency on `jq`. A task with no comment above it prints its name, the
 tab, and nothing after it, so every line has the same two fields.
+
+### init
+
+```
+chore init
+```
+
+Writes a starter `chorefile` in the working directory and prints what it
+wrote. If one is already there it refuses, says so, and exits 2: `init` never
+overwrites. The starter uses only `echo`, so `chore check` on a fresh project
+reports nothing.
 
 ### completions
 

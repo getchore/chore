@@ -8,6 +8,7 @@ const ROWS: Row[] = [
   { label: 'Same behaviour everywhere', chore: 'By design', just: 'Depends on the shell', edge: 'chore' },
   { label: 'download · extract · archive · sha256', chore: 'Builtins', just: 'Shell out to tools', edge: 'chore' },
   { label: 'Portability lint', chore: 'chore check', just: 'No equivalent', edge: 'chore' },
+  { label: 'Skip work that is up to date', chore: 'changed, stable', just: 'Cached recipes, unstable', edge: 'chore' },
   { label: 'Flags and validation per task', chore: 'Positional arguments', just: 'Flags, patterns, help', edge: 'just' },
   { label: 'Python or Node inline', chore: 'Call them as commands', just: 'Inline with a shebang', edge: 'just' },
 ]

@@ -1,5 +1,5 @@
 {
-  "version": "1.3.0",
+  "version": "1.4.0",
   "builtins": [
     {
       "name": "download",
@@ -152,6 +152,14 @@
       "flags": []
     },
     {
+      "name": "changed",
+      "usage": "changed <path...>",
+      "summary": "test whether inputs changed since the last run",
+      "description": "Exits 0 when any path differs from the last recorded run and 1 when every one of them is unchanged, so `if changed src Cargo.toml { }` skips work that is already done. A directory is hashed recursively, contents and filenames both, so a rename counts; a missing path counts as changed and is recorded as missing. Exit 0 records the new state and exit 1 records nothing. The record lives in $ROOT/.chore/state, keyed on the calling task and the exact argument list, so two tasks watching the same paths do not clobber each other. --force reports changed without consulting the state; --dry reads the state but never writes it, so a preview cannot make the next real run skip work it never did.",
+      "effects": true,
+      "flags": []
+    },
+    {
       "name": "echo",
       "usage": "echo <text...>",
       "summary": "print its arguments",
@@ -182,6 +190,21 @@
       "description": "Fractional seconds are allowed. Skipped under --dry, which is meant to be instant.",
       "effects": true,
       "flags": []
+    },
+    {
+      "name": "parallel",
+      "usage": "parallel [--fail-fast] <task>...",
+      "summary": "run tasks concurrently and wait for them",
+      "description": "The arguments are task names, each run on its own thread. Run-once is kept across them: a task two siblings both call runs once, and the second waits for the first and reuses its result. Each task's output is collected into a block of its own and printed when everything has finished, in the order the tasks were named, so nothing interleaves. By default every task runs to the end and all the failures are reported; the call then fails with the first failing task's exit code. `exit` inside a task still ends the whole run, once the siblings have finished. Under --dry the tasks are previewed one after another rather than run concurrently.",
+      "effects": true,
+      "flags": [
+        {
+          "name": "--fail-fast",
+          "argument": "",
+          "default": "off",
+          "meaning": "stop as soon as a task fails; the siblings already running are not killed, each stops before its next statement, and a task stopped this way is not recorded as having run"
+        }
+      ]
     }
   ],
   "variables": [
@@ -443,7 +466,8 @@
     "help",
     "check",
     "spec",
-    "completions"
+    "completions",
+    "init"
   ],
   "namespace_separator": "::"
 }
