@@ -346,6 +346,19 @@ be instant.",
         effects: true,
         flags: NO_FLAGS,
     },
+    Builtin {
+        name: "parallel",
+        usage: "parallel [--fail-fast] <task>...",
+        summary: "run tasks concurrently and wait for them",
+        description: "The arguments are task names, each run on its own thread. Run-once is kept across them: a task two siblings both call runs once, and the second waits for the first and reuses its result. Each task's output is collected into a block of its own and printed when everything has finished, in the order the tasks were named, so nothing interleaves. By default every task runs to the end and all the failures are reported; the call then fails with the first failing task's exit code. `exit` inside a task still ends the whole run, once the siblings have finished. Under --dry the tasks are previewed one after another rather than run concurrently.",
+        effects: true,
+        flags: &[Flag {
+            name: "--fail-fast",
+            argument: "",
+            default: "off",
+            meaning: "stop as soon as a task fails; the siblings already running are not killed, each stops before its next statement, and a task stopped this way is not recorded as having run",
+        }],
+    },
 ];
 
 /// Every builtin variable, in `vars::BUILTIN_NAMES` order.

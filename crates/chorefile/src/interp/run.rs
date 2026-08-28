@@ -18,6 +18,7 @@ use crate::error::{Error, Result};
 use crate::exec::{Builtin, Ctx, Output};
 use crate::{builtins, vars};
 
+use super::memo::Claimed;
 use super::{Call, Called, Dest, Flags, Flow, Frame, Interpreter, MAX_DEPTH, Mode, Repeat};
 
 impl Interpreter<'_> {
@@ -99,6 +100,15 @@ impl Interpreter<'_> {
         if !cmd.force_path {
             if name == "cd" {
                 return self.cd(&argv);
+            }
+            // Like `cd`, and unlike every other builtin: its arguments are
+            // task names and it has to call them, which needs the
+            // interpreter itself rather than a `Ctx`. So it is resolved here
+            // instead of through the table. It is still reserved in
+            // `builtins::NAMES`, so `check` stops a task from taking the
+            // name.
+            if name == "parallel" {
+                return self.parallel(&argv, dest, stderr);
             }
             if self.task(&name).is_some() {
                 return self.run_task_command(&name, &argv[1..], dest, stderr);
@@ -207,7 +217,10 @@ impl Interpreter<'_> {
         let force = self.repeat == Repeat::Always;
         // Only a streamed command writes to the terminal; a capture or a `>`
         // hands the builtin a buffer, and progress redraws must stop there.
-        let interactive = matches!(dest, Dest::Stream) && io::stdout().is_terminal();
+        // A parallel child streams into a buffer its parent prints later, so
+        // there is no terminal on the other end of it either.
+        let interactive =
+            matches!(dest, Dest::Stream) && !self.captive && io::stdout().is_terminal();
         let mut sink = Vec::new();
         let mut diag = Vec::new();
 
@@ -323,18 +336,29 @@ impl Interpreter<'_> {
         let mut command = process::Command::new(vars::to_native(&argv[0]));
         command.args(&argv[1..]).current_dir(self.cwd());
 
-        command.stdin(match stdin {
-            Some(_) => Stdio::piped(),
-            None => Stdio::inherit(),
+        command.stdin(match (stdin, self.captive) {
+            (Some(_), _) => Stdio::piped(),
+            // A parallel sibling has no console: several of them reading the
+            // terminal at once would race for the same keystrokes, and a
+            // prompt nobody can see is worse than an immediate EOF.
+            (None, true) => Stdio::null(),
+            (None, false) => Stdio::inherit(),
         });
+        // A parallel child's streamed output belongs in its own buffer, in
+        // one block, rather than on the terminal interleaved with its
+        // siblings'. Piping it here is what makes that true of a program on
+        // `PATH` as well as of a builtin.
+        let streamed = matches!(dest, Dest::Stream) && self.captive;
         let capture = matches!(dest, Dest::Capture);
         match &dest {
+            Dest::Stream if streamed => command.stdout(Stdio::piped()),
             Dest::Stream => command.stdout(Stdio::inherit()),
             Dest::Capture => command.stdout(Stdio::piped()),
             Dest::File { path, append } => command.stdout(open_file(path, *append)?),
         };
         match &stderr {
             Some(path) => command.stderr(open_file(path, false)?),
+            None if streamed => command.stderr(Stdio::piped()),
             None => command.stderr(Stdio::inherit()),
         };
 
@@ -367,13 +391,22 @@ impl Interpreter<'_> {
         drop(child.stdin.take());
 
         let mut out = Output::default();
-        if capture {
+        if capture || streamed {
             let finished = child.wait_with_output()?;
             out.code = finished.status.code().unwrap_or(1);
             out.stdout = finished.stdout;
             out.stderr = finished.stderr;
         } else {
             out.code = child.wait()?.code().unwrap_or(1);
+        }
+        if streamed {
+            // The command was streaming: its bytes are the run's output, not
+            // a value, so they go where the interpreter's output goes and
+            // must not reach `&&` or a `$(...)` further out.
+            self.out.write_all(&out.stdout)?;
+            self.err.write_all(&out.stderr)?;
+            out.stdout.clear();
+            out.stderr.clear();
         }
         Ok(out)
     }
@@ -458,6 +491,11 @@ impl Interpreter<'_> {
                 out.stdout.clear();
             }
         }
+        // Released only now, after `remember` has had its chance to record
+        // what the task printed: a parallel sibling blocked on this same task
+        // then wakes to the value rather than to a bare "it ran", and reruns
+        // nothing.
+        drop(call.claim);
         Ok(out)
     }
 
@@ -465,8 +503,7 @@ impl Interpreter<'_> {
     /// keys the run itself.
     fn remember(&mut self, name: &str, args: &[String], stdout: &[u8]) {
         if self.repeat == Repeat::Once {
-            self.ran
-                .insert((name.to_string(), args.to_vec()), Some(stdout.to_vec()));
+            self.memo.record(&(name.to_string(), args.to_vec()), stdout);
         }
     }
 
@@ -538,35 +575,40 @@ impl Interpreter<'_> {
         // is about to discard, so a `$( )` default is paid for once per call
         // rather than once per run; that is a cost, where running the body
         // twice would be a wrong answer.
+        //
+        // The record is shared with every `parallel` sibling, and the claim
+        // is taken *before* the body runs rather than after: two siblings
+        // that ask for the same task at the same instant must not both run
+        // it, so the second finds the first's claim and waits for it. See
+        // [`memo`](super::memo).
         let key = (name.to_string(), bound.clone());
         // Skipping the call still has to unwind the frame that was pushed
         // to bind the defaults.
         let mut skipped = None;
+        let mut claim = None;
         if self.repeat == Repeat::Once {
-            match self.ran.get(&key) {
+            match self.memo.claim(&key, self.ctx, wants_value) {
+                Claimed::Run(held) => claim = Some(held),
                 // Run-once exists to keep a task's *effects* from happening
                 // twice. A capture asks for a value, and the second asking is
                 // not a second request for the work: replay what the first
                 // call printed. Suppressing it and answering `Output::ok()` —
                 // an empty, successful output — is what used to blank
                 // `platform=$(platform-id)` on its second use, silently.
-                Some(Some(recorded)) if wants_value => {
+                Claimed::Replay(recorded) => {
                     skipped = Some(Called::Done(Output {
-                        stdout: recorded.clone(),
+                        stdout: recorded,
                         ..Output::ok()
                     }));
                 }
                 // The work is done and nobody wants a value: skip it.
-                Some(_) if !wants_value => skipped = Some(Called::Done(Output::ok())),
+                Claimed::Skip => skipped = Some(Called::Done(Output::ok())),
                 // Ran, but streamed to the terminal, so there is no value to
                 // replay. Running it again is the only honest way to answer,
                 // and it beats handing back an empty string that would be
                 // interpolated into a path. A task used as a function is
                 // called in `$(...)` every time and never reaches this.
-                Some(_) => {}
-                None => {
-                    self.ran.insert(key, None);
-                }
+                Claimed::Rerun => {}
             }
         }
         if let Some(called) = skipped {
@@ -574,11 +616,20 @@ impl Interpreter<'_> {
             return Ok(Call {
                 called,
                 args: bound,
+                claim: None,
             });
         }
 
         let flow = self.block(&task.body);
         self.frames.pop();
+        // A task `--fail-fast` cut short between statements has not run, so
+        // the key goes back: a later call must do the work rather than
+        // believe it is already done.
+        if self.aborted {
+            if let Some(claim) = &mut claim {
+                claim.abandon();
+            }
+        }
 
         let called = match flow? {
             Flow::Normal => Called::Done(Output::ok()),
@@ -594,6 +645,7 @@ impl Interpreter<'_> {
         Ok(Call {
             called,
             args: bound,
+            claim,
         })
     }
 
@@ -692,7 +744,7 @@ fn open_file(path: &Path, append: bool) -> Result<fs::File> {
     Ok(file)
 }
 
-fn write_file(path: &Path, bytes: &[u8], append: bool) -> Result<()> {
+pub(super) fn write_file(path: &Path, bytes: &[u8], append: bool) -> Result<()> {
     let mut file = open_file(path, append)?;
     file.write_all(bytes)?;
     Ok(())
@@ -744,7 +796,23 @@ fn normalize(path: &Path) -> PathBuf {
 }
 
 /// A writer that hands its bytes back, for capturing a task's own output.
-struct Shared(Rc<RefCell<Vec<u8>>>);
+pub(super) struct Shared(Rc<RefCell<Vec<u8>>>);
+
+impl Shared {
+    pub(super) fn new() -> Self {
+        Self(Rc::new(RefCell::new(Vec::new())))
+    }
+
+    /// A second handle on the same bytes, to hand the interpreter as its
+    /// `out` or `err` while this one stays behind to read them.
+    pub(super) fn writer(&self) -> Box<dyn Write> {
+        Box::new(Self(Rc::clone(&self.0)))
+    }
+
+    pub(super) fn take(&self) -> Vec<u8> {
+        std::mem::take(&mut self.0.borrow_mut())
+    }
+}
 
 impl Write for Shared {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {

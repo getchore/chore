@@ -820,6 +820,38 @@ impl<'a> Checker<'a> {
         let args: Vec<&str> = cmd.args.iter().filter_map(literal).collect();
         self.portability(name, &args, cmd);
         self.resolution(name, cmd, scope);
+        if !cmd.force_path && name == "parallel" {
+            self.parallel_tasks(&args, cmd);
+        }
+    }
+
+    /// `parallel`'s arguments are task names, not paths, so a typo in one is
+    /// a mistake `check` can see: the run would otherwise get as far as the
+    /// call before saying so. A name built from a variable is skipped, like
+    /// every other name only knowable at run time.
+    fn parallel_tasks(&mut self, args: &[&str], cmd: &Command) {
+        for arg in args {
+            if arg.starts_with("--") || self.is_task(arg) {
+                continue;
+            }
+            if let Some((ns, task)) = arg.split_once(NAMESPACE_SEP) {
+                // The same reading a call gets: an unfollowed include's
+                // namespace is taken on trust rather than called wrong.
+                self.namespaced(arg, ns, task, cmd);
+                continue;
+            }
+            let mut d = Diagnostic::error(
+                format!("`parallel {arg}`: `{arg}` is not a task"),
+                self.at(cmd.span),
+            );
+            d = match self.suggestion(arg) {
+                Some(similar) => d.with_help(format!("did you mean `{similar}`?")),
+                None => d.with_help(
+                    "`parallel` takes the names of tasks in this file, not commands".to_string(),
+                ),
+            };
+            self.push(d);
+        }
     }
 
     /// The check that gives `chore` its point: a command that works on the

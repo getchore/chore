@@ -5,7 +5,7 @@
 /// `check` reports it if one tries.
 pub const NAMES: &[&str] = &[
     "download", "extract", "archive", "copy", "move", "remove", "mkdir", "chmod", "which", "find",
-    "read", "write", "sha256", "exists", "changed", "echo", "env", "fail", "sleep",
+    "read", "write", "sha256", "exists", "changed", "echo", "env", "fail", "sleep", "parallel",
 ];
 
 /// Non-portable commands `check` flags, with the builtin to use instead.

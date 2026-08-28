@@ -1664,3 +1664,37 @@ fn a_duplicate_across_a_flat_merge_is_resolves_error() {
     assert_eq!(found.len(), 1, "{found:#?}");
     assert!(found[0].message.contains("build"), "{found:#?}");
 }
+
+// --- 12. `parallel` names tasks --------------------------------------------
+
+#[test]
+fn parallel_names_that_are_not_tasks_are_errors() {
+    let found = errors(
+        "task ci {\n    parallel lint tests --fail-fast\n}\ntask lint {\n    echo hi\n}\n\
+task test {\n    echo hi\n}\n",
+    );
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0].message.contains("`tests` is not a task"),
+        "{found:#?}"
+    );
+    assert_eq!(found[0].help.as_deref(), Some("did you mean `test`?"));
+}
+
+#[test]
+fn parallel_over_real_tasks_is_quiet() {
+    let found = run(
+        "task ci {\n    parallel lint test --fail-fast\n}\ntask lint {\n    echo hi\n}\n\
+task test {\n    echo hi\n}\n",
+    );
+    assert!(found.is_empty(), "{found:#?}");
+}
+
+#[test]
+fn a_task_may_not_be_called_parallel() {
+    let found = errors("task parallel {\n    echo hi\n}\n");
+    assert!(
+        found.iter().any(|d| d.message.contains("parallel")),
+        "{found:#?}"
+    );
+}

@@ -239,6 +239,8 @@ echo     <text...>
 env      <NAME> [value]       get or set
 fail     <msg>
 sleep    <seconds>
+parallel [--fail-fast] <task>...
+                              run tasks at once; see below
 ```
 
 Everything else resolves on `PATH`.
@@ -360,6 +362,70 @@ then builds the wrong thing, where an empty one fails somewhere you can see it.
 
 **$HOME** is empty when neither `HOME` nor `USERPROFILE` is set.
 
+### parallel
+
+```sh
+task ci {
+    parallel lint test installers
+}
+```
+
+Runs the named **tasks** concurrently, one thread each, waits for all of them,
+and fails if any of them failed. Its arguments are task names, never commands:
+`parallel cargo test` is an error, and `chore check` says so before the run
+gets that far.
+
+**Run once still means once.** The run-once record is shared by every sibling,
+so a task two of them call runs one time and the second waits for the first
+and gets its result. `parallel build test` where both call `deps` runs `deps`
+once, even when the two calls land in the same instant: a task is claimed
+before its body starts, not after it ends, so the second caller finds the
+claim and blocks on it rather than starting a second copy. A capture works the
+same way across siblings: the value `$(platform-id)` recorded in one is
+replayed in the other. `--force` switches all of this off, as it does
+everywhere else.
+
+**Output does not interleave.** Each task's output is collected into a block
+of its own and the blocks are printed once everything has finished, in the
+order the tasks were named, not the order they finished. `parallel lint test`
+prints exactly what `lint` then `test` would have printed: concurrency changes
+the timing, not the transcript. A task's own stdout and stderr keep separate
+blocks, so the interleaving between those two streams is the one thing that is
+not preserved. A shared task's output appears in the block of whichever
+sibling actually ran it, since that is where the work happened; the sibling
+that waited shows the call and not the work. Nothing appears while the tasks
+are running, which is the price of never having to read two builds woven
+together line by line.
+
+**Every failure is reported.** By default each task runs to its end and all of
+the failures are named on stderr, so one run tells you about all of them; the
+call then fails with the first failing task's exit code, first in the order
+the tasks were written, so the code does not depend on which thread lost.
+`try parallel ...` swallows it like any other nonzero command.
+
+**--fail-fast** stops as soon as a task fails. The siblings already running are
+not killed: a thread cannot be interrupted safely, and killing one in the
+middle of a `download` or an `extract` would leave a half-written tree behind.
+Each sibling instead stops **before its next statement**, so a command already
+running finishes and nothing after it starts. A task stopped this way is
+reported as stopped rather than failed, and it is *not* recorded as having
+run, so a later call to it does the work rather than believing it is done.
+
+**exit** in a task means what it means anywhere else: it ends the whole run,
+not just that task. It cannot unstart the siblings, so it takes effect once
+they have all finished and their output has been printed. `return` ends only
+the task that wrote it, and its code becomes that task's status.
+
+**cd** and locals are per-call, as ever. A task starts in the directory the
+`parallel` was called from, exactly as it would have if it had been called
+directly, and its own `cd` dies with it. `$ROOT`, `$NOW`, the globals and the
+environment are facts about the invocation and are shared.
+
+**--dry** previews the tasks one after another instead of running them
+concurrently. A preview describes the work, and the same work is described
+either way; running it concurrently would only add a preview whose captures
+and conditions raced each other.
+
 ## Runtime
 
 - Echo each command before running it.
@@ -378,6 +444,8 @@ then builds the wrong thing, where an empty one fails somewhere you can see it.
   value, so capturing it afterwards runs it again. An empty string would
   otherwise be interpolated into a path.
 - `cd` changes the interpreter's directory, not the process's.
+- `parallel` runs tasks concurrently and shares that record with them, so a
+  task two siblings call still runs once.
 
 ### `--dry`
 

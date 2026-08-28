@@ -76,11 +76,15 @@
 //! succeed.
 
 mod expand;
+mod memo;
+mod parallel;
 mod run;
 
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ast::{Block, CompareOp, Cond, File, Stmt, Task, Word};
@@ -88,6 +92,8 @@ use crate::error::{Error, Result};
 use crate::exec::{Builtin, Output};
 use crate::resolve::Merged;
 use crate::{builtins, vars};
+
+use memo::{Claim, CtxId, Memo};
 
 /// How much of a run actually happens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +198,11 @@ enum Called {
 struct Call {
     called: Called,
     args: Vec<String>,
+    /// The run-once claim on this call's key, held until the caller has had
+    /// its chance to record what the task printed. Dropping it is what
+    /// releases any sibling waiting on the same task, so it must outlive
+    /// `remember` and nothing else: see `run_task_command`.
+    claim: Option<Claim>,
 }
 
 /// What a block did when it stopped.
@@ -213,6 +224,12 @@ enum Flow {
     Return(i32),
 }
 
+/// An interpreter's output pair, set aside while something else borrows it.
+struct Streams {
+    out: Box<dyn Write>,
+    err: Box<dyn Write>,
+}
+
 /// A parsed chorefile, plus everything a run needs to keep track of.
 pub struct Interpreter<'a> {
     file: &'a File,
@@ -221,11 +238,19 @@ pub struct Interpreter<'a> {
     repeat: Repeat,
     globals: HashMap<String, String>,
     /// Run-once records, keyed on `(task, bound args)` — the arguments the
-    /// task ran with, defaults filled in, not the ones the caller wrote. The value is the task's
-    /// captured stdout the first time something asked for it, or `None` while
-    /// nothing has: replaying it is what lets a task be used as a function
-    /// without running its body twice. See `call_task`.
-    ran: HashMap<(String, Vec<String>), Option<Vec<u8>>>,
+    /// task ran with, defaults filled in, not the ones the caller wrote. The
+    /// value is the task's captured stdout the first time something asked for
+    /// it, or `None` while nothing has: replaying it is what lets a task be
+    /// used as a function without running its body twice. See `call_task`.
+    ///
+    /// Shared rather than owned, because `parallel` runs siblings on their
+    /// own interpreters and the promise is one run per *invocation*: a task
+    /// two siblings both call runs once, and the second waits for the first.
+    /// See [`memo`].
+    memo: Arc<Memo>,
+    /// Which interpreter this is, for the memo's wait graph. The run owns one
+    /// context; every parallel child gets its own.
+    ctx: CtxId,
     frames: Vec<Frame>,
     globals_done: bool,
     /// Set when a called task ran `exit`, so the caller unwinds too.
@@ -240,6 +265,16 @@ pub struct Interpreter<'a> {
     /// One timestamp per run, so two lines of the same recipe cannot disagree
     /// about what `$NOW` is.
     now: String,
+    /// True on a `parallel` child: its output belongs in a buffer the parent
+    /// prints as one block, so even a streamed program on `PATH` is piped
+    /// here instead of inheriting the terminal.
+    captive: bool,
+    /// Set by `parallel --fail-fast` when a sibling has failed. Every
+    /// interpreter under that call watches it between statements.
+    abort: Option<Arc<AtomicBool>>,
+    /// True once this interpreter stopped for the flag above, so the parent
+    /// can tell a task that was cut short from one that failed on its own.
+    aborted: bool,
     builtins: BuiltinTable,
     out: Box<dyn Write>,
     /// Where builtins' diagnostics go. Held here rather than reached for as
@@ -254,6 +289,7 @@ impl<'a> Interpreter<'a> {
     /// the directory commands start in.
     pub fn new(file: &'a File, root: impl Into<PathBuf>, mode: Mode, repeat: Repeat) -> Self {
         let root = root.into();
+        let (memo, ctx) = Memo::new();
         let globals = vars::statics(&root)
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
@@ -270,13 +306,17 @@ impl<'a> Interpreter<'a> {
             mode,
             repeat,
             globals,
-            ran: HashMap::new(),
+            memo,
+            ctx,
             frames: vec![frame],
             globals_done: false,
             pending_exit: None,
             quiet: false,
             unevaluated: false,
             now: now_iso8601(),
+            captive: false,
+            abort: None,
+            aborted: false,
             builtins: builtin,
             out: Box::new(io::stdout()),
             err: Box::new(io::stderr()),
@@ -314,6 +354,21 @@ impl<'a> Interpreter<'a> {
     pub fn with_error_output(mut self, err: Box<dyn Write>) -> Self {
         self.err = err;
         self
+    }
+
+    /// Point `out` and `err` somewhere else for as long as the caller says,
+    /// handing back what was there. Used by `parallel`, which collects each
+    /// task's output into a block of its own.
+    fn swap_output(&mut self, out: Box<dyn Write>, err: Box<dyn Write>) -> Streams {
+        Streams {
+            out: std::mem::replace(&mut self.out, out),
+            err: std::mem::replace(&mut self.err, err),
+        }
+    }
+
+    fn restore_output(&mut self, streams: Streams) {
+        self.out = streams.out;
+        self.err = streams.err;
     }
 
     /// Override builtin resolution.
@@ -417,6 +472,13 @@ impl<'a> Interpreter<'a> {
     /// is why `return` inside a loop leaves the task rather than the loop.
     fn block(&mut self, block: &Block) -> Result<Flow> {
         for stmt in block {
+            // `parallel --fail-fast` stops its siblings here, between
+            // statements: a command already running is left to finish, since
+            // killing one mid `download` or mid `extract` would leave a half
+            // written tree behind, and no statement after it starts.
+            if self.stopping() {
+                return Ok(Flow::Return(0));
+            }
             match self.stmt(stmt)? {
                 Flow::Normal => {}
                 stopped => return Ok(stopped),
@@ -519,6 +581,21 @@ impl<'a> Interpreter<'a> {
         text.trim().parse().map_err(|_| Error::Run {
             message: format!("{keyword} code `{text}` is not a number"),
         })
+    }
+
+    /// Has a sibling of ours failed under `--fail-fast`? Asking latches the
+    /// answer, so the parent can tell a task that was cut short from one that
+    /// ran to the end.
+    fn stopping(&mut self) -> bool {
+        if self.aborted {
+            return true;
+        }
+        let stop = self
+            .abort
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed));
+        self.aborted = stop;
+        stop
     }
 
     /// A called task may have run `exit`; that unwinds through the caller too.
