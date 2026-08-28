@@ -5,30 +5,12 @@ use crate::error::Span;
 /// One parsed file, before includes are merged.
 #[derive(Debug, Default)]
 pub struct File {
-    /// The `require` this file states, if it states one. Kept per file rather
-    /// than folded into the merge, because an unmet requirement has to name
-    /// the file that asked for it, and a merged tree has forgotten which one
-    /// that was.
-    pub require: Option<Require>,
     /// `include` directives, in source order.
     pub includes: Vec<Include>,
     /// Top-level assignments. Evaluated once before the first task runs, and
     /// never by `list`, `help`, `check` or `spec` — those only need the tree.
     pub globals: Vec<Assign>,
     pub tasks: Vec<Task>,
-}
-
-/// `require 1.4.0`: the oldest `chore` that can run this file.
-///
-/// The version is parsed here rather than kept as text, so that the
-/// comparison is numeric per component and cannot be done any other way. See
-/// [`require`](crate::require) for what is done with it.
-#[derive(Debug)]
-pub struct Require {
-    pub version: crate::require::Version,
-    /// The whole directive, keyword included, so a diagnostic points at the
-    /// line that stated the requirement rather than at the number alone.
-    pub span: Span,
 }
 
 #[derive(Debug)]

@@ -504,16 +504,6 @@ capture read it as they read any command's. Inside a `for` it leaves the task, n
 line directly above the `task` is its description, which `chore list` prints.",
     },
     Form {
-        name: "require",
-        syntax: "require major.minor.patch",
-        example: "require 1.4.0",
-        meaning: "State the oldest `chore` that can run this file, conventionally on the \
-first line. It means \"at least this\", so there are no ranges or operators, and the version \
-is compared component by component as numbers. One per file, at the top level only. An \
-included file may state its own, and every one is checked before a task runs. An unmet \
-requirement fails a run and `chore check`, and `chore list` warns and still lists.",
-    },
-    Form {
         name: "include",
         syntax: "include path [as name]",
         example: "include libs/chorefile as libs",

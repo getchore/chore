@@ -162,11 +162,6 @@ pub fn resolve(path: &Path) -> Result<Merged> {
 
     Ok(Merged {
         file: ast::File {
-            // A `require` belongs to the file that wrote it, and the merged
-            // tree has no file to be: every requirement is checked through
-            // `parts`, where each one still knows what to name. See
-            // [`require::unmet`](crate::require::unmet).
-            require: None,
             includes: Vec::new(),
             globals: unit.globals.into_iter().map(|d| d.item).collect(),
             tasks: unit.tasks.into_iter().map(|d| d.item).collect(),

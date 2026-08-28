@@ -12,7 +12,6 @@ pub mod exec;
 pub mod interp;
 pub mod lex;
 pub mod parse;
-pub mod require;
 pub mod resolve;
 pub mod spec;
 pub mod vars;
