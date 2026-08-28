@@ -5,6 +5,7 @@ import { Hero } from '../components/Hero'
 import { Reference } from '../components/Reference'
 import { Replaces } from '../components/Replaces'
 import { Showcase } from '../components/Showcase'
+import { Versus } from '../components/Versus'
 
 export function Landing() {
   return (
@@ -12,6 +13,7 @@ export function Landing() {
       <Hero />
       <Features />
       <Replaces />
+      <Versus />
       <Showcase />
       <Dogfood />
       <Reference />
