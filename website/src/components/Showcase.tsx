@@ -38,10 +38,11 @@ task release {
   sha256 sona-$VERSION-$PLATFORM.tar.gz > checksums.txt
 }`
 
-const CLI = `$ chore list
-build      Fetch the toolchain and build the compiler
-test       Run the suite, or one file when given a name
-release    Package the release archive
+const CLI = `$ chore
+Available tasks:
+  build      Fetch the toolchain and build the compiler
+  test       Run the suite, or one file when given a name
+  release    Package the release archive
 
 # see the whole run before it touches anything
 $ chore release --dry
@@ -66,8 +67,8 @@ $ chore completions --write
 added to ~/.zshrc: source <(chore completions zsh)`
 
 const TABS = [
-  { id: 'chorefile', label: 'chorefile', source: CHOREFILE },
-  { id: 'cli', label: 'the CLI', source: CLI },
+  { id: 'chorefile', label: 'chorefile', source: CHOREFILE, lang: 'chore' as const },
+  { id: 'cli', label: 'the CLI', source: CLI, lang: 'console' as const },
 ] as const
 
 export function Showcase() {
@@ -148,7 +149,7 @@ export function Showcase() {
               className={css({ overflow: 'hidden', transition: 'max-height .35s ease' })}
               style={{ maxHeight: open ? '1400px' : '340px' }}
             >
-              <Code source={active.source} />
+              <Code source={active.source} lang={active.lang} />
             </div>
 
             {!open && (

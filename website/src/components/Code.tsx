@@ -2,13 +2,15 @@ import { Fragment, type ReactNode } from 'react'
 import { css } from 'styled-system/css'
 import { spec } from '../lib/spec'
 
-export type Lang = 'chore' | 'yaml' | 'make' | 'json' | 'cmake'
+export type Lang = 'chore' | 'yaml' | 'make' | 'json' | 'cmake' | 'console'
 
 const KEYWORDS: Record<Lang, Set<string>> = {
   chore: new Set(['task', 'if', 'else', 'for', 'in', 'try', 'exit', 'include', 'as']),
   yaml: new Set(['uses:', 'run:', 'name:', 'if:', 'shell:', 'with:', 'env:', 'steps:', 'needs:']),
   make: new Set(['ifeq', 'else', 'endif', 'ifneq']),
   json: new Set([]),
+  // console is line oriented and never consults this table
+  console: new Set([]),
   cmake: new Set([
     'if', 'else', 'endif', 'set', 'file', 'list', 'message',
     'add_custom_target', 'DOWNLOAD', 'ARCHIVE_EXTRACT', 'COMMAND',
@@ -28,11 +30,66 @@ const tone = {
   string: css({ color: { base: '#15803d', _dark: '#86efac' } }),
   operator: css({ color: 'fg.faint' }),
   plain: css({ color: 'fg.default' }),
+  // the terminal palette, matching what the binary prints since 1.3.0
+  name: css({ color: { base: '#0e7490', _dark: '#67e8f9' } }),
+  bad: css({ color: { base: '#b91c1c', _dark: '#fca5a5' } }),
+  good: css({ color: { base: '#15803d', _dark: '#86efac' } }),
+}
+
+/**
+ * A terminal transcript, coloured the way chore colours it. Line oriented
+ * rather than token oriented: what a line means here depends on where it sits,
+ * so `build` is a task name in a listing and a plain word in a command.
+ */
+function console_(line: string, key: string | number): ReactNode {
+  if (line.trimStart().startsWith('#')) return <span className={tone.comment}>{line}</span>
+
+  // `$ ` prompt, then the command, with the program itself picked out
+  if (line.startsWith('$ ')) {
+    const [program, ...rest] = line.slice(2).split(' ')
+    return (
+      <>
+        <span className={tone.operator}>$ </span>
+        <span className={tone.plain} style={{ fontWeight: 500 }}>{program}</span>
+        <span className={tone.operator}>{rest.length ? ` ${rest.join(' ')}` : ''}</span>
+      </>
+    )
+  }
+
+  // a finding: `chorefile:14  message`
+  const finding = line.match(/^(\S+:\d+)(\s+)(.*)$/)
+  if (finding) {
+    return (
+      <>
+        <span className={tone.operator}>{finding[1]}</span>
+        {finding[2]}
+        <span className={tone.bad}>{finding[3]}</span>
+      </>
+    )
+  }
+
+  // a listing row: name, gutter, description
+  const row = line.match(/^(\s*)(\S+)(\s{2,})(.*)$/)
+  if (row) {
+    return (
+      <>
+        {row[1]}
+        <span className={tone.name}>{row[2]}</span>
+        {row[3]}
+        <span className={tone.comment} style={{ fontStyle: 'normal' }}>{row[4]}</span>
+      </>
+    )
+  }
+
+  if (line.startsWith('Available tasks:')) return <span className={tone.plain} style={{ fontWeight: 600 }}>{line}</span>
+  if (line.startsWith('added to') || line.startsWith('wrote ')) return <span className={tone.good}>{line}</span>
+  return <span className={tone.operator} key={key}>{line}</span>
 }
 
 const OPERATORS = new Set(['contains', 'starts-with', 'ends-with', '&&', '||', '==', '!=', '|', '>', '>>'])
 
 function highlight(line: string, i: number, lang: Lang): ReactNode {
+  if (lang === 'console') return console_(line, i)
   const trimmed = line.trimStart()
   if (trimmed.startsWith('#')) return <span className={tone.comment}>{line}</span>
   if (trimmed.startsWith('$ ')) {
