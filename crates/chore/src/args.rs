@@ -9,6 +9,8 @@
 use chorefile::RESERVED_TASKS;
 use chorefile::interp::{Mode, Repeat};
 
+use crate::completions::Shell;
+
 /// The two flags `chore` claims for itself wherever they appear.
 const DRY: &str = "--dry";
 const FORCE: &str = "--force";
@@ -18,18 +20,31 @@ const FORCE: &str = "--force";
 pub enum Command {
     /// `chore <task> [args...]`
     Run { task: String, args: Vec<String> },
-    /// `chore list [--json]`
-    List { json: bool },
+    /// `chore list [--json|--names]`
+    List { format: ListFormat },
     /// `chore help [builtin]`
     Help { topic: Option<String> },
     /// `chore check`
     Check,
     /// `chore spec`
     Spec,
+    /// `chore completions [shell] [--write]`
+    Completions { shell: Option<Shell>, write: bool },
     /// `chore` with nothing to do: usage, plus the task list.
     Usage,
     /// `chore --version`
     Version,
+}
+
+/// How `chore list` prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListFormat {
+    /// Aligned columns, for a person.
+    Text,
+    /// One object per task, for a tool.
+    Json,
+    /// `name<TAB>description`, for a completion script.
+    Names,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -79,8 +94,8 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Usag
         });
     };
 
-    // The four subcommands shadow tasks of the same name, so `chore list` is
-    // never ambiguous — that is why they are reserved in the first place.
+    // A subcommand shadows a task of the same name, so `chore list` is never
+    // ambiguous. That is why the names are reserved in the first place.
     let command = if RESERVED_TASKS.contains(&name.as_str()) {
         let tail: Vec<String> = rest.collect();
         subcommand(&name, tail)?
@@ -111,9 +126,16 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Usag
 fn subcommand(name: &str, args: Vec<String>) -> Result<Command, UsageError> {
     match name {
         "list" => match args.len() {
-            0 => Ok(Command::List { json: false }),
-            1 if args[0] == "--json" => Ok(Command::List { json: true }),
-            _ => Err(UsageError("usage: chore list [--json]".into())),
+            0 => Ok(Command::List {
+                format: ListFormat::Text,
+            }),
+            1 if args[0] == "--json" => Ok(Command::List {
+                format: ListFormat::Json,
+            }),
+            1 if args[0] == "--names" => Ok(Command::List {
+                format: ListFormat::Names,
+            }),
+            _ => Err(UsageError("usage: chore list [--json|--names]".into())),
         },
         "help" => match args.len() {
             0 => Ok(Command::Help { topic: None }),
@@ -123,9 +145,38 @@ fn subcommand(name: &str, args: Vec<String>) -> Result<Command, UsageError> {
             _ => Err(UsageError("usage: chore help [builtin]".into())),
         },
         "check" if args.is_empty() => Ok(Command::Check),
+        "completions" => completions(args),
         "spec" if args.is_empty() => Ok(Command::Spec),
         other => Err(UsageError(format!("usage: chore {other}"))),
     }
+}
+
+/// `chore completions [bash|zsh|fish|powershell] [--write]`
+///
+/// With no shell, `$SHELL` decides and the output is advice. With a shell, the
+/// output is the script, so it can be redirected into a file.
+fn completions(args: Vec<String>) -> Result<Command, UsageError> {
+    let mut shell = None;
+    let mut write = false;
+    for arg in args {
+        match arg.as_str() {
+            "--write" => write = true,
+            name if !name.starts_with('-') => {
+                let Some(parsed) = Shell::parse(name) else {
+                    return Err(UsageError(format!(
+                        "unknown shell `{name}` (bash, zsh, fish, powershell)"
+                    )));
+                };
+                shell = Some(parsed);
+            }
+            other => {
+                return Err(UsageError(format!(
+                    "usage: chore completions [shell] [--write] (got `{other}`)"
+                )));
+            }
+        }
+    }
+    Ok(Command::Completions { shell, write })
 }
 
 #[cfg(test)]
@@ -177,7 +228,12 @@ mod tests {
 
     #[test]
     fn subcommands_shadow_tasks() {
-        assert_eq!(parse_args(&["list"]).command, Command::List { json: false });
+        assert_eq!(
+            parse_args(&["list"]).command,
+            Command::List {
+                format: ListFormat::Text
+            }
+        );
         assert_eq!(parse_args(&["spec"]).command, Command::Spec);
     }
 
@@ -185,6 +241,58 @@ mod tests {
     fn leading_flag_before_a_task_is_ours() {
         let got = parse_args(&["--dry", "build"]);
         assert_eq!(got.mode, Mode::Dry);
+    }
+
+    #[test]
+    fn list_formats() {
+        assert_eq!(
+            parse_args(&["list", "--names"]).command,
+            Command::List {
+                format: ListFormat::Names
+            }
+        );
+        assert!(parse(["list".into(), "--nope".into()]).is_err());
+    }
+
+    #[test]
+    fn completions_takes_a_shell_and_a_flag_in_either_order() {
+        let expected = Command::Completions {
+            shell: Some(Shell::Zsh),
+            write: true,
+        };
+        assert_eq!(
+            parse_args(&["completions", "zsh", "--write"]).command,
+            expected
+        );
+        assert_eq!(
+            parse_args(&["completions", "--write", "zsh"]).command,
+            expected
+        );
+    }
+
+    #[test]
+    fn bare_completions_decides_for_itself() {
+        assert_eq!(
+            parse_args(&["completions"]).command,
+            Command::Completions {
+                shell: None,
+                write: false
+            }
+        );
+    }
+
+    #[test]
+    fn an_unknown_shell_says_which_ones_exist() {
+        let err = parse(["completions".into(), "nushell".into()]).unwrap_err();
+        assert!(err.0.contains("bash, zsh, fish, powershell"), "{}", err.0);
+    }
+
+    #[test]
+    fn completions_shadows_a_task_of_that_name() {
+        assert!(matches!(
+            parse_args(&["completions"]).command,
+            Command::Completions { .. }
+        ));
     }
 
     #[test]

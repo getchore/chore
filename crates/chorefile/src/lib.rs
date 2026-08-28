@@ -32,7 +32,7 @@ pub const FILE_EXT: &str = "chore";
 pub const NAMESPACE_SEP: &str = "::";
 
 /// Subcommand names that cannot be used as task names.
-pub const RESERVED_TASKS: &[&str] = &["list", "help", "check", "spec"];
+pub const RESERVED_TASKS: &[&str] = &["list", "help", "check", "spec", "completions"];
 
 /// Find the chorefile governing `from`: the nearest one at `from` or above it.
 ///

@@ -6,6 +6,7 @@
 //! `chorefile::spec`, so the reference lives in exactly one place.
 
 mod args;
+mod completions;
 mod help;
 mod lint;
 mod list;
@@ -18,7 +19,7 @@ use chorefile::interp::{Interpreter, Mode, Repeat};
 use chorefile::resolve::{Merged, Sources};
 use chorefile::{Error, parse, resolve};
 
-use args::{Command, Invocation, UsageError};
+use args::{Command, Invocation, ListFormat, UsageError};
 
 /// Exit codes, as promised in docs/SPEC.md.
 const OK: u8 = 0;
@@ -31,6 +32,7 @@ usage: chore <task> [args...] [--dry] [--force]
        chore help [builtin]       syntax and builtins, or one builtin
        chore check                lint without running
        chore spec                 full reference as JSON, for agents
+       chore completions [shell]  tab completion for task names
 
   --dry      echo commands without side effects
   --force    disable run-once";
@@ -150,12 +152,28 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write) -> Result<u8, Exit> {
             list::text(out, &loaded.merged)?;
             Ok(OK)
         }
-        Command::List { json } => {
+        Command::List { format } => {
             let loaded = Loaded::discover()?;
-            if json {
-                list::json(out, &loaded.merged)?;
+            match format {
+                ListFormat::Text => list::text(out, &loaded.merged)?,
+                ListFormat::Json => list::json(out, &loaded.merged)?,
+                ListFormat::Names => list::names(out, &loaded.merged)?,
+            }
+            Ok(OK)
+        }
+        // Completion is about the shell, not about a project, so it works
+        // with no chorefile anywhere. The script it prints is what discovers
+        // the chorefile later, once the user hits Tab somewhere.
+        // A shell named on the command line means a machine is asking, so
+        // print the script for it to redirect. Bare `chore completions` means
+        // a person is asking, so say what to add and where.
+        Command::Completions { shell, write } => {
+            if write {
+                completions::write(out, shell.or_else(completions::Shell::detect))?;
+            } else if let Some(shell) = shell {
+                completions::script(out, shell)?;
             } else {
-                list::text(out, &loaded.merged)?;
+                completions::guide(out, completions::Shell::detect())?;
             }
             Ok(OK)
         }

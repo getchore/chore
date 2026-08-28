@@ -52,6 +52,19 @@ pub fn text(out: &mut dyn Write, merged: &Merged) -> io::Result<()> {
     Ok(())
 }
 
+/// One task per line, `name<TAB>description`, for a shell completion script.
+///
+/// The completion scripts run this on every Tab, so the format is whatever is
+/// cheapest to consume from a shell: no padding to strip, no JSON to parse and
+/// so no dependency on `jq`. A task with no comment above it prints its name
+/// and an empty description, keeping the field count the same on every line.
+pub fn names(out: &mut dyn Write, merged: &Merged) -> io::Result<()> {
+    for task in &merged.file.tasks {
+        writeln!(out, "{}\t{}", task.name, task.doc.as_deref().unwrap_or(""))?;
+    }
+    Ok(())
+}
+
 pub fn json(out: &mut dyn Write, merged: &Merged) -> io::Result<()> {
     let tasks = &merged.file.tasks;
     writeln!(out, "[")?;

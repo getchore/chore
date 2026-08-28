@@ -1078,3 +1078,64 @@ fn suffix(path: &Path) -> String {
     parts.reverse();
     parts.join("/")
 }
+
+// completions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn list_names_is_one_task_per_line_with_a_tab() {
+    let dir = Dir::new();
+    dir.chorefile(
+        "# build the thing\ntask build {\n    echo hi\n}\n\ntask bare {\n    echo hi\n}\n",
+    );
+    let out = chore(&dir, &["list", "--names"]).ok().stdout;
+    // A task with no comment still prints its tab, so every line splits the
+    // same way in a shell.
+    assert_eq!(out, "build\tbuild the thing\nbare\t\n");
+}
+
+#[test]
+fn completions_needs_no_chorefile() {
+    // The script is about the shell, not about a project. Someone installing
+    // completions has usually not cd'd anywhere in particular yet.
+    let dir = Dir::new();
+    let out = chore(&dir, &["completions", "zsh"]).ok().stdout;
+    assert!(out.contains("compdef _chore chore"), "{out}");
+}
+
+#[test]
+fn every_shell_script_asks_chore_for_the_task_list() {
+    let dir = Dir::new();
+    for shell in ["bash", "zsh", "fish", "powershell"] {
+        let out = chore(&dir, &["completions", shell]).ok().stdout;
+        assert!(
+            out.contains("chore list --names"),
+            "{shell} script must call chore, not embed a task list:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_shell_is_a_usage_error() {
+    let dir = Dir::new();
+    let run = chore(&dir, &["completions", "nushell"]);
+    assert_eq!(run.code, 2, "{}", run.stderr);
+    assert!(
+        run.stderr.contains("bash, zsh, fish, powershell"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn completions_cannot_be_shadowed_by_a_task() {
+    let dir = Dir::new();
+    dir.chorefile("task completions {\n    echo shadowed\n}\n");
+    // The subcommand wins, exactly as `list` does, which is why the name is
+    // reserved. `check` is where the author is told.
+    let out = chore(&dir, &["completions", "bash"]).ok().stdout;
+    assert!(!out.contains("shadowed"), "{out}");
+    let run = chore(&dir, &["check"]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    assert!(run.stdout.contains("completions"), "{}", run.stdout);
+}
