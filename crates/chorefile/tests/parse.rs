@@ -849,3 +849,86 @@ fn error_missing_command_after_operator() {
         "message was: {message}"
     );
 }
+
+// --- require ------------------------------------------------------------
+
+#[test]
+fn require_states_a_version() {
+    let f = file("require 1.4.0\n\ntask build { echo hi }\n");
+    let require = f.require.expect("no require parsed");
+    assert_eq!(require.version.to_string(), "1.4.0");
+    // The span covers the keyword too, so a diagnostic points at the line
+    // rather than at the number on its own.
+    assert_eq!(require.span.start, 0);
+    assert_eq!(require.span.end, "require 1.4.0".len());
+    assert_eq!(f.tasks.len(), 1);
+}
+
+#[test]
+fn a_file_without_require_states_none() {
+    assert!(file("task build { echo hi }\n").require.is_none());
+}
+
+#[test]
+fn error_require_is_not_a_bare_triple() {
+    // Every spelling someone might reach for, and none of them accepted: the
+    // version is a floor, so a range has nothing to mean here.
+    for bad in ["v1.4.0", "1.4", "^1.4.0", ">=1.4.0", "1.4.0-rc1", "latest"] {
+        let message = error(&format!("require {bad}\n"));
+        assert!(
+            message.contains("<major>.<minor>.<patch>"),
+            "`{bad}` gave: {message}"
+        );
+        assert!(
+            message.contains("`require 1.4.0`"),
+            "`{bad}` gave: {message}"
+        );
+    }
+}
+
+#[test]
+fn error_require_without_a_version() {
+    // Nothing at all is wrong in the same way `^1.4.0` is wrong, and gets the
+    // same answer: here is the shape.
+    let message = error("require\n");
+    assert!(
+        message.contains("<major>.<minor>.<patch>"),
+        "message was: {message}"
+    );
+}
+
+#[test]
+fn error_two_requires_name_both() {
+    let message = error("require 1.0.0\nrequire 1.2.0\n");
+    assert!(
+        message.contains("only one `require`"),
+        "message was: {message}"
+    );
+    assert!(message.contains("1.0.0"), "message was: {message}");
+    assert!(message.contains("1.2.0"), "message was: {message}");
+}
+
+#[test]
+fn error_require_inside_a_task() {
+    // A requirement about the file cannot be stated by one task, and the
+    // message says where it belongs.
+    let message = error("task build {\n    require 1.4.0\n}\n");
+    assert!(
+        message.contains("only valid at the top level"),
+        "message was: {message}"
+    );
+}
+
+#[test]
+fn an_unknown_top_level_word_hints_at_a_stale_binary() {
+    // The one failure `require` cannot report for itself: a binary too old to
+    // know the keyword sees a stray word, so that message carries the hint.
+    let message = error("newkeyword 1.0.0\n");
+    assert!(message.contains("may be too old"), "message was: {message}");
+    // A token that is not a word is not a candidate for a keyword.
+    let message = error("{ echo hi }\n");
+    assert!(
+        !message.contains("may be too old"),
+        "message was: {message}"
+    );
+}

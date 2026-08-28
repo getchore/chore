@@ -1698,3 +1698,45 @@ fn a_task_may_not_be_called_parallel() {
         "{found:#?}"
     );
 }
+
+// --- 13. `require` ---------------------------------------------------------
+
+#[test]
+fn an_unmet_require_is_an_error_finding() {
+    // A version no build will ever be, so the test says the same thing on
+    // every release.
+    let found = errors("require 99.0.0\n\ntask build {\n    echo hi\n}\n");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0].message.contains("requires chore 99.0.0 or newer"),
+        "{found:#?}"
+    );
+    assert!(
+        found[0].message.contains(chorefile::spec::version()),
+        "the running version has to be in the message: {found:#?}"
+    );
+    // The remedy, which is the point of the whole feature.
+    let help = found[0].help.as_deref().expect("no help line");
+    assert!(help.contains("install.sh"), "help was: {help}");
+    assert!(help.contains("install.ps1"), "help was: {help}");
+    // The `require` line itself, and it is the first line, so it sorts first.
+    assert_eq!(found[0].at.line_col("require 99.0.0\n"), (1, 1));
+}
+
+#[test]
+fn a_met_require_is_quiet() {
+    // The oldest version there is, which every build satisfies.
+    let found = run("require 0.0.0\n\ntask build {\n    echo hi\n}\n");
+    assert!(found.is_empty(), "{found:#?}");
+}
+
+#[test]
+fn a_require_of_the_running_version_is_met() {
+    // "At least this" includes this: the version that shipped the feature is
+    // the version a chorefile using it names.
+    let source = format!(
+        "require {}\ntask build {{\n    echo hi\n}}\n",
+        chorefile::spec::version()
+    );
+    assert!(run(&source).is_empty(), "{:#?}", run(&source));
+}

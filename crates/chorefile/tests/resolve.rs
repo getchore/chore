@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chorefile::ast::{self, Chain, Cond, PartKind, Stmt, VarRef, Word};
 use chorefile::error::Error;
+use chorefile::require;
 use chorefile::resolve::{self, Merged};
 use chorefile::vars;
 
@@ -752,4 +753,65 @@ fn every_part_path_keys_into_sources() {
             part.path.display()
         );
     }
+}
+
+// --- require across an include tree ----------------------------------------
+
+#[test]
+fn an_included_files_requirement_names_that_file() {
+    // The requirement is the included file's, and the message has to send the
+    // reader to the file that states it, not to the one they typed.
+    let dir = Dir::new();
+    dir.write("libs/a.chore", "require 99.0.0\ntask helper { echo hi }\n");
+    let path = dir.chorefile("include libs/a.chore\ntask build { helper }\n");
+    let merged = resolve(&path);
+
+    let unmet = require::unmet(&merged).expect("99.0.0 cannot be met");
+    assert_eq!(unmet.required.to_string(), "99.0.0");
+    assert_eq!(unmet.at.file, dir.path("libs/a.chore"));
+    // Rendered through the sources, so the line is the included file's own.
+    assert!(
+        merged.sources.render(&unmet.at).ends_with("a.chore:1:1"),
+        "{}",
+        merged.sources.render(&unmet.at)
+    );
+    // Resolving still succeeds: `list` has a tree to list and `check` has one
+    // to report on, which is why the check is not made here.
+    assert_eq!(task_names(&merged), ["helper", "build"]);
+}
+
+#[test]
+fn the_strictest_requirement_is_the_one_reported() {
+    // Two files, two floors. Naming the lower one would send the reader to
+    // upgrade twice.
+    let dir = Dir::new();
+    dir.write("libs/a.chore", "require 98.0.0\ntask helper { echo hi }\n");
+    let path = dir.chorefile("require 99.10.0\ninclude libs/a.chore\ntask build { helper }\n");
+    let merged = resolve(&path);
+
+    let unmet = require::unmet(&merged).expect("neither can be met");
+    assert_eq!(unmet.required.to_string(), "99.10.0");
+    assert_eq!(unmet.at.file, path);
+}
+
+#[test]
+fn a_strictness_ordering_is_numeric_not_textual() {
+    // 99.9.0 sorts after 99.10.0 as text, and before it as a version. The
+    // reported requirement is the one that satisfies both.
+    let dir = Dir::new();
+    dir.write("libs/a.chore", "require 99.10.0\ntask helper { echo hi }\n");
+    let path = dir.chorefile("require 99.9.0\ninclude libs/a.chore\ntask build { helper }\n");
+    let merged = resolve(&path);
+
+    let unmet = require::unmet(&merged).expect("neither can be met");
+    assert_eq!(unmet.required.to_string(), "99.10.0");
+    assert_eq!(unmet.at.file, dir.path("libs/a.chore"));
+}
+
+#[test]
+fn a_met_requirement_anywhere_in_the_tree_is_quiet() {
+    let dir = Dir::new();
+    dir.write("libs/a.chore", "require 0.0.0\ntask helper { echo hi }\n");
+    let path = dir.chorefile("require 1.0.0\ninclude libs/a.chore\ntask build { helper }\n");
+    assert!(require::unmet(&resolve(&path)).is_none());
 }

@@ -135,6 +135,7 @@ fn optional(name: &str, default: Word) -> Param {
 
 fn file(tasks: Vec<Task>) -> File {
     File {
+        require: None,
         includes: Vec::new(),
         globals: Vec::new(),
         tasks,
@@ -2503,6 +2504,7 @@ fn root_cannot_be_reassigned_by_a_global_or_a_task() {
     // root per invocation, and nothing in the file may move it.
     let dir = Temp::new("ns-root-fixed");
     let f = File {
+        require: None,
         includes: Vec::new(),
         globals: vec![Assign {
             name: "ROOT".into(),

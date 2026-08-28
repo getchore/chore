@@ -437,3 +437,80 @@ fn spec_prints_json() {
 fn printed(stdout: &str, line: &str) -> usize {
     stdout.lines().filter(|l| l.trim() == line).count()
 }
+
+#[test]
+fn an_unmet_require_stops_a_run() {
+    // A version no build will ever be, so this test outlives every release.
+    let dir = Dir::new();
+    dir.chorefile("require 99.0.0\ntask build {\n    echo building\n}\n");
+    let run = chore(&dir, &["build"]);
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    // The task did not run, and the globals above it were never evaluated.
+    assert!(!run.stdout.contains("building"), "{}", run.stdout);
+    assert!(
+        run.stderr.contains("requires chore 99.0.0 or newer"),
+        "{}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("install.sh"), "{}", run.stderr);
+    assert!(run.stderr.contains("chorefile:1:1"), "{}", run.stderr);
+}
+
+#[test]
+fn a_met_require_runs() {
+    let dir = Dir::new();
+    dir.chorefile("require 0.0.0\ntask build {\n    echo building\n}\n");
+    let run = chore(&dir, &["build"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(run.stdout.contains("building"), "{}", run.stdout);
+}
+
+#[test]
+fn list_warns_about_an_unmet_require_and_still_lists() {
+    // `list` answers "what is here", which an old binary can still answer.
+    // The warning is on stderr, so stdout is exactly what it always was.
+    let dir = Dir::new();
+    dir.chorefile("require 99.0.0\n\n# build the project\ntask build {\n    echo hi\n}\n");
+    let run = chore(&dir, &["list"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(run.stdout.contains("build"), "{}", run.stdout);
+    assert!(!run.stdout.contains("99.0.0"), "{}", run.stdout);
+    assert!(
+        run.stderr.contains("requires chore 99.0.0"),
+        "{}",
+        run.stderr
+    );
+
+    // The machine-readable formats keep a clean stdout too.
+    let run = chore(&dir, &["list", "--names"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.stdout, "build\tbuild the project\n");
+    assert!(run.stderr.contains("99.0.0"), "{}", run.stderr);
+}
+
+#[test]
+fn check_reports_an_unmet_require() {
+    let dir = Dir::new();
+    dir.chorefile("require 99.0.0\ntask build {\n    echo hi\n}\n");
+    let run = chore(&dir, &["check"]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    assert!(run.stdout.contains("chorefile:1:1"), "{}", run.stdout);
+    assert!(
+        run.stdout.contains("requires chore 99.0.0 or newer"),
+        "{}",
+        run.stdout
+    );
+    assert!(run.stdout.contains("help:"), "{}", run.stdout);
+}
+
+#[test]
+fn help_and_spec_ignore_an_unmet_require() {
+    // Neither reads a chorefile, so neither can be stopped by one.
+    let dir = Dir::new();
+    dir.chorefile("require 99.0.0\ntask build {\n    echo hi\n}\n");
+    for args in [&["help"][..], &["spec"][..]] {
+        let run = chore(&dir, args);
+        assert_eq!(run.code, 0, "{args:?}: {}", run.stderr);
+        assert!(run.stderr.is_empty(), "{args:?}: {}", run.stderr);
+    }
+}

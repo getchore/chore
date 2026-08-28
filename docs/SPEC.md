@@ -91,6 +91,7 @@ task name { }
 task name arg1 arg2 { }      $1 $2, $@ all, $# count
 include other.chore
 include libs/chorefile as libs       tasks become libs::build
+require 1.4.0                        the oldest chore that can run this file
 ```
 
 The comment line directly above a `task` is its description.
@@ -496,6 +497,38 @@ Top-level assignments are evaluated once, before the first task. `list`,
 tree, so `chore list` does no I/O and works even when a file a global reads is
 missing.
 
+## require
+
+```sh
+require 1.4.0
+```
+
+The oldest `chore` that can run this file. Top level only, conventionally the
+first line, and at most one per file. It means "at least this": a chorefile
+that uses a 1.2.0 feature says `require 1.2.0` and runs on 1.2.0 and anything
+after it.
+
+The version is a bare `major.minor.patch` and nothing else. `v1.4.0`, `1.4`,
+`^1.4.0` and `1.4.0-rc1` are all syntax errors that name the shape they should
+have had. There are no ranges and no operators, because a floor is the only
+question a task runner has to answer; components are compared as numbers, so
+1.10.0 is newer than 1.9.0.
+
+An included file may state its own `require`, and every one is checked. A run
+reports the strictest failure, since that is the version that satisfies all of
+them at once, and names the file that asked for it. `chore check` reports each
+one as an error, with its line and column.
+
+The check happens before any task runs and before top-level assignments are
+evaluated. `chore list` warns on stderr and still prints the list: it exists
+partly to answer "what is here", which an old binary can still answer, and its
+stdout is unchanged. `chore help`, `chore spec`, `chore init` and `chore
+completions` read no chorefile and are unaffected.
+
+A `chore` older than `require` itself does not know the keyword and reports it
+as an unrecognised top-level statement. Nothing can change that after the
+fact, so that message says a newer `chore` may be needed.
+
 ## include
 
 ```sh
@@ -577,8 +610,8 @@ subcommand, so the task is unreachable.
 Reports syntax errors, reserved names, unknown commands, undefined variables
 (in a parameter's default as much as in a body), duplicate names, a parameter
 declared twice in one header, a parameter read as `$name` where parameters are
-positional, include cycles, and non-portable commands (`curl`, `unzip`, `tar`,
-`cp`, `rm`) with the builtin that replaces them. A default is checked in the
+positional, include cycles, an unmet `require`, and non-portable commands
+(`curl`, `unzip`, `tar`, `cp`, `rm`) with the builtin that replaces them. A default is checked in the
 scope it will be evaluated in, so it may read `$1`…`$(n-1)` but not its own
 slot or a later one.
 

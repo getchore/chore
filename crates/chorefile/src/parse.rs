@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::ast::{
     Assign, Block, Chain, Command, CompareOp, Cond, File, For, If, Include, Param, PartKind,
-    Redirect, RedirectKind, Stmt, Task, VarRef, Word, WordPart,
+    Redirect, RedirectKind, Require, Stmt, Task, VarRef, Word, WordPart,
 };
 use crate::error::{Error, Location, Result, Span};
 use crate::lex::{self, Spanned, Token};
@@ -160,6 +160,26 @@ impl<'a> Parser<'a> {
                     file.tasks.push(self.task(doc.take())?);
                     self.end_of_stmt()?;
                 }
+                Token::Word { .. } if self.at_keyword("require") => {
+                    doc = None;
+                    let require = self.require()?;
+                    // Two requirements are two answers to one question, and
+                    // the file cannot say which it means, so neither can we.
+                    // Both versions are named: whichever the author meant to
+                    // delete, the message has told them where the other is.
+                    if let Some(first) = &file.require {
+                        return self.err_at(
+                            format!(
+                                "a chorefile may state only one `require`; this file \
+                                 already requires {}, and this line requires {}",
+                                first.version, require.version
+                            ),
+                            require.span,
+                        );
+                    }
+                    file.require = Some(require);
+                    self.end_of_stmt()?;
+                }
                 Token::Word { .. } if self.at_keyword("include") => {
                     doc = None;
                     file.includes.push(self.include()?);
@@ -181,14 +201,65 @@ impl<'a> Parser<'a> {
                     );
                 }
                 ref other => {
+                    // A statement this build does not know reads here as a
+                    // stray word, which is the one confusion `require` cannot
+                    // fix for itself: the binary that needs telling is the one
+                    // too old to have the keyword. A word is either a typo or
+                    // a form from a later `chore`, so the message offers both.
+                    let hint = match other {
+                        Token::Word { .. } => {
+                            "; if it is a newer chorefile keyword, this `chore` may be too old \
+                             (`chore --version`)"
+                        }
+                        _ => "",
+                    };
                     return self.err(format!(
-                        "expected a task, an assignment or an include at the top level, found {}",
+                        "expected a task, an assignment or an include at the top level, found {}{hint}",
                         other.describe()
                     ));
                 }
             }
         }
         Ok(file)
+    }
+
+    /// `require major.minor.patch`, the whole grammar of the directive.
+    ///
+    /// Strict, and deliberately so: the version is a floor, so an operator or
+    /// a range would be asking a question this language has no vocabulary to
+    /// answer. Rejecting them here, where the shape can be shown, beats
+    /// accepting `^1.4.0` and quietly meaning something else by it.
+    ///
+    /// One message covers every way of getting it wrong, including the ones
+    /// the lexer sees first: `^1.4.0` opens with a `Caret` and `>=1.4.0` with
+    /// a `Gt`, so neither is ever a word to parse, and answering those with
+    /// "expected a version" would describe the token rather than the shape
+    /// the author was reaching for.
+    fn require(&mut self) -> Result<Require> {
+        let start = self.bump().span.start;
+        let at = self.span();
+        let found = match self.kind() {
+            Token::Word { .. } => {
+                let word = self.word("a version after `require`")?;
+                literal(&word)
+                    .as_deref()
+                    .and_then(crate::require::Version::parse)
+                    .map(|version| (version, word.span.end))
+            }
+            _ => None,
+        };
+        let Some((version, end)) = found else {
+            return self.err_at(
+                "a `require` version must be written `<major>.<minor>.<patch>`, as in \
+                 `require 1.4.0`; it means \"at least this\", so there are no ranges, \
+                 operators, prereleases or `v` prefixes",
+                at,
+            );
+        };
+        Ok(Require {
+            version,
+            span: Span::new(start, end),
+        })
     }
 
     fn include(&mut self) -> Result<Include> {
@@ -377,6 +448,15 @@ impl<'a> Parser<'a> {
         if self.at_keyword("return") {
             self.bump();
             return Ok(Stmt::Return(self.status_code("a return code")?));
+        }
+        // `require` states what the *file* needs, so a task body is never the
+        // place for it: a requirement that only applied once a particular task
+        // ran would be checked after the parse it exists to explain.
+        if self.at_keyword("require") {
+            return self.err(
+                "`require` is only valid at the top level, conventionally as the first \
+                 line; it states the oldest `chore` that can run the whole file, not one task",
+            );
         }
         if matches!(self.kind(), Token::Word { .. })
             && self.tokens[self.i + 1].token == Token::Assign

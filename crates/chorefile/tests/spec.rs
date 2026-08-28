@@ -309,7 +309,16 @@ fn read_only_builtins_are_marked_effect_free() {
 #[test]
 fn syntax_covers_every_statement_form() {
     let names: Vec<&str> = spec::syntax().iter().map(|f| f.name).collect();
-    for want in ["assignment", "if", "for", "try", "exit", "task", "include"] {
+    for want in [
+        "assignment",
+        "if",
+        "for",
+        "try",
+        "exit",
+        "task",
+        "include",
+        "require",
+    ] {
         assert!(names.contains(&want), "no `{want}` form");
     }
     // Every form carries an example, which is the part an agent copies.

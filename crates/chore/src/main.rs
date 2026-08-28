@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use chorefile::interp::{Interpreter, Mode, Repeat};
+use chorefile::require::{self, Unmet};
 use chorefile::resolve::{Merged, Sources};
 use chorefile::{Error, parse, resolve};
 
@@ -226,6 +227,7 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
                     return Err(exit);
                 }
             };
+            warn_unmet(&loaded.merged);
             writeln!(out, "{}", style.bold("Available tasks:"))?;
             list::text(out, &loaded.merged, style)?;
             writeln!(
@@ -238,6 +240,7 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
         }
         Command::List { format } => {
             let loaded = Loaded::discover()?;
+            warn_unmet(&loaded.merged);
             match format {
                 ListFormat::Text => list::text(out, &loaded.merged, style)?,
                 // `--json` and `--names` are read by programs, so they are
@@ -301,8 +304,50 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
         }
         Command::Run { task, args } => {
             let loaded = Loaded::discover()?;
+            // Before the task, and before the globals it would have been
+            // preceded by: a chorefile that says it needs a newer `chore` has
+            // said everything this one is qualified to conclude about it.
+            if let Some(unmet) = require::unmet(&loaded.merged) {
+                return Err(Exit::failed(unmet_message(&loaded.merged, &unmet)));
+            }
             run(&loaded, &task, &args, mode, repeat)
         }
+    }
+}
+
+/// An unmet `require`, rendered the way `check` renders a finding: the line
+/// it was written on, the message, and the one thing to do about it.
+fn unmet_message(merged: &Merged, unmet: &Unmet) -> String {
+    format!(
+        "{}: {}\n  help: {}",
+        merged.sources.render(&unmet.at),
+        unmet.message(),
+        unmet.help()
+    )
+}
+
+/// Say on stderr that the listing about to be printed describes a chorefile
+/// this binary cannot run.
+///
+/// A warning rather than a refusal, because `list` exists partly to answer
+/// "what is here", and an old binary can still answer that: the tasks and
+/// their descriptions are read off the parse tree, not off the language
+/// features they use. Refusing would leave someone with a chorefile they
+/// cannot even look at. Staying silent is the other failure: a list of tasks
+/// that all fail to run is exactly the confusion `require` exists to end.
+///
+/// stderr, so stdout is byte-for-byte what it always was. `--json` and
+/// `--names` are read by programs, and the shipped completion scripts already
+/// send stderr to /dev/null, so nothing downstream sees this but a person.
+fn warn_unmet(merged: &Merged) {
+    if let Some(unmet) = require::unmet(merged) {
+        let style = Style::stderr();
+        let _ = writeln!(
+            io::stderr(),
+            "{} {}",
+            style.warn("chore: warning:"),
+            unmet_message(merged, &unmet)
+        );
     }
 }
 
