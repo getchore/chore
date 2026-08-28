@@ -2,10 +2,10 @@
 #
 # These need tools no developer checkout has — a mingw objdump, a musl
 # toolchain — so they live here rather than in the root chorefile, and are
-# reached as `chore gha::<task>`. Nothing here is meant to be run locally,
+# reached as `chore workflow::<task>`. Nothing here is meant to be run locally,
 # which is the whole reason it is a separate file.
 
-# Fail if the Windows binary needs the mingw runtime installed: gha::windows-dll-check <target>.
+# Fail if the Windows binary needs the mingw runtime installed: workflow::windows-dll-check <target>.
 task windows-dll-check target {
     # Not `$EXE`: that is the *host's* extension, and this cross-compiles on
     # Linux. A windows-gnu binary is `chore.exe` wherever it was built.
@@ -23,4 +23,43 @@ task windows-dll-check target {
     if $deps contains "DLL Name: libstdc" { fail "$1 binary imports the mingw runtime: libstdc++" }
     if $deps contains "DLL Name: libwinpthread" { fail "$1 binary imports the mingw runtime: libwinpthread" }
     echo "$1 binary imports no mingw runtime"
+}
+
+# Build the release archive and its checksum: workflow::package <target>.
+task package target {
+    # The target may not be this machine, so the suffix comes from the triple
+    # rather than from $EXE, which is the host's.
+    exe=""
+    if $1 contains windows { exe=.exe }
+
+    stage=$ROOT/dist
+    remove $stage
+    mkdir $stage
+
+    # Both are in the repo, but a source tarball built elsewhere may not have
+    # them, and a missing licence should not fail a release.
+    if exists $ROOT/LICENSE { copy $ROOT/LICENSE $stage/LICENSE }
+    if exists $ROOT/README.md { copy $ROOT/README.md $stage/README.md }
+
+    copy $ROOT/target/$1/release/chore$exe $stage/chore$exe
+    if $exe == "" { chmod 755 $stage/chore }
+
+    # `archive` picks the format from the extension, so this is the same line
+    # on every platform -- no Compress-Archive on Windows and tar elsewhere.
+    # The trailing slash packs the contents, not a `dist/` directory.
+    if $exe == "" {
+        archive $stage/ $ROOT/chore-$1.tar.gz
+        checksum chore-$1.tar.gz
+    } else {
+        archive $stage/ $ROOT/chore-$1.zip
+        checksum chore-$1.zip
+    }
+}
+
+# Write the `<hash>  <name>` sidecar for one file: workflow::checksum <name>.
+task checksum name {
+    # install.sh reads this with `cut -d' ' -f1`, so the shape is sha256sum's
+    # and not ours to change: two spaces between the digest and the name.
+    write $ROOT/$1.sha256 "$(sha256 $ROOT/$1)  $1"
+    echo "$(read $ROOT/$1.sha256)"
 }

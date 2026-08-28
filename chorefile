@@ -13,8 +13,8 @@ bin=chore
 musl=x86_64-unknown-linux-musl
 
 # Checks that need a CI runner's toolchain and would be dead weight in a
-# developer checkout: `chore gha::windows-dll-check`.
-include .github as gha
+# developer checkout: `chore workflow::package`.
+include .github as workflow
 
 # Compile the workspace, tests and examples included.
 task build {

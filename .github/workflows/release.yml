@@ -118,39 +118,39 @@ jobs:
           CC_aarch64_unknown_linux_musl: musl-gcc
         run: cargo build --release --locked --target ${{ matrix.target }} --bin chore
 
+      # The released chore packages the new one. Everything this step does --
+      # copy, chmod, archive, sha256 -- is a builtin, so the zip-on-Windows
+      # and tar-elsewhere branch and the sha256sum-or-shasum branch are both
+      # gone. The artifact itself is still built from the tag, above.
+      #
+      # Installing it needs the one platform branch chore cannot remove:
+      # install.sh refuses to run on Windows and hands you install.ps1.
+      - name: Install chore
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL https://getchore.github.io/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install chore
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://getchore.github.io/install.ps1 | iex
+          # The script sets the *user* PATH, which a later step in this job
+          # does not inherit; GITHUB_PATH is what does.
+          "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Package
         id: package
         shell: bash
         run: |
           set -euo pipefail
-          target='${{ matrix.target }}'
-          name="chore-$target"
-          out="dist"
-          mkdir -p "$out"
-
-          for extra in LICENSE README.md; do
-            if [ -f "$extra" ]; then cp "$extra" "$out/"; fi
-          done
-
-          if [[ "$target" == *windows* ]]; then
-            cp "target/$target/release/chore.exe" "$out/chore.exe"
-            archive="$name.zip"
-            pwsh -Command "Compress-Archive -Path '$out/*' -DestinationPath '$archive' -CompressionLevel Optimal"
-          else
-            cp "target/$target/release/chore" "$out/chore"
-            chmod +x "$out/chore"
-            archive="$name.tar.gz"
-            COPYFILE_DISABLE=1 tar -czf "$archive" -C "$out" .
-          fi
-
-          # One sidecar per asset, so an installer can verify with a single
-          # extra download and no parsing.
-          if command -v sha256sum >/dev/null; then
-            sha256sum "$archive" > "$archive.sha256"
-          else
-            shasum -a 256 "$archive" > "$archive.sha256"
-          fi
-          cat "$archive.sha256"
+          chore workflow::package '${{ matrix.target }}'
+          case '${{ matrix.target }}' in
+            *windows*) archive='chore-${{ matrix.target }}.zip' ;;
+            *)         archive='chore-${{ matrix.target }}.tar.gz' ;;
+          esac
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       # x86_64-apple-darwin is the one cross-built target; Rosetta may not be

@@ -133,11 +133,11 @@ jobs:
       - if: endsWith(matrix.target, '-linux-musl')
         run: ./target/release/chore static-check
       # Lives in `.github/chorefile`, included by the root chorefile as
-      # `gha`. It needs x86_64-w64-mingw32-objdump, which only this job has,
+      # `workflow`. It needs x86_64-w64-mingw32-objdump, which only this job has,
       # so putting it in the root chorefile would be dead weight in every
       # developer checkout -- but a file only CI reaches is not.
       - if: endsWith(matrix.target, '-windows-gnu')
-        run: ./target/release/chore gha::windows-dll-check ${{ matrix.target }}
+        run: ./target/release/chore workflow::windows-dll-check ${{ matrix.target }}
 
   # The installers are shipped from main, not from a release asset, so a
   # broken one is live the moment it merges.

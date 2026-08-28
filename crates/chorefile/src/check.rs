@@ -47,7 +47,7 @@ use crate::ast::{
 };
 use crate::error::{Error, Location, Span};
 use crate::resolve::Merged;
-use crate::{FILE_NAME, NAMESPACE_SEP, RESERVED_TASKS, builtins, parse, resolve, vars};
+use crate::{FILE_NAME, NAMESPACE_SEP, RESERVED_TASKS, builtins, parse, require, resolve, vars};
 
 /// How much a finding matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,6 +310,7 @@ impl<'a> Checker<'a> {
 
     /// Everything checkable about one file, in source order.
     fn run(&mut self, file: &File, source: &str) -> Vec<Diagnostic> {
+        self.requirement(file);
         self.includes(file);
         self.declared_names(file, source);
 
@@ -349,6 +350,21 @@ impl<'a> Checker<'a> {
         let mut out = std::mem::take(&mut self.out);
         out.sort_by_key(|d| (d.at.line_col(source), d.at.span.start));
         out
+    }
+
+    /// A `require` this binary does not meet.
+    ///
+    /// Reported per file rather than once per tree: `check` is a report, and
+    /// an author fixing an include tree is better served knowing every file
+    /// that will stop them than the strictest one. A *run* wants the opposite
+    /// and gets it from [`require::unmet`], which reports only the version
+    /// that makes all of them go away.
+    fn requirement(&mut self, file: &File) {
+        if let Some(unmet) = require::unmet_in(file, self.path) {
+            self.out.push(
+                Diagnostic::error(unmet.message(), unmet.at.clone()).with_help(unmet.help()),
+            );
+        }
     }
 
     /// The globals that reached this file from somewhere else, under both the
