@@ -16,6 +16,10 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 /// The shells with a completion script.
+// `PowerShell` ends with the enum's name, which clippy reads as a stutter. It
+// is the shell's actual name, and `Shell::Power` would be worse for every
+// reader to save one lint.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
     Bash,
@@ -253,6 +257,7 @@ complete -c chore -f -n '__fish_use_subcommand' -a 'list' -d 'tasks and descript
 complete -c chore -f -n '__fish_use_subcommand' -a 'help' -d 'syntax and builtins'
 complete -c chore -f -n '__fish_use_subcommand' -a 'check' -d 'lint without running'
 complete -c chore -f -n '__fish_use_subcommand' -a 'spec' -d 'full reference as JSON'
+complete -c chore -f -n '__fish_use_subcommand' -a 'completions' -d 'shell completion'
 complete -c chore -l dry -d 'echo commands without side effects'
 complete -c chore -l force -d 'disable run-once'
 "#;

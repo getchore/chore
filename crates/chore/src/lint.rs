@@ -16,6 +16,8 @@ use std::io::{self, Write};
 use chorefile::check::{Diagnostic, Severity};
 use chorefile::resolve::Sources;
 
+use crate::style::Style;
+
 /// Print every finding. Returns how many were errors, so the caller can pick
 /// the exit code.
 ///
@@ -24,20 +26,37 @@ use chorefile::resolve::Sources;
 /// about the machine rather than about the chorefile — a tool installed only
 /// in CI, or only on one platform. Failing on that would make `check`
 /// unusable as the CI gate it exists to be.
+///
+/// The severity is carried by colour and by nothing else: the line format is
+/// `path:line:col: message`, which is what an editor's error matcher parses,
+/// so a `warning:` word cannot be added in front without breaking every
+/// matcher already pointed at it. Colour is invisible to those tools and to a
+/// pipe, and tells a person at a terminal the one thing the line does not say
+/// on its own.
 pub fn report(
     out: &mut dyn Write,
     findings: &[Diagnostic],
     sources: &Sources,
+    style: Style,
 ) -> io::Result<usize> {
     for finding in findings {
+        let message = finding.message.trim_end();
+        let message = match finding.severity {
+            Severity::Error => style.error(message),
+            Severity::Warning => style.warn(message),
+        };
+        // The position recedes: it is there to be clicked or copied, not read.
         writeln!(
             out,
-            "{}: {}",
-            sources.render(&finding.at),
-            finding.message.trim_end()
+            "{}: {message}",
+            style.dim(&sources.render(&finding.at))
         )?;
         if let Some(help) = &finding.help {
-            writeln!(out, "  help: {}", help.trim_end())?;
+            writeln!(
+                out,
+                "{}",
+                style.dim(&format!("  help: {}", help.trim_end()))
+            )?;
         }
     }
     let errors = findings

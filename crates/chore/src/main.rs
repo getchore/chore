@@ -10,6 +10,7 @@ mod completions;
 mod help;
 mod lint;
 mod list;
+mod style;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -20,22 +21,65 @@ use chorefile::resolve::{Merged, Sources};
 use chorefile::{Error, parse, resolve};
 
 use args::{Command, Invocation, ListFormat, UsageError};
+use style::Style;
 
 /// Exit codes, as promised in docs/SPEC.md.
 const OK: u8 = 0;
 const FAILED: u8 = 1;
 const USAGE: u8 = 2;
 
-const USAGE_TEXT: &str = "\
-usage: chore <task> [args...] [--dry] [--force]
-       chore list [--json]        tasks and descriptions
-       chore help [builtin]       syntax and builtins, or one builtin
-       chore check                lint without running
-       chore spec                 full reference as JSON, for agents
-       chore completions [shell]  tab completion for task names
+/// The subcommands, as `chore --help` lists them: the word itself, the
+/// arguments it takes, and what it is for. Split into three so the word can be
+/// coloured without the colour landing on the alignment.
+const SUBCOMMANDS: &[(&str, &str, &str)] = &[
+    ("list", "[--json]", "tasks and descriptions"),
+    ("help", "[builtin]", "syntax and builtins, or one builtin"),
+    ("check", "", "lint without running"),
+    ("spec", "", "full reference as JSON, for agents"),
+    ("completions", "[shell]", "tab completion for task names"),
+];
 
-  --dry      echo commands without side effects
-  --force    disable run-once";
+/// The two flags `chore` keeps for itself, and what they do.
+const FLAGS: &[(&str, &str)] = &[
+    ("--dry", "echo commands without side effects"),
+    ("--force", "disable run-once"),
+];
+
+/// Width of the left column in the subcommand list, and in the flag list.
+/// Literal, because escape sequences are bytes of zero width: padding a
+/// styled string with `{:<width$}` would pad by however long the escapes are
+/// and tear the column apart, so every line here pads its plain text and
+/// colours only the word.
+const SUBCOMMAND_COLUMN: usize = 21;
+const FLAG_COLUMN: usize = 11;
+
+/// The usage block, for `chore --help` and for a bare `chore` with no
+/// chorefile to talk about instead.
+fn usage(style: Style) -> String {
+    let mut text = format!(
+        "usage: chore <task> [args...] [{}] [{}]\n",
+        style.accent("--dry"),
+        style.accent("--force")
+    );
+    for (name, args, meaning) in SUBCOMMANDS {
+        let left = if args.is_empty() {
+            (*name).to_string()
+        } else {
+            format!("{name} {args}")
+        };
+        let pad = " ".repeat(SUBCOMMAND_COLUMN.saturating_sub(left.chars().count()));
+        let left = left.replacen(name, &style.accent(name), 1);
+        text.push_str(&format!("       chore {left}{pad}{meaning}\n"));
+    }
+    text.push('\n');
+    for (flag, meaning) in FLAGS {
+        let pad = " ".repeat(FLAG_COLUMN.saturating_sub(flag.chars().count()));
+        text.push_str(&format!("  {}{pad}{meaning}\n", style.accent(flag)));
+    }
+    // The loop left a newline on the end and `writeln!` will add the other.
+    text.pop();
+    text
+}
 
 /// The interpreter evaluates a chorefile by recursing, and its depth guard
 /// allows 128 nested calls. That fits the 8 MB main thread Linux and macOS
@@ -64,22 +108,36 @@ fn cli() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    // Asked once, here, and carried down rather than re-derived: `is_terminal`
+    // is a syscall, and a decision made in two places is a decision that can
+    // disagree with itself halfway down a page of output.
+    let style = Style::stdout();
 
     let code = match args::parse(argv) {
         Err(UsageError(message)) => {
-            let _ = writeln!(io::stderr(), "chore: {message}");
+            complain(&message);
             USAGE
         }
-        Ok(invocation) => match dispatch(invocation, &mut out) {
+        Ok(invocation) => match dispatch(invocation, &mut out, style) {
             Ok(code) => code,
             Err(exit) => {
-                let _ = writeln!(io::stderr(), "chore: {}", exit.message);
+                complain(&exit.message);
                 exit.code
             }
         },
     };
     let _ = out.flush();
     ExitCode::from(code)
+}
+
+/// One line to stderr, in the `chore: ...` shape every failure uses.
+///
+/// The style is stderr's own: `chore build > log` on a terminal has a pipe on
+/// stdout and a person on stderr, and the error is the line that person is
+/// still there for.
+fn complain(message: &str) {
+    let style = Style::stderr();
+    let _ = writeln!(io::stderr(), "{} {message}", style.error("chore:"));
 }
 
 /// An error on its way to stderr, with the exit code it implies.
@@ -123,7 +181,7 @@ impl From<Error> for Exit {
     }
 }
 
-fn dispatch(invocation: Invocation, out: &mut dyn Write) -> Result<u8, Exit> {
+fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result<u8, Exit> {
     let Invocation {
         command,
         mode,
@@ -138,24 +196,50 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write) -> Result<u8, Exit> {
             Ok(OK)
         }
         Command::Help { topic } => match topic {
-            Some(name) => help::builtin(out, &name).map(|()| OK),
-            None => help::overview(out).map(|()| OK),
+            Some(name) => help::builtin(out, &name, style).map(|()| OK),
+            // The usage block used to be the first thing bare `chore`
+            // printed. Bare `chore` leads with the task list now, so the
+            // block moves here, in front of the language reference: someone
+            // who typed `help` is the one who wants both.
+            None => {
+                writeln!(out, "{}\n", usage(style))?;
+                help::overview(out, style).map(|()| OK)
+            }
         },
         Command::Spec => {
             writeln!(out, "{}", chorefile::spec::json())?;
             Ok(OK)
         }
+        // Bare `chore` in a project answers the question the user actually
+        // has, which is "what can I run here". The usage block is a page of
+        // grammar they did not ask for, so it moves behind `chore --help` and
+        // leaves one line pointing at it. With no chorefile there is no list
+        // to lead with, so the old behaviour stands: print the usage block,
+        // then fail on stderr the way every other missing-chorefile does.
         Command::Usage => {
-            writeln!(out, "{USAGE_TEXT}")?;
-            let loaded = Loaded::discover()?;
-            writeln!(out, "\ntasks:")?;
-            list::text(out, &loaded.merged)?;
+            let loaded = match Loaded::discover() {
+                Ok(loaded) => loaded,
+                Err(exit) => {
+                    writeln!(out, "{}", usage(style))?;
+                    return Err(exit);
+                }
+            };
+            writeln!(out, "{}", style.bold("Available tasks:"))?;
+            list::text(out, &loaded.merged, style)?;
+            writeln!(
+                out,
+                "\n{} to run one, {} for the language",
+                style.accent("chore <task>"),
+                style.accent("chore help")
+            )?;
             Ok(OK)
         }
         Command::List { format } => {
             let loaded = Loaded::discover()?;
             match format {
-                ListFormat::Text => list::text(out, &loaded.merged)?,
+                ListFormat::Text => list::text(out, &loaded.merged, style)?,
+                // `--json` and `--names` are read by programs, so they are
+                // plain no matter what the terminal would have allowed.
                 ListFormat::Json => list::json(out, &loaded.merged)?,
                 ListFormat::Names => list::names(out, &loaded.merged)?,
             }
@@ -196,7 +280,7 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write) -> Result<u8, Exit> {
                     &fallback
                 }
             };
-            let errors = lint::report(out, &findings, sources)?;
+            let errors = lint::report(out, &findings, sources, style)?;
             Ok(if errors == 0 { OK } else { FAILED })
         }
         Command::Run { task, args } => {

@@ -244,13 +244,61 @@ fn list_json_has_the_documented_fields() {
 }
 
 #[test]
-fn no_arguments_prints_usage_and_the_tasks() {
+fn no_arguments_leads_with_the_tasks_and_points_at_help() {
     let dir = Dir::new();
     dir.chorefile(SAMPLE);
     let run = chore(&dir, &[]);
     assert_eq!(run.code, 0, "{}", run.stderr);
-    assert!(run.stdout.contains("usage: chore"), "{}", run.stdout);
+    assert!(run.stdout.starts_with("Available tasks:"), "{}", run.stdout);
     assert!(run.stdout.contains("build"), "{}", run.stdout);
+    // The grammar is a page long and nobody asked for it, so the answer is a
+    // pointer to where it lives rather than the page itself.
+    assert!(!run.stdout.contains("usage: chore"), "{}", run.stdout);
+    assert!(run.stdout.contains("chore help"), "{}", run.stdout);
+}
+
+#[test]
+fn no_arguments_with_no_chorefile_falls_back_to_usage() {
+    let dir = Dir::new();
+    let run = chore(&dir, &[]);
+    // Nothing to list, so the usage block is all there is to say, and the
+    // missing chorefile is still the error it has always been.
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(run.stdout.contains("usage: chore"), "{}", run.stdout);
+    assert!(run.stderr.contains("chorefile"), "{}", run.stderr);
+}
+
+#[test]
+fn help_still_carries_the_usage_block() {
+    let dir = Dir::new();
+    let run = chore(&dir, &["help"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    assert!(run.stdout.contains("usage: chore"), "{}", run.stdout);
+    assert!(run.stdout.contains("--force"), "{}", run.stdout);
+}
+
+/// Every subcommand a person might pipe somewhere is captured here rather
+/// than at a terminal, so this asserts what a pipe gets: never an escape.
+/// The machine-readable formats are the ones that would actually break.
+#[test]
+fn piped_output_carries_no_escape_sequences() {
+    let dir = Dir::new();
+    dir.chorefile(SAMPLE);
+    for args in [
+        &["list"][..],
+        &["list", "--json"],
+        &["list", "--names"],
+        &["spec"],
+        &["help"],
+        &[],
+    ] {
+        let run = chore(&dir, args);
+        assert!(
+            !run.stdout.contains('\x1b'),
+            "chore {args:?} coloured a pipe:\n{}",
+            run.stdout
+        );
+    }
 }
 
 #[test]

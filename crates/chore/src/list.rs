@@ -19,6 +19,8 @@ use chorefile::NAMESPACE_SEP;
 use chorefile::ast::Task;
 use chorefile::resolve::Merged;
 
+use crate::style::Style;
+
 /// Space between the name column and the description column.
 const GAP: usize = 4;
 
@@ -28,7 +30,11 @@ const GAP: usize = 4;
 /// forty-column gutter down the whole list.
 const MAX_NAME: usize = 28;
 
-pub fn text(out: &mut dyn Write, merged: &Merged) -> io::Result<()> {
+/// The colour is applied after the column width is computed, never before: an
+/// escape sequence occupies bytes and no columns, so padding measured on a
+/// styled name would drift the description column by exactly the length of
+/// the escapes.
+pub fn text(out: &mut dyn Write, merged: &Merged, style: Style) -> io::Result<()> {
     let tasks = &merged.file.tasks;
     if tasks.is_empty() {
         return writeln!(out, "no tasks");
@@ -44,9 +50,15 @@ pub fn text(out: &mut dyn Write, merged: &Merged) -> io::Result<()> {
         match &task.doc {
             Some(doc) => {
                 let pad = width.saturating_sub(task.name.chars().count()) + GAP;
-                writeln!(out, "  {}{}{doc}", task.name, " ".repeat(pad))
+                writeln!(
+                    out,
+                    "  {}{}{}",
+                    style.task(&task.name),
+                    " ".repeat(pad),
+                    style.dim(doc)
+                )
             }
-            None => writeln!(out, "  {}", task.name),
+            None => writeln!(out, "  {}", style.task(&task.name)),
         }?;
     }
     Ok(())

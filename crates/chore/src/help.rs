@@ -9,6 +9,7 @@ use std::io::Write;
 use chorefile::spec;
 
 use crate::Exit;
+use crate::style::Style;
 
 /// Space between the two columns of every listing.
 const GAP: usize = 2;
@@ -17,49 +18,53 @@ const GAP: usize = 2;
 /// clean, which leaves the wrapping to whoever prints it.
 const WIDTH: usize = 88;
 
-pub fn overview(out: &mut dyn Write) -> Result<(), Exit> {
-    writeln!(out, "chorefile {}", spec::version())?;
-    section(out, "syntax")?;
+pub fn overview(out: &mut dyn Write, style: Style) -> Result<(), Exit> {
+    writeln!(
+        out,
+        "{}",
+        style.bold(&format!("chorefile {}", spec::version()))
+    )?;
+    section(out, "syntax", style)?;
     let rows: Vec<_> = spec::syntax()
         .iter()
         .map(|form| (form.syntax, form.meaning))
         .collect();
     columns(out, &rows)?;
 
-    section(out, "conditions")?;
+    section(out, "conditions", style)?;
     let rows: Vec<_> = spec::conditions()
         .iter()
         .map(|c| (c.syntax, c.meaning))
         .collect();
     columns(out, &rows)?;
 
-    section(out, "chaining")?;
+    section(out, "chaining", style)?;
     let rows: Vec<_> = spec::chaining()
         .iter()
         .map(|op| (op.symbol, op.meaning))
         .collect();
     columns(out, &rows)?;
 
-    section(out, "variables")?;
+    section(out, "variables", style)?;
     let rows: Vec<_> = spec::variables()
         .iter()
         .map(|v| (v.name, v.meaning))
         .collect();
     columns(out, &rows)?;
 
-    section(out, "builtins")?;
+    section(out, "builtins", style)?;
     let rows: Vec<_> = spec::builtins()
         .iter()
         .map(|b| (b.name, b.summary))
         .collect();
     columns(out, &rows)?;
 
-    section(out, "resolution")?;
+    section(out, "resolution", style)?;
     for rule in spec::resolution() {
         writeln!(out, "{}", wrap(rule.rule, "  "))?;
     }
 
-    section(out, "rules")?;
+    section(out, "rules", style)?;
     for rule in spec::rules() {
         writeln!(out, "  {}", rule.name)?;
         writeln!(out, "{}\n", wrap(rule.rule, "    "))?;
@@ -72,15 +77,15 @@ pub fn overview(out: &mut dyn Write) -> Result<(), Exit> {
     Ok(())
 }
 
-pub fn builtin(out: &mut dyn Write, name: &str) -> Result<(), Exit> {
+pub fn builtin(out: &mut dyn Write, name: &str, style: Style) -> Result<(), Exit> {
     let Some(builtin) = spec::builtin(name) else {
         return Err(Exit::usage(unknown(name)));
     };
-    writeln!(out, "{}\n", builtin.usage)?;
+    writeln!(out, "{}\n", style.bold(builtin.usage))?;
     writeln!(out, "{}\n", wrap(builtin.summary, "  "))?;
     writeln!(out, "{}", wrap(builtin.description, "  "))?;
     if !builtin.flags.is_empty() {
-        section(out, "flags")?;
+        section(out, "flags", style)?;
         let rows: Vec<_> = builtin
             .flags
             .iter()
@@ -102,8 +107,11 @@ pub fn builtin(out: &mut dyn Write, name: &str) -> Result<(), Exit> {
     Ok(())
 }
 
-fn section(out: &mut dyn Write, title: &str) -> Result<(), Exit> {
-    writeln!(out, "\n{title}\n")?;
+/// A heading. Bold and nothing more: these are the only landmarks in a page
+/// of otherwise unbroken reference text, and a colour here would compete with
+/// the listings underneath rather than separate them.
+fn section(out: &mut dyn Write, title: &str, style: Style) -> Result<(), Exit> {
+    writeln!(out, "\n{}\n", style.bold(title))?;
     Ok(())
 }
 
