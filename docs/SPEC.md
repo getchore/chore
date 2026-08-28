@@ -75,6 +75,20 @@ directory the shell is standing in, and that finds the nearest chorefile the
 way any other invocation does, so completion follows a person between projects
 with nothing to configure per repository.
 
+## GitHub Actions
+
+```yaml
+- uses: getchore/setup-chore@v1
+- run: chore ci
+```
+
+Installs `chore` and puts it on `PATH` on Linux, macOS and Windows runners.
+Pin the major tag: it moves with fixes, so a pinned patch goes stale in a
+repository nobody is watching. `chore spec` reports the same under
+`github_action`, so a tool does not have to know it from here.
+
+Source and inputs: <https://github.com/getchore/setup-chore>
+
 ## Syntax
 
 ```

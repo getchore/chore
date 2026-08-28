@@ -77,6 +77,14 @@ pub fn overview(out: &mut dyn Write, style: Style) -> Result<(), Exit> {
         out,
         "`chore help <builtin>` explains one builtin. `chore spec` prints the whole\nreference as JSON."
     )?;
+    // The question anyone adopting a task runner asks next is how to get it
+    // onto CI, and `chore help` is where an agent looks before a README.
+    writeln!(
+        out,
+        "\nIn GitHub Actions, {} installs it:\n  {}",
+        style.accent(chorefile::spec::ACTION),
+        style.dim(chorefile::spec::ACTION_URL)
+    )?;
     Ok(())
 }
 

@@ -85,6 +85,18 @@ pub struct Operator {
 }
 
 /// One rule that is easy to get wrong from the syntax alone.
+/// The action that installs `chore` on a GitHub Actions runner.
+///
+/// Named here rather than only in the README because `chore spec` is what an
+/// agent reads, and the question it most often has to answer about a task
+/// runner is how to get it onto CI. The major tag is what a workflow should
+/// pin: it moves with fixes, so a pinned patch would go stale in someone
+/// else's repository.
+pub const ACTION: &str = "getchore/setup-chore@v1";
+
+/// Where that action lives, for anything that wants to read its inputs.
+pub const ACTION_URL: &str = "https://github.com/getchore/setup-chore";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rule {
     pub name: &'static str,
@@ -819,6 +831,13 @@ pub fn json() -> String {
             Json::Arr(crate::RESERVED_TASKS.iter().map(|n| Json::Str(n)).collect()),
         ),
         ("namespace_separator", Json::Str(crate::NAMESPACE_SEP)),
+        (
+            "github_action",
+            Json::Obj(vec![
+                ("uses", Json::Str(ACTION)),
+                ("url", Json::Str(ACTION_URL)),
+            ]),
+        ),
     ]);
 
     let mut out = String::new();
