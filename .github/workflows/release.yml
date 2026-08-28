@@ -123,23 +123,10 @@ jobs:
       # and tar-elsewhere branch and the sha256sum-or-shasum branch are both
       # gone. The artifact itself is still built from the tag, above.
       #
-      # Installing it needs the one platform branch chore cannot remove:
-      # install.sh refuses to run on Windows and hands you install.ps1.
-      - name: Install chore
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          curl -fsSL https://getchore.github.io/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Install chore
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          irm https://getchore.github.io/install.ps1 | iex
-          # The script sets the *user* PATH, which a later step in this job
-          # does not inherit; GITHUB_PATH is what does.
-          "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      # setup-chore carries the one `runner.os` branch chore cannot remove --
+      # curl and PowerShell are not the same program -- so it lives there once
+      # instead of here and in every other workflow that wants the tool.
+      - uses: getchore/setup-chore@v1
 
       - name: Package
         id: package
