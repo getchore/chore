@@ -9,16 +9,58 @@ shell, so behavior is identical on macOS, Linux and Windows (gnu and msvc).
 
 ```
 chore <task> [args...] [--dry] [--force]
-chore list [--json]        # tasks and descriptions
-chore help [builtin]       # syntax and builtins, or one builtin
-chore check                # lint without running
-chore spec                 # full reference as JSON, for agents
+chore list [--json|--names]         # tasks and descriptions
+chore help [builtin]                # syntax and builtins, or one builtin
+chore check                         # lint without running
+chore spec                          # full reference as JSON, for agents
+chore completions [shell] [--write] # tab completion for task names
 ```
 
-`list`, `help`, `check` and `spec` are reserved task names.
+`list`, `help`, `check`, `spec` and `completions` are reserved task names.
+`completions` joined that list after the others, so a chorefile that already
+had a task of that name is now reported by `chore check`, and the subcommand
+is what `chore completions` runs.
 
 - `--dry` echoes commands without side effects.
 - `--force` disables run-once.
+
+### `list --names`
+
+One task per line, `name<TAB>description`, in the same order as `chore list`.
+It is the format a completion script reads: no padding to strip, no JSON, and
+so no dependency on `jq`. A task with no comment above it prints its name, the
+tab, and nothing after it, so every line has the same two fields.
+
+### completions
+
+```
+chore completions            # what to add, and to which file
+chore completions <shell>    # the script itself, on stdout
+chore completions --write    # add it, once
+```
+
+The shells are `bash`, `zsh`, `fish` and `powershell`, which also answers to
+`pwsh`.
+
+Bare `chore completions` reads `$SHELL`, names the file to edit and prints the
+line to put in it, and changes nothing. `$SHELL` is the login shell rather than
+the running one, so it is a guess; naming a shell is how to override it. With a
+shell named, the output is the script itself, for redirecting into a file or
+into a package manager's completion directory.
+
+`--write` does the edit: it appends the line, under a `# chore completions`
+comment, to `~/.bashrc` or `~/.zshrc`, and prints what it changed. It is
+idempotent, so a second run reports that the file already has it and leaves the
+file alone. fish reads a directory rather than a startup file, so there
+`--write` writes the script to `~/.config/fish/completions/chore.fish`.
+PowerShell resolves `$PROFILE` for itself, and where it lands moves between
+Windows, PowerShell 7 and the ISE, so chore will not guess it: `--write` says
+it cannot and stops, and `chore completions` prints the line to add by hand.
+
+The scripts embed no task list. They call `chore list --names` in whatever
+directory the shell is standing in, and that finds the nearest chorefile the
+way any other invocation does, so completion follows a person between projects
+with nothing to configure per repository.
 
 ## Syntax
 
@@ -99,7 +141,7 @@ A task that printed something before returning still produced that value, so a
 `$(task)` gets what it echoed, and run-once records it for the next capture.
 
 In the task named on the command line there is no caller left, so `return`
-ends the run — successfully, unless it named a code. `return` outside a task is
+ends the run, successfully unless it named a code. `return` outside a task is
 a syntax error: there is no task to leave, and `exit` is what ends a run.
 
 ### Task parameters
@@ -117,7 +159,7 @@ task setup target=$TRIPLE {
 
 The default is an ordinary word, so quoting, `$name` and `$( )` all work. It is
 evaluated **at call time, in the called task's scope, and only when the caller
-left the argument out** — so a `$( )` default costs nothing on a call that
+left the argument out**, so a `$( )` default costs nothing on a call that
 supplies a value. It can read globals, the builtin variables, and the
 parameters declared to its left (`task t a b=$1`), but not one to its right,
 which is not bound yet.
@@ -133,7 +175,7 @@ happened to contain. An argument written at a *call site* still splits, because
 there it is an argument.
 
 Both kinds bind to `$1`, `$2`, …; a parameter's name is not a variable. `$#`
-counts what the call bound, defaults included, and `$@` is that list — which is
+counts what the call bound, defaults included, and `$@` is that list, which is
 how a task forwards itself to another.
 
 `env=` with nothing after it defaults to the empty string, exactly as the
@@ -223,7 +265,7 @@ dropped, since a flattened tree has none. It exists for `--member`: without it,
 `extract out.tar.gz got --member sona` lands `got/pkg/bin/sona`, a path you
 cannot predict without opening the archive first, and every such call has to be
 followed by a `move`. Two entries that would flatten to the same name is an
-error naming both — the alternative is a run that succeeds and whose result
+error naming both. The alternative is a run that succeeds and whose result
 depends on the order entries sit in the archive. `--strip` and `--flatten`
 cannot be combined, since `--flatten` already drops every directory.
 
@@ -276,8 +318,8 @@ not apply to it.
 
 **$TRIPLE** is the rustc target triple for the host, spelled the way `rustc
 -vV` and `cargo --target` spell it. It is not derivable from `$OS` and `$ARCH`
-— `linux` alone cannot say `gnu` or `musl`, and `windows` alone cannot say
-`msvc` or `gnu` — which is why chore reports it rather than leaving every Rust
+(`linux` alone cannot say `gnu` or `musl`, and `windows` alone cannot say
+`msvc` or `gnu`), which is why chore reports it rather than leaving every Rust
 chorefile to write the same mapping table. Use `$PLATFORM` for naming your own
 release artifacts and `$TRIPLE` for anything handed to a toolchain. On a target
 chore has no triple for it is empty: a guessed triple is accepted by cargo and
@@ -417,8 +459,8 @@ wins over a builtin of the same name, and it is `check` that reports it. The
 same is true of a task named after a subcommand. `chore list` is always the
 subcommand, so the task is unreachable.
 
-Reports syntax errors, reserved names, unknown commands, undefined variables —
-in a parameter's default as much as in a body — duplicate names, a parameter
+Reports syntax errors, reserved names, unknown commands, undefined variables
+(in a parameter's default as much as in a body), duplicate names, a parameter
 declared twice in one header, a parameter read as `$name` where parameters are
 positional, include cycles, and non-portable commands (`curl`, `unzip`, `tar`,
 `cp`, `rm`) with the builtin that replaces them. A default is checked in the

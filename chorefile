@@ -103,6 +103,17 @@ task static-check {
     }
 }
 
+# Build this working copy and put it where install.sh puts a release, so
+# `chore` on the PATH is the tree you are standing in. The same directory the
+# installers use, so this replaces a downloaded binary rather than shadowing
+# it from somewhere else on the PATH.
+task upgrade {
+    cargo build --release --locked --bin chore
+    mkdir $HOME/.local/bin
+    copy target/release/chore$EXE $HOME/.local/bin/chore$EXE
+    $HOME/.local/bin/chore$EXE --version
+}
+
 # Delete the target directory.
 task clean {
     cargo clean

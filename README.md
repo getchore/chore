@@ -33,6 +33,21 @@ the published checksum. Prebuilt archives for macOS, Linux (musl-static) and
 Windows on x86-64 and arm64 are on the
 [releases page](https://github.com/getchore/chore/releases/latest).
 
+## Tab completion
+
+```sh
+# ~/.zshrc
+source <(chore completions zsh)
+```
+
+`chore completions --write` adds that line for you, to the startup file of
+whichever shell `$SHELL` names, and running it a second time changes nothing.
+bash, zsh, fish and powershell have scripts, and `chore completions <shell>`
+prints one to stdout for a package manager to redirect. PowerShell resolves
+`$PROFILE` for itself, so there the line goes in by hand. Names come from
+`chore list --names` in the current directory, so completion works in every
+project with nothing to set up per repo.
+
 ## In GitHub Actions
 
 ```yaml

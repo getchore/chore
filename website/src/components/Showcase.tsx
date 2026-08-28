@@ -59,7 +59,11 @@ chorefile:14  curl is not portable — use download
 chorefile:22  $flag is never assigned — did you mean $flags?
 
 # the whole language as JSON, for agents
-$ chore spec | jq '.builtins | keys'`
+$ chore spec | jq '.builtins | keys'
+
+# tab completion, in every project, with nothing to set up per repo
+$ chore completions --write
+added to ~/.zshrc: source <(chore completions zsh)`
 
 const TABS = [
   { id: 'chorefile', label: 'chorefile', source: CHOREFILE },
