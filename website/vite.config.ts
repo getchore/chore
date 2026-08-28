@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
@@ -238,6 +238,14 @@ function llms(): Plugin {
         writeFileSync(here(`./dist/${name}`), text)
         console.log(`  llms        dist/${name}  ${(statSync(here(`./dist/${name}`)).size / 1024).toFixed(1)} kB`)
       }
+
+      // A real file at /reference, not just the SPA fallback. Pages answers an
+      // unknown path with 404.html and a 404 status -- the page renders, but
+      // anything that reads the status (a link checker, a fetch tool, an
+      // agent) is told the page does not exist.
+      mkdirSync(here('./dist/reference'), { recursive: true })
+      copyFileSync(here('./dist/index.html'), here('./dist/reference/index.html'))
+      console.log('  llms        dist/reference/index.html')
 
       copyFileSync(here('./src/spec.json'), here('./dist/spec.json'))
       console.log(`  llms        dist/spec.json  ${(statSync(here('./dist/spec.json')).size / 1024).toFixed(1)} kB`)

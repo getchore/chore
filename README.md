@@ -9,7 +9,7 @@
 Run your project's tasks from a `chorefile`, through a shell that lives inside
 the binary. The same file does the same thing on macOS, Linux and Windows.
 
-[**Get started**](https://getchore.github.io/chore/) &nbsp;·&nbsp; [**Language reference**](docs/SPEC.md) &nbsp;·&nbsp; [**Releases**](https://github.com/getchore/chore/releases/latest)
+[**Get started**](https://getchore.github.io/chore/) &nbsp;·&nbsp; [**Reference**](https://getchore.github.io/chore/reference) &nbsp;·&nbsp; [**Releases**](https://github.com/getchore/chore/releases/latest)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/getchore/chore/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/getchore/chore/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/getchore/chore?style=flat-square&color=f97316)](https://github.com/getchore/chore/releases/latest) [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
@@ -27,53 +27,7 @@ curl -fsSL https://getchore.github.io/chore/install.sh | sh
 irm https://getchore.github.io/chore/install.ps1 | iex
 ```
 
-Append `-s -- v1.1.0` (or run the PowerShell script as a block) to pin a
-version. Both honour `CHORE_INSTALL_DIR`, default `~/.local/bin`, and verify
-the published checksum. Prebuilt archives for macOS, Linux (musl-static) and
-Windows on x86-64 and arm64 are on the
-[releases page](https://github.com/getchore/chore/releases/latest).
-
-## Tab completion
-
-```sh
-# ~/.zshrc
-source <(chore completions zsh)
-```
-
-`chore completions --write` adds that line for you, to the startup file of
-whichever shell `$SHELL` names, and running it a second time changes nothing.
-bash, zsh, fish and powershell have scripts, and `chore completions <shell>`
-prints one to stdout for a package manager to redirect. PowerShell resolves
-`$PROFILE` for itself, so there the line goes in by hand. Names come from
-`chore list --names` in the current directory, so completion works in every
-project with nothing to set up per repo.
-
-## Syntax highlighting
-
-```sh
-curl -fsSL https://github.com/getchore/chorefile-vscode/releases/latest/download/chorefile.vsix -o /tmp/chorefile.vsix \
-  && code --install-extension /tmp/chorefile.vsix
-```
-
-Colors `chorefile` and `.chore` files in VS Code, Cursor and VSCodium. Source
-and other install options are in
-[getchore/chorefile-vscode](https://github.com/getchore/chorefile-vscode).
-
-## In GitHub Actions
-
-```yaml
-- uses: getchore/setup-chore@v1
-- run: chore ci
-```
-
-Installs `chore` and puts it on `PATH` on `ubuntu-*`, `macos-*` and
-`windows-*` runners, so a matrix leg no longer needs a `runner.os` branch to
-install its tools. Pin a version with `with: {version: v1.1.0}`.
-
 ## A chorefile
-
-`chore` reads the `chorefile` in the working directory or the nearest parent,
-and the comment above a task is its description.
 
 ```sh
 DIST=$ROOT/dist/$PLATFORM
@@ -95,49 +49,32 @@ task package {
 }
 ```
 
-```console
-$ chore list
-  build      build the compiler
-  package    package the release archive for this platform
-```
-
-`download`, `extract`, `archive`, `copy`, `move`, `remove`, `find` and
-`sha256` are builtins, so the tasks above need nothing installed on the
-machine and behave the same on every platform.
+`download`, `extract`, `archive` and `copy` are builtins, so this needs nothing
+installed and behaves the same everywhere.
 
 ## It tells you what won't work on Windows
 
-```sh
-# fetch the SDK
-task sdk {
-    curl -L https://example.com/sdk.zip -o sdk.zip
-    unzip sdk.zip -d vendor
-}
-```
-
 ```console
 $ chore check
-/tmp/myapp/chorefile:3:5: `curl` is not portable: it is missing, or spelled differently, on at least one platform this chorefile can run on
+chorefile:3:5: `curl` is not portable: it is missing, or spelled differently, on at least one platform this chorefile can run on
   help: use the `download` builtin — it speaks https and `gh://owner/repo/tag/asset`, takes `--retries`, `--timeout` and `--sha256`, and needs nothing installed on the machine
-/tmp/myapp/chorefile:4:5: `unzip` is not portable: it is missing, or spelled differently, on at least one platform this chorefile can run on
-  help: use the `extract` builtin — it unpacks zip, tar, `.gz`, `.xz` and `.zst` with the same flags everywhere, and Windows has no `unzip`
 
-2 problems
+1 problem
 ```
 
-`check` only parses, and nothing runs. It exits nonzero for errors like these.
-A command it cannot find on this machine's `PATH` is a warning instead, so a
-tool that exists solely in CI does not break the gate.
+Nothing runs. Errors exit nonzero; a command missing only from *this* machine
+is a warning, so a CI-only tool doesn't break the gate.
 
-## Docs
+## More
 
-[getchore.github.io/chore](https://getchore.github.io/chore/) is the guide, and
-[docs/SPEC.md](docs/SPEC.md) is the full language reference. `chore help` and
-`chore spec` print the same material from the binary. Release and installer
-mechanics are in [docs/RELEASING.md](docs/RELEASING.md).
+- [**Guide and reference**](https://getchore.github.io/chore/) — and [`llms.txt`](https://getchore.github.io/chore/llms-full.txt) for agents
+- [**setup-chore**](https://github.com/getchore/setup-chore) — `- uses: getchore/setup-chore@v1`
+- [**VS Code extension**](https://github.com/getchore/chorefile-vscode) — highlighting for `chorefile` and `.chore`
+- `chore completions --write` — tab completion for bash, zsh, fish and powershell
+- [docs/SPEC.md](docs/SPEC.md) · [docs/RELEASING.md](docs/RELEASING.md)
 
-`chore` builds itself with its own `chorefile`: `chore list` shows the tasks,
-and `chore ci` is the gate CI runs.
+`chore` builds itself with its own [`chorefile`](chorefile) — `chore ci` is the
+gate CI runs.
 
 ## License
 
