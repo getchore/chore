@@ -36,8 +36,10 @@ task fmt {
 
 # Formatting and clippy: the two gates that fail most often, fast.
 task lint {
-    # Named `lint` rather than `check` because `chore check` is chore's own
-    # linter subcommand and a task can never shadow it.
+    # Named `lint` rather than `check`: a task may take that name now, but
+    # `chore check` in this tree should stay chore's own linter, which is what
+    # the e2e tests and half the docs assume it is. `chore --check` is the
+    # spelling that lints whatever a chorefile says.
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --locked -- -D warnings
 }

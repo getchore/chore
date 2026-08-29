@@ -381,3 +381,27 @@ fn reserved_names_and_operators_are_documented() {
     let symbols: Vec<&str> = spec::chaining().iter().map(|o| o.symbol).collect();
     assert_eq!(symbols, ["&&", "||", "|", ">", ">>", "2>"]);
 }
+
+/// The one subcommand a chorefile may take back. An agent reading the spec has
+/// to be told, or it will keep renaming a perfectly legal `task check`.
+#[test]
+fn check_is_not_reserved_and_the_rule_says_so() {
+    assert!(!chorefile::RESERVED_TASKS.contains(&"check"));
+    let rule = spec::rules()
+        .iter()
+        .find(|r| r.name == "reserved tasks")
+        .expect("a rule about reserved tasks");
+    assert!(rule.rule.contains("`chore --check`"), "{}", rule.rule);
+}
+
+/// An empty unquoted argument collapsing is sh's rule, and the place someone
+/// meets it is `$1` — not the paragraph about word splitting.
+#[test]
+fn interpolation_warns_about_an_empty_unquoted_argument() {
+    let form = spec::syntax()
+        .iter()
+        .find(|f| f.name == "interpolation")
+        .expect("the interpolation form");
+    assert!(form.meaning.contains("--dry"), "{}", form.meaning);
+    assert!(form.meaning.contains("empty"), "{}", form.meaning);
+}

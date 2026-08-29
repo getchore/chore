@@ -22,10 +22,15 @@ use crate::style::Style;
 
 /// The starter chorefile, verbatim.
 ///
-/// It must pass `chore check` with zero findings, which is why every command
-/// in it is a builtin: `check` reports `curl`, `cp`, `rm` and friends as
+/// It must pass `chore --check` with zero findings, which is why every command
+/// in it is a builtin: the lint reports `curl`, `cp`, `rm` and friends as
 /// non-portable, and a file that lints against the tool that wrote it is a
-/// poor first impression. The e2e tests run `check` on what this writes.
+/// poor first impression. The e2e tests lint what this writes.
+///
+/// It also defines no task named `check`. That is legal now — the name is not
+/// reserved — but the starter is the one example of the language every new
+/// user reads, and teaching them a name that shadows a subcommand on their
+/// first file is not what this is for.
 const STARTER: &str = r#"# Project tasks. `chore list` shows them, `chore <task>` runs one.
 # The comment directly above a task is the description `chore list` prints.
 
@@ -106,14 +111,16 @@ mod tests {
 
     /// The file this command writes is the one example of the language that
     /// every new user reads, so a stray reserved name in it would teach the
-    /// wrong thing and `check` would flag it the moment they ran it.
+    /// wrong thing and the lint would flag it the moment they ran it. `check`
+    /// is not reserved any more but is excluded by hand: a starter that
+    /// shadows a subcommand teaches the wrong reflex.
     #[test]
     fn the_starter_defines_no_reserved_task() {
         for line in STARTER.lines() {
             if let Some(rest) = line.strip_prefix("task ") {
                 let name = rest.split_whitespace().next().unwrap_or_default();
                 assert!(
-                    !chorefile::RESERVED_TASKS.contains(&name),
+                    !chorefile::RESERVED_TASKS.contains(&name) && name != "check",
                     "starter defines reserved task `{name}`"
                 );
             }

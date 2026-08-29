@@ -15,6 +15,15 @@ use crate::completions::Shell;
 const DRY: &str = "--dry";
 const FORCE: &str = "--force";
 
+/// The lint, spelled as a flag so it cannot be taken by a task.
+///
+/// `check` is not a reserved name any more, so `chore check` runs a task of
+/// that name when the chorefile defines one. A script that means the lint has
+/// to be able to say so without knowing what the chorefile contains, and only
+/// a flag is safe from that: it can appear before the task name, where nothing
+/// a chorefile says reaches.
+const CHECK: &str = "--check";
+
 /// What the user asked for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
@@ -24,7 +33,7 @@ pub enum Command {
     List { format: ListFormat },
     /// `chore help [builtin]`
     Help { topic: Option<String> },
-    /// `chore check`
+    /// `chore --check`, and `chore check` when no task claims the name.
     Check,
     /// `chore spec`
     Spec,
@@ -71,6 +80,19 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Usag
         match rest.next() {
             Some(arg) if arg == DRY => mode = Mode::Dry,
             Some(arg) if arg == FORCE => repeat = Repeat::Always,
+            // Nothing runs, so there is nothing for the other two flags to
+            // act on and nothing to pass an argument to: rejected rather than
+            // ignored, the way `chore list --nope` is.
+            Some(arg) if arg == CHECK => {
+                if mode != Mode::Run || repeat != Repeat::Once || rest.next().is_some() {
+                    return Err(UsageError(format!("usage: chore {CHECK}")));
+                }
+                return Ok(Invocation {
+                    command: Command::Check,
+                    mode,
+                    repeat,
+                });
+            }
             Some(arg) if arg == "--help" || arg == "-h" => {
                 break Some("help".to_string());
             }
@@ -98,6 +120,10 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Usag
 
     // A subcommand shadows a task of the same name, so `chore list` is never
     // ambiguous. That is why the names are reserved in the first place.
+    //
+    // `check` is not among them: `chore check` parses as a run, and only the
+    // chorefile can say whether a task answers to that name. Where none does,
+    // `dispatch` falls back to the lint.
     let command = if RESERVED_TASKS.contains(&name.as_str()) {
         let tail: Vec<String> = rest.collect();
         subcommand(&name, tail)?
@@ -146,7 +172,6 @@ fn subcommand(name: &str, args: Vec<String>) -> Result<Command, UsageError> {
             }),
             _ => Err(UsageError("usage: chore help [builtin]".into())),
         },
-        "check" if args.is_empty() => Ok(Command::Check),
         // `init` takes nothing: there is one starter chorefile and one place
         // it goes, so an argument here is a misunderstanding worth naming
         // rather than something to quietly ignore.
@@ -305,6 +330,35 @@ mod tests {
     fn init_takes_no_arguments() {
         assert_eq!(parse_args(&["init"]).command, Command::Init);
         assert!(parse(["init".into(), "--force".into()]).is_err());
+    }
+
+    /// The word is a run — `dispatch` decides between the task and the lint
+    /// once it has read the chorefile — and the flag is always the lint.
+    #[test]
+    fn check_is_a_task_name_and_a_flag() {
+        assert_eq!(
+            parse_args(&["check"]).command,
+            Command::Run {
+                task: "check".into(),
+                args: vec![],
+            }
+        );
+        assert_eq!(parse_args(&["--check"]).command, Command::Check);
+    }
+
+    #[test]
+    fn check_takes_nothing_beside_it() {
+        for args in [
+            &["--check", "--dry"][..],
+            &["--dry", "--check"][..],
+            &["--check", "--force"][..],
+            &["--check", "build"][..],
+        ] {
+            assert!(
+                parse(args.iter().map(|s| s.to_string())).is_err(),
+                "{args:?} should be a usage error"
+            );
+        }
     }
 
     #[test]

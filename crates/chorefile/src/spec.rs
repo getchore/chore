@@ -463,7 +463,9 @@ is a global, evaluated once before the first task runs.",
         syntax: "$name  \"$name/lib\"  $1  $@  $#",
         example: "cargo build --target-dir \"$ROOT/target\"",
         meaning: "Substitute a variable. `$1`, `$2`, ... are a task's parameters, `$@` all of \
-them as separate words, `$#` the count.",
+them as separate words, `$#` the count. An empty value written unquoted expands to no word at \
+all rather than to an empty argument, as in sh, so quote it — `\"$1\"` — wherever the position \
+matters; `--dry` prints the argv that survived.",
     },
     Form {
         name: "capture",
@@ -683,9 +685,10 @@ only when handed to Windows. Paths printed back — by `find`, `which`, `$CWD`, 
     },
     Rule {
         name: "reserved tasks",
-        rule: "`list`, `help`, `check`, `spec`, `completions` and `init` are subcommands, \
-so a task may not take those names. `::` is reserved in a task name for include \
-namespaces.",
+        rule: "`list`, `help`, `spec`, `completions` and `init` are subcommands, \
+so a task may not take those names. `check` is not reserved: a task named `check` runs when \
+`chore check` is typed, and `chore --check` is the lint whatever the chorefile says. `::` is \
+reserved in a task name for include namespaces.",
     },
     Rule {
         name: "top-level statements",

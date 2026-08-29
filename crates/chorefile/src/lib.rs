@@ -33,7 +33,13 @@ pub const FILE_EXT: &str = "chore";
 pub const NAMESPACE_SEP: &str = "::";
 
 /// Subcommand names that cannot be used as task names.
-pub const RESERVED_TASKS: &[&str] = &["list", "help", "check", "spec", "completions", "init"];
+///
+/// `check` is deliberately absent: it is the one subcommand a chorefile may
+/// take back. Every Cargo project wants `task check { cargo check }`, and
+/// nothing depends on `chore check` meaning the lint the way completion
+/// scripts and tooling depend on `chore list` — so `chore check` runs the task
+/// where one exists, and `chore --check` is the lint that never yields.
+pub const RESERVED_TASKS: &[&str] = &["list", "help", "spec", "completions", "init"];
 
 /// Find the chorefile governing `from`: the nearest one at `from` or above it.
 ///

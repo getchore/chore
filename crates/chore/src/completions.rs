@@ -219,15 +219,21 @@ fn tilde(path: &std::path::Path) -> String {
     }
 }
 
+// Every script offers the subcommands beside the task names, and `check` is
+// the one word that can be in both lists: it is a subcommand *and* a name a
+// chorefile is allowed to define. So each script drops a subcommand the task
+// list already supplied, rather than offering `check` twice.
 const BASH: &str = r#"# chore completions for bash.
 _chore() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     if [ "$COMP_CWORD" -ne 1 ]; then
         return
     fi
-    local names
+    local names words
     names="$(chore list --names 2>/dev/null | cut -f1)"
-    COMPREPLY=($(compgen -W "$names list help check spec completions init" -- "$cur"))
+    words="$(printf '%s\nlist\nhelp\ncheck\nspec\ncompletions\ninit\n' "$names" \
+        | sed '/^$/d' | sort -u)"
+    COMPREPLY=($(compgen -W "$words" -- "$cur"))
 }
 complete -F _chore chore
 "#;
@@ -236,14 +242,17 @@ complete -F _chore chore
 // the comment above it.
 const ZSH: &str = r#"#compdef chore
 _chore() {
-    local -a tasks
-    local name desc
+    local -a tasks names
+    local name desc sub
     while IFS=$'\t' read -r name desc; do
         tasks+=("${name}:${desc}")
+        names+=("$name")
     done < <(chore list --names 2>/dev/null)
-    tasks+=('list:tasks and descriptions' 'help:syntax and builtins'
-            'check:lint without running' 'spec:full reference as JSON'
-            'completions:shell completion' 'init:write a starter chorefile')
+    for sub in 'list:tasks and descriptions' 'help:syntax and builtins' \
+               'check:lint without running' 'spec:full reference as JSON' \
+               'completions:shell completion' 'init:write a starter chorefile'; do
+        (( ${names[(I)${sub%%:*}]} )) || tasks+=("$sub")
+    done
     _describe -t chore-tasks 'task' tasks
 }
 compdef _chore chore
@@ -252,15 +261,19 @@ compdef _chore chore
 // fish reads `name<TAB>description` from a command directly, so the script is
 // the one line.
 const FISH: &str = r#"# chore completions for fish.
+function __chore_task_named --description 'whether the chorefile defines this task'
+    chore list --names 2>/dev/null | string match -q -r -- "^$argv[1]\t"
+end
 complete -c chore -f -a '(chore list --names 2>/dev/null)'
 complete -c chore -f -n '__fish_use_subcommand' -a 'list' -d 'tasks and descriptions'
 complete -c chore -f -n '__fish_use_subcommand' -a 'help' -d 'syntax and builtins'
-complete -c chore -f -n '__fish_use_subcommand' -a 'check' -d 'lint without running'
+complete -c chore -f -n '__fish_use_subcommand; and not __chore_task_named check' -a 'check' -d 'lint without running'
 complete -c chore -f -n '__fish_use_subcommand' -a 'spec' -d 'full reference as JSON'
 complete -c chore -f -n '__fish_use_subcommand' -a 'completions' -d 'shell completion'
 complete -c chore -f -n '__fish_use_subcommand' -a 'init' -d 'write a starter chorefile'
 complete -c chore -l dry -d 'echo commands without side effects'
 complete -c chore -l force -d 'disable run-once'
+complete -c chore -l check -d 'lint without running, whatever the chorefile says'
 "#;
 
 const POWERSHELL: &str = r#"# chore completions for PowerShell.
@@ -268,12 +281,18 @@ Register-ArgumentCompleter -Native -CommandName chore -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
     $lines = @()
     try { $lines = @(chore list --names 2>$null) } catch { }
-    $lines += "list`ttasks and descriptions"
-    $lines += "help`tsyntax and builtins"
-    $lines += "check`tlint without running"
-    $lines += "spec`tfull reference as JSON"
-    $lines += "completions`tshell completion"
-    $lines += "init`twrite a starter chorefile"
+    $names = @($lines | ForEach-Object { ($_ -split "`t", 2)[0] })
+    $subcommands = @(
+        "list`ttasks and descriptions"
+        "help`tsyntax and builtins"
+        "check`tlint without running"
+        "spec`tfull reference as JSON"
+        "completions`tshell completion"
+        "init`twrite a starter chorefile"
+    )
+    foreach ($sub in $subcommands) {
+        if ($names -notcontains ($sub -split "`t", 2)[0]) { $lines += $sub }
+    }
     foreach ($line in $lines) {
         $parts = $line -split "`t", 2
         $name = $parts[0]
@@ -301,6 +320,33 @@ mod tests {
     fn pwsh_is_an_alias() {
         assert_eq!(Shell::parse("pwsh"), Some(Shell::PowerShell));
         assert_eq!(Shell::parse("nushell"), None);
+    }
+
+    /// `check` is a subcommand and a legal task name at once. Every script
+    /// still has to offer it — a project without the task has no other way to
+    /// discover the lint by tab — and none may offer it twice, which is why
+    /// each one filters the subcommand list against the task list.
+    #[test]
+    fn every_script_offers_check_exactly_once() {
+        for shell in Shell::all() {
+            let script = shell.script();
+            assert!(
+                script.contains("check"),
+                "{shell} script must still complete `check`"
+            );
+            // Each script drops a subcommand the task list already offered,
+            // by whatever its shell spells that with.
+            let guard = match shell {
+                Shell::Bash => "sort -u",
+                Shell::Zsh => "${names[(I)${sub%%:*}]}",
+                Shell::Fish => "__chore_task_named check",
+                Shell::PowerShell => "-notcontains",
+            };
+            assert!(
+                script.contains(guard),
+                "{shell} script would offer a `check` task twice"
+            );
+        }
     }
 
     #[test]
