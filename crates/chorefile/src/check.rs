@@ -691,6 +691,22 @@ impl<'a> Checker<'a> {
             }
 
             if let Some(ns) = &include.namespace {
+                // `$env::NAME` reads the machine in every file, so the
+                // namespace cannot also be an include's: `$env::PATH` would
+                // then mean one thing here and another one file away.
+                if ns == vars::ENV_NAMESPACE {
+                    self.push(
+                        Diagnostic::error(
+                            format!("include namespace `{ns}` is reserved"),
+                            at.clone(),
+                        )
+                        .with_help(format!(
+                            "`$env::NAME` reads an environment variable, so `{ns}::` cannot \
+                             also name an include's tasks and globals; give this one another \
+                             name"
+                        )),
+                    );
+                }
                 if ns.contains(NAMESPACE_SEP) {
                     self.push(
                         Diagnostic::error(
@@ -995,6 +1011,9 @@ impl<'a> Checker<'a> {
         if !cmd.force_path && name == "env" && args.len() == cmd.args.len() {
             self.env_prefixed(&args, cmd.span, scope);
         }
+        if !cmd.force_path && name == "dotenv" {
+            self.dotenv(cmd);
+        }
     }
 
     /// `env NAME=value <cmd> [args...]` runs a command, so `check` has to see
@@ -1026,6 +1045,68 @@ impl<'a> Checker<'a> {
         // Never `^`-forced: the parser takes a `^` only in front of a
         // statement's command name, so one cannot be written here at all.
         self.resolution(first, false, span, scope);
+    }
+
+    /// `dotenv <path> [optional]`: the shape, and nothing about the file.
+    ///
+    /// **A missing `.env` is not a finding.** It is the normal state of a file
+    /// that is in `.gitignore` — which is where a `.env` belongs — so
+    /// reporting it would fire on every clean checkout and on CI, and say
+    /// nothing about the chorefile. That is also why `optional` exists and why
+    /// the run, not `check`, is where its absence is decided.
+    ///
+    /// What is left is the shape, which is a fact about the file: a path
+    /// assembled at run time is one `check` and a reader both have to take on
+    /// trust, and a misspelt `optional` is a word the interpreter would
+    /// otherwise meet as a second path.
+    fn dotenv(&mut self, cmd: &Command) {
+        let at = self.at(cmd.span);
+        let Some(path) = cmd.args.first() else {
+            self.push(
+                Diagnostic::error("`dotenv` has no file to load".to_string(), at).with_help(
+                    "`dotenv <path> [optional]` reads `KEY=value` lines into this call's \
+                     environment",
+                ),
+            );
+            return;
+        };
+        if literal(path).is_none() {
+            self.push(
+                Diagnostic::error(
+                    "a `dotenv` path must be written out, not built from a variable or a \
+                     capture"
+                        .to_string(),
+                    at.clone(),
+                )
+                .with_help(
+                    "which files a chorefile reads is a fact about the file: a computed path \
+                     could not be read off the page, and `check` could say nothing about it",
+                ),
+            );
+        }
+        // A computed word says nothing: it is `optional` or it is not, and
+        // only the run can tell. A literal one that is not `optional` is a
+        // misspelling, and naming it is the whole of the help a reader needs.
+        if let Some(word) = cmd.args.get(1).and_then(literal)
+            && word != "optional"
+        {
+            self.push(
+                Diagnostic::error(format!("`{word}` is not a word `dotenv` takes"), at.clone())
+                    .with_help(
+                        "the only word after the path is `optional`, which skips the file when \
+                         it is missing",
+                    ),
+            );
+        }
+        if cmd.args.len() > 2 {
+            self.push(
+                Diagnostic::error(
+                    "`dotenv` takes one path and at most `optional` after it".to_string(),
+                    at,
+                )
+                .with_help("load a second file with a second `dotenv` line"),
+            );
+        }
     }
 
     // -- script blocks ------------------------------------------------------
@@ -1513,6 +1594,12 @@ impl<'a> Checker<'a> {
     fn var(&mut self, var: &VarRef, span: Span, scope: &Scope) {
         let at = self.at(span);
         match var {
+            // `$env::NAME` is always in scope. Whether the variable is set is
+            // a fact about the machine the task runs on, not about the file,
+            // and `check` reports facts about the file: reporting an unset
+            // `$env::GITHUB_TOKEN` on a laptop would be a finding that says
+            // nothing about the chorefile and goes away in CI.
+            VarRef::Named(name) if vars::env_ref(name).is_some() => {}
             VarRef::Named(name) => {
                 let defined =
                     vars::BUILTIN_NAMES.contains(&name.as_str()) || scope.names.contains(name);
@@ -1561,11 +1648,28 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(String::as_str)
                     .chain(vars::BUILTIN_NAMES.iter().copied());
-                d = match nearest(name, known) {
-                    Some(similar) => d.with_help(format!("did you mean `${similar}`?")),
-                    None => d.with_help(format!(
-                        "assign `{name}=...` before this line, or add it as a top-level global"
+                // A name this machine exports is the likeliest thing an
+                // author meant by a bare `$FOO`, and it is the one guess
+                // `check` can make that is nearly always right — a chorefile
+                // does not accidentally name `HOME` or `GITHUB_TOKEN`. It
+                // wins over a did-you-mean, which would offer a variable that
+                // merely looks similar in place of the one that is actually
+                // there. Reading the environment here is a fact about *this*
+                // machine, so it can only ever add help to a finding the file
+                // already earned; it never creates or silences one.
+                d = match std::env::var(name.as_str()) {
+                    Ok(_) => d.with_help(format!(
+                        "`{name}` is set in the environment: write `$env::{name}`. A bare \
+                         `${name}` reads a chorefile variable, and the two are deliberately \
+                         separate"
                     )),
+                    Err(_) => match nearest(name, known) {
+                        Some(similar) => d.with_help(format!("did you mean `${similar}`?")),
+                        None => d.with_help(format!(
+                            "assign `{name}=...` before this line, or add it as a top-level \
+                             global"
+                        )),
+                    },
                 };
                 self.push(d);
             }

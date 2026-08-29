@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod builtins;
 pub mod check;
+pub mod dotenv;
 pub mod error;
 pub mod exec;
 pub mod interp;

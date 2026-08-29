@@ -90,6 +90,22 @@ impl Interpreter<'_> {
     /// values in it.
     fn var(&mut self, var: &VarRef) -> Result<String> {
         match var {
+            // `$env::NAME` is the machine, not the file: it is read through
+            // the overlay first, so a value `env NAME value`, `env NAME=value`
+            // or a `dotenv` put there is what it answers with, and the
+            // process environment only when nothing did. Unset is an error
+            // like any other undefined variable — the optional reading is
+            // written `x=$(try env NAME)` or `if env NAME`, where the miss is
+            // an answer rather than a hole in a command line.
+            VarRef::Named(name) if crate::vars::env_ref(name).is_some() => {
+                let name = crate::vars::env_ref(name).expect("checked by the guard");
+                self.envs.get(name).ok_or_else(|| Error::Run {
+                    message: format!(
+                        "environment variable `{name}` is not set; where it may be absent, \
+                         write `if env {name} {{ }}` or capture `$(try env {name})`"
+                    ),
+                })
+            }
             VarRef::Named(name) => {
                 let value = self
                     .lookup(name)

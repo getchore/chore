@@ -168,6 +168,7 @@ pub fn resolve(path: &Path) -> Result<Merged> {
             // [`require::unmet`](crate::require::unmet).
             require: None,
             includes: Vec::new(),
+            dotenvs: unit.dotenvs,
             globals: unit.globals.into_iter().map(|d| d.item).collect(),
             tasks: unit.tasks.into_iter().map(|d| d.item).collect(),
         },
@@ -197,6 +198,9 @@ struct Def<T> {
 /// catch duplicates, and the interpreter never does.
 #[derive(Default)]
 struct Unit {
+    /// Every `dotenv` in this subtree, outermost file first, each with its
+    /// path already resolved against the file that wrote it.
+    dotenvs: Vec<ast::Dotenv>,
     globals: Vec<Def<ast::Assign>>,
     tasks: Vec<Def<ast::Task>>,
     global_from: HashMap<String, PathBuf>,
@@ -360,7 +364,24 @@ impl Resolver {
     /// Includes first, in source order, then the file's own definitions — the
     /// evaluation order the module docs argue for.
     fn merge(&mut self, file: ast::File, path: &Path, prefix: Option<&str>) -> Result<Unit> {
-        let mut unit = Unit::default();
+        // This file's own `dotenv`s first, then the ones its includes bring —
+        // the opposite of the order the definitions merge in, and for the
+        // same reason that order was chosen. A name already set wins over a
+        // file, so loading order *is* precedence, and the outer file is the
+        // one whose answer should stand: a subproject's `.env` must not
+        // decide what the project it was pulled into runs with.
+        let mut unit = Unit {
+            dotenvs: file
+                .dotenvs
+                .iter()
+                .map(|d| ast::Dotenv {
+                    path: vars::display(&sibling(path, &d.path)),
+                    optional: d.optional,
+                    span: d.span,
+                })
+                .collect(),
+            ..Unit::default()
+        };
 
         for include in &file.includes {
             let origin = Origin {
@@ -379,14 +400,35 @@ impl Resolver {
                 (None, ns) => ns.map(str::to_owned),
             };
             let mut child = self.load(&target, key(&target), Some(&origin), nested.as_deref())?;
+            // A namespace is either something an `include` constructed or the
+            // machine's own, and `env::` is taken: `$env::PATH` has to mean
+            // the environment in every file, however deep, or a reader would
+            // have to check every `include` above them before believing it.
+            if include.namespace.as_deref() == Some(vars::ENV_NAMESPACE) {
+                return Err(Error::Syntax {
+                    message: format!(
+                        "`as {ns}` is reserved: `$env::NAME` reads the environment, so a \
+                         namespace called `{ns}` would make `$env::PATH` ambiguous between a \
+                         global of this include and the machine's `PATH`",
+                        ns = vars::ENV_NAMESPACE
+                    ),
+                    at: origin.at.clone(),
+                });
+            }
             if let Some(ns) = &include.namespace {
                 child.namespace(ns);
             }
+            // Never namespaced: `as` renames names, and a path is not one.
+            let dotenvs = std::mem::take(&mut child.dotenvs);
             unit.absorb(child, &self.root)?;
+            unit.dotenvs.extend(dotenvs);
         }
 
         unit.absorb(
             Unit {
+                // Already taken above, in the one order that makes the outer
+                // file's `.env` the one that answers.
+                dotenvs: Vec::new(),
                 globals: file
                     .globals
                     .into_iter()
@@ -468,6 +510,18 @@ fn include_path(from: &Path, path: &str) -> PathBuf {
         joined
     };
     normalize(&joined)
+}
+
+/// A path written in `from`, resolved against the file that wrote it.
+///
+/// The `dotenv` rule, and the half of the `include` rule that is not about
+/// directories: `dotenv .env` in `libs/tasks.chore` names `libs/.env`,
+/// wherever `chore` was invoked from and whatever pulled the file in. The
+/// resolved path is what the merged tree carries, since after the merge there
+/// is no longer a file to be relative *to*.
+fn sibling(from: &Path, path: &str) -> PathBuf {
+    let base = from.parent().unwrap_or_else(|| Path::new("."));
+    normalize(&base.join(vars::to_native(path)))
 }
 
 /// A path as a message should show it: relative to the top-level chorefile's

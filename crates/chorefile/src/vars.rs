@@ -111,6 +111,30 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "OS", "ARCH", "ENV", "PLATFORM", "TRIPLE", "EXE", "HOME", "ROOT", "CWD", "TASK", "NOW",
 ];
 
+/// The namespace `$env::NAME` reads through, and the one name an `include`
+/// may not take with `as`.
+///
+/// It is spelled as a namespace rather than as a function or a `${NAME}` form
+/// because `::` already means "a name from somewhere else" — `libs::build` is
+/// a task an include brought in, and `env::HOME` is a name the machine
+/// brought in. Nothing else had to be invented, and the two rules meet in one
+/// place: a namespace is either something an `include` constructed or this,
+/// which is why `include x as env` has to be refused.
+pub const ENV_NAMESPACE: &str = "env";
+
+/// The variable `$env::NAME` asks for, if `name` is one of those.
+///
+/// The name half must be an identifier, the same shape `env NAME=value`
+/// accepts: an environment may hold stranger names than that, but a chorefile
+/// cannot write one, and answering "not a variable name" beats reading
+/// `$env::a-b` as something it is not.
+pub fn env_ref(name: &str) -> Option<&str> {
+    let rest = name
+        .strip_prefix(ENV_NAMESPACE)?
+        .strip_prefix(crate::NAMESPACE_SEP)?;
+    crate::lex::is_ident(rest).then_some(rest)
+}
+
 /// `$PLATFORM`, always `$OS-$ARCH`.
 pub fn platform() -> String {
     format!("{OS}-{ARCH}")

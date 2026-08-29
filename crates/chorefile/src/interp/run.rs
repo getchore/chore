@@ -161,6 +161,13 @@ impl Interpreter<'_> {
             if name == "env" {
                 return self.env_command(argv, dest, errs, stdin, flags);
             }
+            // And for the first of those two reasons: what a `dotenv` loads
+            // belongs to the frame that loaded it, which only the interpreter
+            // has. It is reserved in `builtins::NAMES` all the same, so
+            // `check` stops a task from taking the name.
+            if name == "dotenv" {
+                return self.dotenv_command(argv);
+            }
             // Also resolved here rather than through the table, and for the
             // same kind of reason: a builtin is handed writers, and `spawn`
             // needs the redirect's *path* — the child outlives this process,
@@ -253,6 +260,81 @@ impl Interpreter<'_> {
                 message: "usage: env <NAME> [value], or env NAME=value <cmd> [args...]".into(),
             }),
         }
+    }
+
+    /// `dotenv <path> [optional]` inside a task.
+    ///
+    /// The same loader the top-level directive uses, pointed at the task's
+    /// current directory rather than at the file that wrote it: this is a
+    /// command, and every builtin that takes a path takes it relative to the
+    /// directory the task is standing in. What it binds lands in the frame's
+    /// scope, so it dies with the call exactly as `env NAME value` does, and
+    /// a task that loads `deploy/.env.prod` is not still setting it for
+    /// whatever runs next.
+    ///
+    /// It runs under `--dry`. Reading a file is an input, not an effect, and
+    /// a preview whose `if $env::REGION == eu` answered from the developer's
+    /// own shell would be describing a different run.
+    fn dotenv_command(&mut self, argv: &[String]) -> Result<Output> {
+        let (path, optional) = match &argv[1..] {
+            [path] => (path, false),
+            [path, word] if word == "optional" => (path, true),
+            [_, word] => {
+                return Err(Error::Run {
+                    message: format!(
+                        "dotenv: `{word}` is not a word `dotenv` takes; the only one is \
+                         `optional`, which skips the file when it is missing"
+                    ),
+                });
+            }
+            _ => {
+                return Err(Error::Run {
+                    message: "usage: dotenv <path> [optional]".into(),
+                });
+            }
+        };
+        let path = self.resolve(path);
+        self.load_dotenv(&path, optional)?;
+        Ok(Output::ok())
+    }
+
+    /// Read a `.env` and bind what nothing has bound yet.
+    ///
+    /// **A name already set wins over the file**, whether it was set by the
+    /// process environment, by an `env` in the chorefile, or by a `.env`
+    /// loaded before this one. That is what every dotenv library does and the
+    /// reason is CI: `FOO=1 chore deploy`, and a variable a workflow exports,
+    /// have to be able to override a file that is checked in, or the file
+    /// would be a floor nobody could get above. It also makes the load order
+    /// the whole of the precedence rule — first one to name a variable wins —
+    /// so nothing has to be said about two files that both name it.
+    pub(super) fn load_dotenv(&mut self, path: &Path, optional: bool) -> Result<()> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            // `optional` is the whole point of the word: a `.env.local` is
+            // one developer's, is in `.gitignore`, and is absent on every
+            // other machine including CI.
+            Err(e) if optional && e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(Error::Run {
+                    message: format!(
+                        "dotenv: cannot read `{}`: {e}{}",
+                        vars::display(path),
+                        if e.kind() == io::ErrorKind::NotFound {
+                            " (write `dotenv <path> optional` for a file that may be absent)"
+                        } else {
+                            ""
+                        }
+                    ),
+                });
+            }
+        };
+        for (name, value) in crate::dotenv::parse(&text, path)? {
+            if self.envs.get(&name).is_none() {
+                self.envs.set(name, Some(value));
+            }
+        }
+        Ok(())
     }
 
     /// Send `env`'s output and diagnostic where the caller asked for them.

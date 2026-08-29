@@ -341,9 +341,32 @@ local have. `env NAME=value <cmd>` sets names for one command only, the way `NAM
 does in a shell; the command resolves task, then builtin, then PATH, like any other, and a task \
 called this way keeps the names for its whole call. A `^` may only prefix a statement's command \
 name, so it cannot appear there. If the first argument contains an `=` it is \
-that form. Chore never changes its own process environment, so a `parallel` sibling cannot see \
-what another sibling set. Reading and setting both happen under --dry, since neither has an \
-effect outside the run.",
+that form. To read a variable into a word rather than onto stdout, write `$env::NAME`, which \
+reads through the same overlay and fails the run when the name is unset — `env NAME` is the \
+form whose miss is an answer, which is why it is the one to put in an `if` or a `try`. Chore \
+never changes its own process environment, so a `parallel` sibling cannot see what another \
+sibling set. Reading and setting both happen under --dry, since neither has an effect outside \
+the run.",
+        effects: false,
+        flags: NO_FLAGS,
+    },
+    Builtin {
+        name: "dotenv",
+        usage: "dotenv <path> [optional]",
+        summary: "load a .env file for the rest of the call",
+        description: "Reads `KEY=value` lines and binds them for the rest of the call — the \
+task that loaded it, everything that task calls, and every process spawned inside it — exactly \
+the scope `env NAME value` has, and gone when the task returns. A name that is already set \
+wins over the file, whether the process environment, an earlier `env` or an earlier `dotenv` \
+set it, so `FOO=1 chore deploy` and a CI variable still override a file that is checked in. \
+`optional` skips a missing file; without it, a missing file fails. The path is relative to the \
+task's current directory, like every other builtin path. The format is blank lines, `#` \
+comments, an optional `export ` prefix, and values written bare, 'single-quoted' (literal) or \
+\"double-quoted\" (with \\n, \\t, \\\\ and \\\" escapes); there is no ${OTHER} expansion. It \
+runs under --dry: reading a file is an input, not an effect, and a preview whose conditions \
+read $env::NAME has to see the same values a run would. Written at the top level instead — \
+`dotenv .env` on its own line — it loads once, before the top-level assignments, so a global \
+can read $env::NAME.",
         effects: false,
         flags: NO_FLAGS,
     },
@@ -489,6 +512,28 @@ is a global, evaluated once before the first task runs.",
 them as separate words, `$#` the count. An empty value written unquoted expands to no word at \
 all rather than to an empty argument, as in sh, so quote it — `\"$1\"` — wherever the position \
 matters; `--dry` prints the argv that survived.",
+    },
+    Form {
+        name: "environment",
+        syntax: "$env::NAME",
+        example: "./deploy $env::REGION",
+        meaning: "Read an environment variable. It is looked up through the same overlay `env` \
+writes, so a value set by `env NAME value`, by `env NAME=value <cmd>` or by a `dotenv` is what \
+it sees, and the process environment answers when nothing did. An unset name fails the run, \
+like any other undefined variable; where a name may be absent, use the forms whose miss is an \
+answer — `if env NAME { }` or `x=$(try env NAME)`. `env` is a reserved namespace: `include ... \
+as env` is an error, and `env::X=...` is not an assignment.",
+    },
+    Form {
+        name: "dotenv directive",
+        syntax: "dotenv <path> [optional]",
+        example: "dotenv .env\ndotenv .env.local optional",
+        meaning: "Load a `.env` file. At the top level the path is relative to the file that \
+wrote the directive and it loads once, before the top-level assignments, so a global may read \
+$env::NAME; `list`, `help`, `check` and `spec` never load one, exactly as they never evaluate \
+a global. Inside a task it is a builtin: the path is relative to the task's current directory, \
+and what it binds dies with the call. A variable that is already set wins over the file, so a \
+CI override still works, and `optional` skips a file that is missing.",
     },
     Form {
         name: "capture",

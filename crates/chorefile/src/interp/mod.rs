@@ -604,6 +604,15 @@ impl<'a> Interpreter<'a> {
             return Ok(());
         }
         self.globals_done = true;
+        // Before the assignments, because a global may read `$env::NAME` and
+        // a `.env` is where that name usually comes from. Nothing else about
+        // the ordering is free: the files are loaded in the order the merge
+        // put them, outermost first, and each one only fills in names nothing
+        // has set.
+        for dotenv in &self.file.dotenvs {
+            let path = vars::to_native(&dotenv.path);
+            self.load_dotenv(&path, dotenv.optional)?;
+        }
         for assign in &self.file.globals {
             let (value, marks) = self.marking(|me| me.expand_to_string(&assign.value));
             let source = marks.source();

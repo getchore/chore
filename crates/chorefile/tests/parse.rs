@@ -1036,6 +1036,81 @@ fn includes_are_recorded_not_followed() {
     );
 }
 
+// --- dotenv and $env:: --------------------------------------------------
+
+#[test]
+fn dotenv_directives_are_recorded_in_source_order() {
+    let src = "dotenv .env\ndotenv config/.env.local optional\n";
+    let f = file(src);
+    assert_eq!(f.dotenvs[0].path, ".env");
+    assert!(!f.dotenvs[0].optional);
+    assert_eq!(f.dotenvs[1].path, "config/.env.local");
+    assert!(f.dotenvs[1].optional);
+    assert_eq!(
+        &src[f.dotenvs[1].span.range()],
+        "dotenv config/.env.local optional"
+    );
+}
+
+#[test]
+fn a_dotenv_inside_a_task_is_an_ordinary_command() {
+    // The directive is top level only; in a body the same word is the
+    // builtin, and it parses as any other command does.
+    assert_eq!(
+        body("task t {\n dotenv deploy/.env.prod\n dotenv $dir/.env optional\n}"),
+        "{ dotenv deploy/.env.prod; dotenv $dir/.env optional }"
+    );
+}
+
+#[test]
+fn error_dotenv_path_must_be_literal() {
+    let message = error("dotenv $dir/.env\n");
+    assert!(message.contains("plain path"), "message was: {message}");
+}
+
+#[test]
+fn error_dotenv_takes_only_optional_after_the_path() {
+    let message = error("dotenv .env optionl\n");
+    assert!(message.contains("`optional`"), "message was: {message}");
+}
+
+#[test]
+fn env_is_read_as_a_namespaced_variable() {
+    assert_eq!(
+        body("task t {\n echo $env::HOME \"$env::A/b\" ${env::C}\n}"),
+        "{ echo $env::HOME \"$env::A/b\" $env::C }"
+    );
+}
+
+#[test]
+fn a_namespace_is_only_read_for_env() {
+    // `$libs::dist` exists in a merged tree and no chorefile can write it, so
+    // `$a::b` is `$a` followed by literal text — unchanged by `$env::`.
+    assert_eq!(body("task t {\n echo $a::b\n}"), "{ echo $a::b }");
+    let f = file("task t {\n echo $a::b\n}");
+    let Stmt::Command(Chain::Single(cmd)) = &f.tasks[0].body[0] else {
+        panic!("a command");
+    };
+    assert_eq!(cmd.args[0].parts.len(), 2, "a variable and a literal");
+}
+
+#[test]
+fn error_assigning_an_env_variable_points_at_the_env_builtin() {
+    let message = error("task t {\n env::TOKEN=secret\n}");
+    assert!(message.contains("`env TOKEN"), "message was: {message}");
+    assert!(message.contains("$env::TOKEN"), "message was: {message}");
+}
+
+#[test]
+fn error_assigning_any_namespaced_name() {
+    let message = error("libs::dist=build\n");
+    assert!(
+        message.contains("cannot be assigned"),
+        "message was: {message}"
+    );
+    assert!(message.contains("include ... as"), "message was: {message}");
+}
+
 // --- errors -------------------------------------------------------------
 
 #[test]
