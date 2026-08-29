@@ -132,6 +132,13 @@ impl Interpreter<'_> {
             if name == "parallel" {
                 return self.parallel(&argv, dest, stderr);
             }
+            // Also resolved here rather than through the table, and for the
+            // same kind of reason: a builtin is handed writers, and `spawn`
+            // needs the redirect's *path* — the child outlives this process,
+            // so it must hold the file descriptor itself.
+            if name == "spawn" {
+                return self.spawn(&argv, dest, stderr);
+            }
             if self.task(&name).is_some() {
                 // Set immediately before the call and taken by `call_task`:
                 // a builtin or a program on `PATH` has no frame to carry it,
@@ -464,6 +471,109 @@ impl Interpreter<'_> {
             out.stderr.clear();
         }
         Ok(out)
+    }
+
+    /// `spawn <cmd> [args...]` — start a program, do not wait for it, and let
+    /// it outlive the run.
+    ///
+    /// This is the one command in the language that finishes with work still
+    /// going on. It exists because the shell line it replaces —
+    /// `nohup ./app > log 2>&1 &` — is four separate mechanisms (a background
+    /// job, a detached session, a redirect and a stream dup) that no chorefile
+    /// can spell and that every platform spells differently.
+    ///
+    /// # Detached, not merely backgrounded
+    ///
+    /// A child that is only backgrounded shares chore's process group, so the
+    /// terminal's `^C` reaches it and closing the terminal hangs it up: the
+    /// dev-loop server it was started to keep alive dies with the shell that
+    /// started it. On Unix it is therefore put in a process group of its own,
+    /// which is what `nohup` and `setsid` buy; on Windows it is given
+    /// `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, which is the same
+    /// statement in that platform's terms. Nothing is waited on, so the run
+    /// ends where the chorefile ends.
+    ///
+    /// # Where its output goes
+    ///
+    /// stdin is null: a detached process has nobody to read from, and one
+    /// inheriting the terminal would fight the next command for keystrokes.
+    ///
+    /// stdout and stderr obey the statement's own redirects, and default to
+    /// null for the same reason — a process that outlives the run must not
+    /// still be writing to a terminal chore has handed back. That makes
+    /// `spawn ./app` silent by design, and `spawn ./app > log` the way to keep
+    /// anything.
+    ///
+    /// **A bare `>` takes both streams.** `2>&1` is a stream dup, which this
+    /// language does not have, and the honest alternative — stderr to null
+    /// unless a `2>` names a file — throws away the half of the output that
+    /// says why the server died. Writing `> log 2> log` cannot mean it either:
+    /// two handles on one file each keep their own offset and overwrite each
+    /// other. So `>` alone means "everything this thing says goes here", and a
+    /// `2> other` splits the streams when that is what was wanted.
+    ///
+    /// # `--dry`
+    ///
+    /// It has effects, so a preview echoes the line — through the ordinary
+    /// echo every command gets — and spawns nothing. No file is opened either:
+    /// a preview that truncated `log` would have done the one thing about this
+    /// command that is hard to undo.
+    fn spawn(&mut self, argv: &[String], dest: Dest, stderr: Option<PathBuf>) -> Result<Output> {
+        let Some((name, args)) = argv[1..].split_first() else {
+            return Err(Error::Run {
+                message: "usage: spawn <cmd> [args...]".into(),
+            });
+        };
+        // `spawn` resolves on `PATH` and nowhere else. A task and a builtin
+        // are both chore itself, and chore is the process this command exists
+        // to outlive — there would be nothing left running them a moment
+        // later. Saying so beats the alternative, which is a `PATH` lookup
+        // failing with "unknown command `build`" for a task that is right
+        // there in the file.
+        let inside = if self.task(name).is_some() {
+            Some("a task")
+        } else if name == "cd" || builtins::is_builtin(name) {
+            Some("a builtin")
+        } else {
+            None
+        };
+        if let Some(what) = inside {
+            return Err(Error::Run {
+                message: format!(
+                    "spawn: `{name}` is {what}, and `spawn` runs a program on `PATH`: what it \
+                     starts has to outlive chore, and {what} is chore. Call it as an ordinary \
+                     command, or spawn the program it would have run"
+                ),
+            });
+        }
+
+        if self.mode == Mode::Dry {
+            return Ok(Output::ok());
+        }
+
+        let mut command = process::Command::new(vars::to_native(name));
+        command.args(args).current_dir(self.cwd());
+        command.stdin(Stdio::null());
+        let (out, err) = detached_streams(&dest, stderr.as_deref())?;
+        command.stdout(out).stderr(err);
+        detach(&mut command);
+
+        let child = command.spawn().map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                Error::Run {
+                    message: format!("spawn: unknown command `{name}`"),
+                }
+            } else {
+                Error::Io(e)
+            }
+        })?;
+        // The pid is the only handle the run leaves behind: nothing here waits
+        // for the child, so it is what a reader needs to find it, watch it or
+        // kill it. On stderr, like every other diagnostic — a `spawn` inside
+        // `$( ... )` must not put this line in somebody's value.
+        writeln!(self.err, "spawned {} (pid {})", quote(name), child.id())?;
+        self.err.flush()?;
+        Ok(Output::ok())
     }
 
     /// `script <command...> { <raw text> }`: run the command and hand it the
@@ -1031,6 +1141,53 @@ fn borrow(dest: &Dest) -> Dest {
         },
     }
 }
+
+/// The stdout and stderr a `spawn`ed child is given.
+///
+/// A capture or a pipe gets null rather than a buffer: nothing will be there
+/// to read it, since the command returns before the child has written a byte.
+/// See [`Interpreter::spawn`] for why a `>` with no `2>` takes both streams,
+/// and why the second handle appends — the first has already truncated the
+/// file, and two appending handles interleave whole writes instead of
+/// overwriting each other.
+fn detached_streams(dest: &Dest, stderr: Option<&Path>) -> Result<(Stdio, Stdio)> {
+    let out = match dest {
+        Dest::File { path, append } => Stdio::from(open_file(path, *append)?),
+        Dest::Stream | Dest::Capture => Stdio::null(),
+    };
+    let err = match (stderr, dest) {
+        (Some(path), _) => Stdio::from(open_file(path, false)?),
+        (None, Dest::File { path, .. }) => Stdio::from(open_file(path, true)?),
+        (None, _) => Stdio::null(),
+    };
+    Ok((out, err))
+}
+
+/// Cut the child loose from this process's terminal and signals.
+#[cfg(unix)]
+fn detach(command: &mut process::Command) {
+    use std::os::unix::process::CommandExt;
+    // A group of its own: `^C` in the terminal goes to chore's foreground
+    // group and stops there, and the child is no longer in the group a
+    // hangup would be delivered to.
+    command.process_group(0);
+}
+
+/// Windows has no process groups to inherit, so the two flags say it directly:
+/// no console (`DETACHED_PROCESS`) and no share in this one's `^C`
+/// (`CREATE_NEW_PROCESS_GROUP`).
+#[cfg(windows)]
+fn detach(command: &mut process::Command) {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+}
+
+/// Somewhere that is neither: the child still runs, and still outlives the
+/// run, with whatever the platform's default parentage is.
+#[cfg(not(any(unix, windows)))]
+fn detach(_command: &mut process::Command) {}
 
 fn open_file(path: &Path, append: bool) -> Result<fs::File> {
     if let Some(parent) = path.parent() {

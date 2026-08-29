@@ -359,6 +359,21 @@ be instant.",
         flags: NO_FLAGS,
     },
     Builtin {
+        name: "spawn",
+        usage: "spawn <cmd> [args...]",
+        summary: "start a program and do not wait for it",
+        description: "The replacement for `nohup ./app > log 2>&1 &`. The program is looked up \
+on PATH only — a task or a builtin is an error, since what `spawn` starts has to outlive chore — \
+and the run carries on without waiting. The child is detached: its own process group on Unix, \
+DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP on Windows, so it survives the terminal that started \
+the run. stdin is null, and so are stdout and stderr unless the statement redirects them: a \
+process that outlives the run must not keep writing to the terminal. `> log` takes both streams, \
+since there is no `2>&1` to write; `2> err` splits them again. The pid is reported on stderr. \
+Skipped under --dry, which opens no file either.",
+        effects: true,
+        flags: NO_FLAGS,
+    },
+    Builtin {
         name: "parallel",
         usage: "parallel [--fail-fast] <task>...",
         summary: "run tasks concurrently and wait for them",

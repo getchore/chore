@@ -15,9 +15,11 @@
 //! A `script` block is the one construct this module deliberately says almost
 //! nothing about — see [`Checker::script`].
 //!
-//! The one place platform matters is that `PATH` lookup, and it is skipped
-//! inside an `if` that this machine's `$OS`, `$ARCH` or `$ENV` decides against
-//! — see [`host_value`].
+//! Platform guards matter in two places, and they are not the same question.
+//! A `PATH` lookup is skipped inside an `if` that *this machine's* `$OS`,
+//! `$ARCH` or `$ENV` decides against — see [`host_value`]. The `script sh`
+//! warning instead asks which platforms the *chorefile* still allows there, so
+//! it reads the same on every host — see [`Platforms`].
 //!
 //! # One file, or a whole include tree
 //!
@@ -269,6 +271,12 @@ struct Scope<'a> {
     /// Inside an `if` whose condition this machine's platform decides against.
     /// A `PATH` miss here is not evidence of anything: see [`host_value`].
     off_platform: bool,
+    /// The `$OS` values a run could still be on when it reaches here, narrowed
+    /// by every `if` above it. Unlike [`Scope::off_platform`] this says nothing
+    /// about the machine running `check`: it is a fact about the chorefile, and
+    /// it is what lets a finding about a platform-specific *interpreter* — see
+    /// [`Checker::host_shell`] — read the same guard the author wrote.
+    platforms: Platforms,
 }
 
 struct Checker<'a> {
@@ -349,6 +357,7 @@ impl<'a> Checker<'a> {
             params_bound: 0,
             names: outside.clone(),
             off_platform: false,
+            platforms: Platforms::all(),
         };
         for global in &file.globals {
             self.assignment(&global.name, global.span);
@@ -367,6 +376,7 @@ impl<'a> Checker<'a> {
                 params_bound: task.params.len(),
                 names: visible.clone(),
                 off_platform: false,
+                platforms: Platforms::all(),
             };
             self.block(&task.body, &mut scope);
         }
@@ -631,6 +641,7 @@ impl<'a> Checker<'a> {
                     params_bound: i,
                     names: globals.clone(),
                     off_platform: false,
+                    platforms: Platforms::all(),
                 };
                 self.word(default, &scope);
             }
@@ -833,18 +844,28 @@ impl<'a> Checker<'a> {
                 let outer = scope.off_platform;
                 let decided = host_value(&node.cond, scope);
 
+                // The same reasoning applied to every platform in turn rather
+                // than to this one: which `$OS` values can still reach each
+                // arm. It narrows the same way — a guard nested inside one
+                // keeps what the outer guard already ruled out.
+                let outer_platforms = scope.platforms;
+                let then_platforms = outer_platforms.narrow(&node.cond, scope, true);
+
                 // Both arms share one scope: a name bound in either is treated
                 // as bound afterwards. It over-accepts, which is the right way
                 // to be wrong — a false "undefined" is worse than a miss.
                 scope.off_platform = outer || decided == Some(false);
+                scope.platforms = then_platforms;
                 self.block(&node.then, scope);
                 if let Some(otherwise) = &node.otherwise {
                     // `else` runs on every platform the condition excludes, so
                     // it is off-platform only when the condition always holds.
                     scope.off_platform = outer || decided == Some(true);
+                    scope.platforms = outer_platforms.narrow(&node.cond, scope, false);
                     self.block(otherwise, scope);
                 }
                 scope.off_platform = outer;
+                scope.platforms = outer_platforms;
             }
             Stmt::For(node) => {
                 if node.items.is_empty() {
@@ -961,6 +982,9 @@ impl<'a> Checker<'a> {
         if !cmd.force_path && name == "parallel" {
             self.parallel_tasks(&args, cmd.span);
         }
+        if !cmd.force_path && name == "spawn" {
+            self.spawned(cmd, scope);
+        }
     }
 
     // -- script blocks ------------------------------------------------------
@@ -1032,7 +1056,7 @@ impl<'a> Checker<'a> {
         if name.is_empty() {
             return;
         }
-        self.host_shell(name, script);
+        self.host_shell(name, script, scope);
         self.resolution(name, force_path, script.span, scope);
     }
 
@@ -1051,14 +1075,36 @@ impl<'a> Checker<'a> {
     ///
     /// A warning, per block, and never an error: a deliberate author writing a
     /// shell block behind `if $OS == windows` has done the honest thing, and
-    /// this is a fact worth stating rather than a mistake. It is not silenced
-    /// by a platform guard, because unlike a `PATH` miss it is not a fact about
-    /// the machine running `check` — the guard is in the help text instead, as
-    /// the shape a deliberate author is aiming for.
-    fn host_shell(&mut self, name: &str, script: &Script) {
+    /// this is a fact worth stating rather than a mistake.
+    ///
+    /// **And the guard the help text asks for is the guard that silences it.**
+    /// The help says "if the shell is deliberate, guard it with `if $OS == ...`
+    /// and give every platform a block", and a warning that still fires after
+    /// the reader has done exactly that is a warning they can only learn to
+    /// ignore. So a block whose enclosing `if` has already ruled out every
+    /// platform the shell is missing from says nothing: `script sh -` under
+    /// `if $OS == macos || $OS == linux`, `script powershell` under
+    /// `if $OS == windows`.
+    ///
+    /// The guard read here is [`Scope::platforms`], not
+    /// [`Scope::off_platform`]: which platforms the *chorefile* still allows,
+    /// never which one is running `check`. An unguarded block warns on every
+    /// machine, and a windows-only guard around `script sh` warns on every
+    /// machine too — the file really does hand a block to a shell that is not
+    /// there.
+    fn host_shell(&mut self, name: &str, script: &Script, scope: &Scope) {
         let Some(shell) = shell_family(name) else {
             return;
         };
+        // The platforms this shell is missing from. Nothing to say once the
+        // guard has excluded all of them.
+        let reachable = match shell {
+            ShellFamily::Posix => scope.platforms.has("windows"),
+            ShellFamily::Windows => !scope.platforms.only(&["windows"]),
+        };
+        if !reachable {
+            return;
+        }
         let note = match shell {
             ShellFamily::Posix => format!(
                 "`{name}` is a different program from platform to platform — dash here, bash \
@@ -1074,8 +1120,10 @@ impl<'a> Checker<'a> {
             .with_help(
                 "a `script` block is for a language that behaves the same everywhere — `python3`, \
                  `uv run`, `node`, `nu`. If the shell is deliberate, guard it with `if $OS == ...` \
-                 and give every platform a block; if it is only doing what a builtin does, write \
-                 the builtin, which `check` and `--dry` can still see",
+                 — a guard that excludes every platform the shell is missing from silences this, \
+                 so `if $OS == macos || $OS == linux { script sh - { ... } } else { ... }` says \
+                 nothing — and give every platform a block; if it is only doing what a builtin \
+                 does, write the builtin, which `check` and `--dry` can still see",
             ),
         );
     }
@@ -1155,6 +1203,69 @@ impl<'a> Checker<'a> {
             };
             self.push(d);
         }
+    }
+
+    /// `spawn`'s first argument is a program, and the only one of the three
+    /// kinds of name the language has that it will accept.
+    ///
+    /// So it is checked as a bare command name is checked, one step at a time:
+    /// a task or a builtin there is an error — the interpreter refuses it, and
+    /// the reason is worth stating before the run rather than after — and
+    /// anything else is a `PATH` lookup under exactly the rules
+    /// [`Checker::resolution`] uses, platform guard included. A name built from
+    /// a variable is unknowable and says nothing, like every other name only a
+    /// run can spell.
+    fn spawned(&mut self, cmd: &Command, scope: &Scope) {
+        let Some(first) = cmd.args.first() else {
+            self.push(
+                Diagnostic::error(
+                    "`spawn` has no program to run".to_string(),
+                    self.at(cmd.span),
+                )
+                .with_help(
+                    "`spawn <cmd> [args...]` starts a program and returns without \
+                                waiting for it",
+                ),
+            );
+            return;
+        };
+        let Some(name) = literal(first) else {
+            return;
+        };
+        let what = if self.is_task(name) {
+            "a task"
+        } else if name == "cd" || builtins::is_builtin(name) {
+            "a builtin"
+        } else {
+            // A `PATH` miss under a guard this host never enters is not
+            // evidence of anything, exactly as for a command written bare.
+            if !scope.off_platform && !self.lookup_path(name) {
+                self.push(
+                    Diagnostic::warning(
+                        format!("`spawn {name}`: `{name}` was not found on `PATH`"),
+                        self.at(cmd.span),
+                    )
+                    .with_help(format!(
+                        "`spawn` runs a program and nothing else, so `{name}` has to be one. \
+                         `check` looked on this machine's `PATH`, which is not necessarily the \
+                         machine that runs the task — if `{name}` is built by another task or \
+                         installed only in CI, this is fine"
+                    )),
+                );
+            }
+            return;
+        };
+        self.push(
+            Diagnostic::error(
+                format!("`spawn {name}`: `{name}` is {what}, and `spawn` runs a program on `PATH`"),
+                self.at(cmd.span),
+            )
+            .with_help(format!(
+                "what `spawn` starts has to outlive the run, and {what} is `chore` itself — there \
+                 would be nothing left to run it. Call it as an ordinary command, or `spawn` the \
+                 program it would have run"
+            )),
+        );
     }
 
     /// The check that gives `chore` its point: a command that works on the
@@ -1532,22 +1643,33 @@ fn constant(cond: &Cond) -> Option<bool> {
 /// warning missed under an unusual guard costs one line of output; a warning
 /// invented under a correct one costs the tool its exit code.
 fn host_value(cond: &Cond, scope: &Scope) -> Option<bool> {
+    cond_value(cond, scope, &host_var)
+}
+
+/// [`host_value`]'s analysis over a supplied reading of the platform
+/// variables, so the same rules — and the same shyness — serve two questions:
+/// "does this branch run *here*", and "could this branch run on `os`".
+///
+/// `var` answers for one read-only platform variable, or `None` when the
+/// hypothesis does not fix its value. Every `None` collapses the condition it
+/// is in, which is what keeps both callers from claiming more than they know.
+fn cond_value(cond: &Cond, scope: &Scope, var: &dyn Fn(&str) -> Option<String>) -> Option<bool> {
     match cond {
         Cond::Compare { left, op, right } => Some(compare(
             *op,
-            &host_text(left, scope)?,
-            &host_text(right, scope)?,
+            &word_value(left, scope, var)?,
+            &word_value(right, scope, var)?,
         )),
         Cond::Command(_) => None,
-        Cond::Not(inner) => Some(!host_value(inner, scope)?),
+        Cond::Not(inner) => Some(!cond_value(inner, scope, var)?),
         // Short-circuiting on the value, not on the operand: `$OS == windows
         // && which gendef` is false here whatever `which` would say.
-        Cond::And(a, b) => match (host_value(a, scope), host_value(b, scope)) {
+        Cond::And(a, b) => match (cond_value(a, scope, var), cond_value(b, scope, var)) {
             (Some(false), _) | (_, Some(false)) => Some(false),
             (Some(true), Some(true)) => Some(true),
             _ => None,
         },
-        Cond::Or(a, b) => match (host_value(a, scope), host_value(b, scope)) {
+        Cond::Or(a, b) => match (cond_value(a, scope, var), cond_value(b, scope, var)) {
             (Some(true), _) | (_, Some(true)) => Some(true),
             (Some(false), Some(false)) => Some(false),
             _ => None,
@@ -1555,29 +1677,30 @@ fn host_value(cond: &Cond, scope: &Scope) -> Option<bool> {
     }
 }
 
-/// The word's value on this machine, if every part of it is literal text or a
-/// read-only platform variable. Whole words rather than lone variables, so
+/// The word's value, if every part of it is literal text or a platform
+/// variable `var` can answer for. Whole words rather than lone variables, so
 /// `$OS-$ARCH` and `app$EXE` resolve as readily as `$OS`.
-fn host_text(word: &Word, scope: &Scope) -> Option<String> {
+///
+/// A name the chorefile has bound over is never asked about: `check` has no
+/// idea what its own `OS=` holds and must not pretend otherwise.
+fn word_value(word: &Word, scope: &Scope, var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     let mut out = String::new();
     for part in &word.parts {
         match &part.kind {
             PartKind::Literal(text) => out.push_str(text),
-            PartKind::Var(VarRef::Named(name)) => out.push_str(&platform_var(name, scope)?),
-            // A capture, an argument, or `$@`: not decided by the platform.
+            PartKind::Var(VarRef::Named(name)) if !scope.names.contains(name) => {
+                out.push_str(&var(name)?)
+            }
+            // A shadowed name, a capture, an argument, or `$@`: not decided by
+            // the platform.
             _ => return None,
         }
     }
     Some(out)
 }
 
-/// One read-only platform variable's value here, unless the chorefile has
-/// bound a name of its own over it — in which case `check` has no idea what it
-/// holds and must not pretend otherwise.
-fn platform_var(name: &str, scope: &Scope) -> Option<String> {
-    if scope.names.contains(name) {
-        return None;
-    }
+/// One read-only platform variable's value on the machine running `check`.
+fn host_var(name: &str) -> Option<String> {
     match name {
         "OS" => Some(vars::OS.to_string()),
         "ARCH" => Some(vars::ARCH.to_string()),
@@ -1585,6 +1708,80 @@ fn platform_var(name: &str, scope: &Scope) -> Option<String> {
         "PLATFORM" => Some(vars::platform()),
         "EXE" => Some(vars::EXE.to_string()),
         _ => None,
+    }
+}
+
+/// One platform variable's value *if* `$OS` were `os`, on a machine this
+/// analysis knows nothing else about.
+///
+/// Only the two that `$OS` alone fixes, plus the half of `$ENV` it fixes: on
+/// anything but Windows `$ENV` is empty, so `if $ENV == msvc` does exclude
+/// macOS and Linux even though it says nothing about which Windows. `$ARCH`,
+/// `$PLATFORM` and `$TRIPLE` bring in an architecture no guard has named, so
+/// they are unknown here and collapse their condition — the shy answer, and
+/// the one that keeps a warning rather than inventing a silence.
+fn os_var(name: &str, os: &str) -> Option<String> {
+    match name {
+        "OS" => Some(os.to_string()),
+        "EXE" => Some(if os == "windows" { ".exe" } else { "" }.to_string()),
+        "ENV" if os != "windows" => Some(String::new()),
+        _ => None,
+    }
+}
+
+/// Every `$OS` a chorefile can run on. The order is the bit order in
+/// [`Platforms`], and it is the whole world: `vars::OS` is one of these three.
+const OSES: [&str; 3] = ["macos", "linux", "windows"];
+
+/// Which of [`OSES`] a point in the file is still reachable on.
+///
+/// This is the guard analysis turned around. [`Scope::off_platform`] asks
+/// whether *this machine* enters a branch, which is the right question for a
+/// `PATH` lookup and the wrong one for anything else — a finding that depended
+/// on it would say different things about one chorefile on a Mac and on
+/// Windows. Asking instead which platforms a branch is *written* for is a fact
+/// about the file, so `script sh -` under `if $OS == macos || $OS == linux` is
+/// silent everywhere, and under `if $OS == windows` is reported everywhere.
+///
+/// Shy in the same direction as [`host_value`]: a condition it cannot decide
+/// for a platform leaves that platform in, so an unreadable guard silences
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Platforms(u8);
+
+impl Platforms {
+    fn all() -> Self {
+        Self((1 << OSES.len()) - 1)
+    }
+
+    fn has(self, os: &str) -> bool {
+        OSES.iter()
+            .position(|name| *name == os)
+            .is_some_and(|i| self.0 & (1 << i) != 0)
+    }
+
+    /// Is every platform in this set one of `wanted`?
+    fn only(self, wanted: &[&str]) -> bool {
+        OSES.iter()
+            .enumerate()
+            .all(|(i, os)| self.0 & (1 << i) == 0 || wanted.contains(os))
+    }
+
+    /// The platforms that survive an `if`: those on which `cond` can still
+    /// hold (`taken`), or on which it can still fail.
+    fn narrow(self, cond: &Cond, scope: &Scope, taken: bool) -> Self {
+        let mut bits = 0;
+        for (i, os) in OSES.iter().enumerate() {
+            if self.0 & (1 << i) == 0 {
+                continue;
+            }
+            // Kept unless the condition is *known* to go the other way on this
+            // platform. `None` — undecidable — keeps it.
+            if cond_value(cond, scope, &|name| os_var(name, os)) != Some(!taken) {
+                bits |= 1 << i;
+            }
+        }
+        Self(bits)
     }
 }
 
@@ -1687,6 +1884,10 @@ fn advice(pattern: &str, replacement: &str) -> String {
              and `[` is not a program on Windows"
             .into(),
         "sleep" => "use the `sleep` builtin — Windows has no `sleep` program".into(),
+        "nohup" => "use the `spawn` builtin — `spawn ./app > log` starts a detached process and \
+             returns, which is what `nohup ... &` is for, and there is no `nohup`, no job control \
+             and no `&` on Windows"
+            .into(),
         _ => format!(
             "use the `{replacement}` builtin — `chore` implements it, so it behaves identically \
              on macOS, Linux and Windows"

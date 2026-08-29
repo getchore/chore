@@ -1846,6 +1846,102 @@ fn a_task_may_not_be_called_parallel() {
     );
 }
 
+// --- 12a. `spawn` names a program -------------------------------------------
+//
+// `spawn`'s first argument is the one place in the language where a name may
+// only ever be a program, so it is checked as a bare command name is: a task
+// or a builtin there is an error, and anything else is a `PATH` lookup under
+// the same platform-guard rules.
+
+#[test]
+fn spawn_of_a_task_is_an_error() {
+    let found = errors("task dev {\n    spawn server\n}\ntask server {\n    echo hi\n}\n");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("is a task"), "{found:#?}");
+    assert!(
+        found[0]
+            .help
+            .as_deref()
+            .unwrap_or_default()
+            .contains("outlive"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn spawn_of_a_builtin_is_an_error() {
+    let found = errors("task dev {\n    spawn echo hi\n}\n");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("is a builtin"), "{found:#?}");
+}
+
+#[test]
+fn spawn_with_no_program_is_an_error() {
+    let found = errors("task dev {\n    spawn\n}\n");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("no program"), "{found:#?}");
+}
+
+#[test]
+fn spawn_of_a_program_that_is_not_installed_is_a_warning() {
+    let source = format!("task dev {{\n    spawn {MISSING} --serve\n}}\n");
+    let found = matching(&source, "was not found on `PATH`");
+    assert_eq!(found.len(), 1, "{:#?}", run(&source));
+    assert_eq!(found[0].severity, Severity::Warning);
+    // The same escape hatch every `PATH` miss carries: this machine is not
+    // necessarily the machine that runs the task.
+    assert!(
+        found[0].help.as_deref().unwrap_or_default().contains("CI"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn a_spawn_guarded_off_this_platform_is_not_looked_up() {
+    let source = format!(
+        "task dev {{\n    if $OS == {} {{\n        spawn {MISSING}\n    }}\n}}\n",
+        other_os()
+    );
+    assert!(
+        matching(&source, "was not found on `PATH`").is_empty(),
+        "{:#?}",
+        run(&source)
+    );
+}
+
+#[test]
+fn a_spawn_of_a_path_or_a_variable_says_nothing() {
+    // A relative path is resolved against a directory `check` cannot know, and
+    // a name built from a variable is only knowable at run time.
+    let source = "app=./target/debug/app\n\ntask dev {\n    spawn ./target/debug/app > app.log\n    spawn $app\n}\n";
+    assert!(run(source).is_empty(), "{:#?}", run(source));
+}
+
+#[test]
+fn a_task_may_not_be_called_spawn() {
+    let found = errors("task spawn {\n    echo hi\n}\n");
+    assert!(
+        found.iter().any(|d| d.message.contains("spawn")),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn nohup_is_reported_with_spawn_as_the_replacement() {
+    // The line this whole feature exists to replace.
+    let found = errors("task dev {\n    ^nohup ./app\n}\n");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("not portable"), "{found:#?}");
+    assert!(
+        found[0]
+            .help
+            .as_deref()
+            .unwrap_or_default()
+            .contains("spawn"),
+        "{found:#?}"
+    );
+}
+
 // --- 13. `require` ---------------------------------------------------------
 
 #[test]
@@ -2165,23 +2261,153 @@ fn a_portable_interpreter_is_not_warned_about() {
 }
 
 #[test]
-fn a_platform_guard_does_not_silence_the_shell_finding() {
-    // Unlike a `PATH` miss, this is not a fact about the machine running
-    // `check`, so it must not depend on which machine that is: a chorefile
-    // checked on a Mac and on Windows says the same thing about `script sh`.
-    let source = format!(
-        "\
-task gen {{
-    if $OS == {} {{
-        script sh - {{
+fn a_windows_only_guard_does_not_silence_the_posix_shell_finding() {
+    // The guard is real and still wrong: Windows is the one platform with no
+    // `sh` at all. Written with the platform names spelled out rather than
+    // against this host, because the finding is a fact about the chorefile and
+    // must read the same on a Mac and on Windows.
+    let source = "\
+task gen {
+    if $OS == windows {
+        script sh - {
             echo hi
+        }
+    }
+}
+";
+    assert_eq!(shell_findings(source).len(), 1, "{:#?}", run(source));
+}
+
+#[test]
+fn a_guard_that_excludes_windows_silences_the_posix_shell_finding() {
+    // The exact shape the warning's own help text asks for. A warning that
+    // survived the fix it recommends is one a reader can only learn to ignore.
+    for guard in [
+        "$OS == macos || $OS == linux",
+        "$OS != windows",
+        "!($OS == windows)",
+    ] {
+        let source = format!(
+            "\
+task gen {{
+    if {guard} {{
+        script sh - {{
+            ./configure
         }}
+    }} else {{
+        fail \"no shell here\"
     }}
 }}
-",
-        other_os()
+"
+        );
+        assert!(
+            shell_findings(&source).is_empty(),
+            "{guard}: {:#?}",
+            run(&source)
+        );
+    }
+}
+
+#[test]
+fn the_else_branch_of_a_windows_guard_excludes_windows() {
+    // `else` is where the POSIX half of a two-platform chorefile is written,
+    // and the guard reaches it: `if $OS == windows { ... } else { script sh }`
+    // runs the block only where `sh` exists.
+    let source = "\
+task gen {
+    if $OS == windows {
+        script powershell -Command whatever {
+            echo hi
+        }
+    } else {
+        script sh - {
+            echo hi
+        }
+    }
+}
+";
+    assert!(shell_findings(source).is_empty(), "{:#?}", run(source));
+}
+
+#[test]
+fn an_unguarded_shell_block_still_warns() {
+    // The guard analysis must not silence the case it exists to report.
+    let source = "task gen {\n    script sh - {\n        echo hi\n    }\n}\n";
+    assert_eq!(shell_findings(source).len(), 1, "{:#?}", run(source));
+}
+
+#[test]
+fn a_guard_a_reader_cannot_decide_silences_nothing() {
+    // Shy in the same direction as the `PATH` analysis: `$ARCH` and a global
+    // say nothing about `$OS`, so the branch is still reachable on Windows.
+    for guard in ["$ARCH == arm64", "$flavor == posix", "exists Makefile"] {
+        let source = format!(
+            "flavor=posix\n\ntask gen {{\n    if {guard} {{\n        script sh - {{\n            echo hi\n        }}\n    }}\n}}\n"
+        );
+        assert_eq!(
+            shell_findings(&source).len(),
+            1,
+            "{guard}: {:#?}",
+            run(&source)
+        );
+    }
+}
+
+#[test]
+fn a_nested_guard_keeps_what_the_outer_one_ruled_out() {
+    // The inner `if` narrows further, never wider: an `$ARCH` test inside a
+    // `$OS != windows` guard cannot put Windows back.
+    let source = "\
+task gen {
+    if $OS != windows {
+        if $ARCH == arm64 {
+            script sh - {
+                echo hi
+            }
+        }
+    }
+}
+";
+    assert!(shell_findings(source).is_empty(), "{:#?}", run(source));
+}
+
+#[test]
+fn a_shell_guard_does_not_leak_past_the_block_it_guards() {
+    let source = "\
+task gen {
+    if $OS != windows {
+        script sh - {
+            echo one
+        }
+    }
+    script sh - {
+        echo two
+    }
+}
+";
+    let found = shell_findings(source);
+    assert_eq!(found.len(), 1, "{:#?}", run(source));
+    // The second block, the unguarded one.
+    assert!(
+        source[found[0].at.span.range()].contains("echo two"),
+        "{found:#?}"
     );
-    assert_eq!(shell_findings(&source).len(), 1, "{:#?}", run(&source));
+}
+
+#[test]
+fn a_windows_guard_silences_a_windows_shell() {
+    // The mirror image, and the same rule: `powershell` is missing everywhere
+    // else, and the guard has excluded everywhere else.
+    let source = "\
+task gen {
+    if $OS == windows {
+        script powershell -Command whatever {
+            echo hi
+        }
+    }
+}
+";
+    assert!(shell_findings(source).is_empty(), "{:#?}", run(source));
 }
 
 #[test]

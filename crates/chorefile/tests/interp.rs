@@ -2573,6 +2573,116 @@ fn tasks_are_listed_in_source_order() {
 }
 
 // ---------------------------------------------------------------------------
+// spawn
+// ---------------------------------------------------------------------------
+//
+// `spawn` is the one command that leaves work running behind it, so what these
+// pin is mostly what it refuses: anything that could not outlive the run, and
+// anything at all under `--dry`.
+
+fn spawn(args: Vec<Word>) -> Chain {
+    cmd("spawn", args)
+}
+
+#[test]
+fn spawn_refuses_a_task() {
+    let f = file(vec![
+        task("t", &[], vec![run(spawn(vec![lit("server")]))]),
+        task("server", &[], vec![]),
+    ]);
+    let message = exec(&f, "t", &[], Mode::Run, Repeat::Once, &root()).err_text();
+    assert!(message.contains("is a task"), "{message}");
+    assert!(message.contains("`PATH`"), "{message}");
+}
+
+#[test]
+fn spawn_refuses_a_builtin() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![run(spawn(vec![lit("echo"), lit("hi")]))],
+    )]);
+    let message = exec(&f, "t", &[], Mode::Run, Repeat::Once, &root()).err_text();
+    assert!(message.contains("is a builtin"), "{message}");
+}
+
+#[test]
+fn spawn_with_nothing_to_run_is_a_usage_error() {
+    let f = file(vec![task("t", &[], vec![run(spawn(vec![]))])]);
+    let message = exec(&f, "t", &[], Mode::Run, Repeat::Once, &root()).err_text();
+    assert!(message.contains("usage: spawn"), "{message}");
+}
+
+#[test]
+fn dry_spawns_nothing_and_opens_no_redirect() {
+    // The echo is the whole of what a preview does here. The file matters as
+    // much as the process: truncating yesterday's log is the one effect of
+    // this command that cannot be taken back.
+    let dir = Temp::new("spawn-dry");
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![run(cmd_with(
+            "spawn",
+            vec![lit("definitely-not-a-real-program")],
+            vec![redirect(RedirectKind::Stdout, "app.log")],
+        ))],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, dir.path());
+    assert_eq!(
+        ran.echoed(),
+        ["$ spawn definitely-not-a-real-program > app.log"]
+    );
+    assert!(!dir.path().join("app.log").exists());
+}
+
+/// A real child, and the redirect rule that makes `spawn` worth having: one
+/// `>` catches both of its streams, because there is no `2>&1` to write.
+#[test]
+#[cfg(unix)]
+fn a_spawned_program_keeps_running_and_both_streams_reach_one_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = Temp::new("spawn");
+    let script = dir.path().join("noisy.sh");
+    std::fs::write(&script, "#!/bin/sh\nsleep 0.2\necho out\necho err >&2\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![run(cmd_with(
+            "spawn",
+            vec![lit(&chorefile::vars::display(&script))],
+            vec![redirect(RedirectKind::Stdout, "both.txt")],
+        ))],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path());
+    ran.ok();
+    // The run is over while the child is still sleeping: nothing waited.
+    let log = dir.path().join("both.txt");
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
+
+    let text = wait_for_text(&log);
+    assert!(text.contains("out"), "{text}");
+    assert!(text.contains("err"), "{text}");
+}
+
+/// Poll until a spawned child has written something, or give up — the child is
+/// on its own schedule, and a fixed sleep would be either slow or flaky.
+#[cfg(unix)]
+fn wait_for_text(path: &Path) -> String {
+    for _ in 0..100 {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        if text.contains("out") && text.contains("err") {
+            return text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
 // Included tasks (`include ... as`)
 // ---------------------------------------------------------------------------
 //

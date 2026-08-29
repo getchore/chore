@@ -233,7 +233,9 @@ assumed.
 Prefer an interpreter that behaves the same wherever it is installed — `uv`,
 `python3`, `node`, `nu`. `script sh -` gets a warning of its own: `sh` is a
 different program from platform to platform and Windows has none of them,
-which is the thing chore exists to remove.
+which is the thing chore exists to remove. The warning is guard-aware: put the
+block behind `if $OS == macos || $OS == linux { ... } else { ... }` — the shape
+the help text asks for — and it goes quiet, on every host.
 
 ### Task parameters
 
@@ -329,6 +331,7 @@ echo     <text...>
 env      <NAME> [value]       get or set
 fail     <msg>
 sleep    <seconds>
+spawn    <cmd> [args...]      start a program, do not wait; see below
 parallel [--fail-fast] <task>...
                               run tasks at once; see below
 ```
@@ -451,6 +454,42 @@ chore has no triple for it is empty: a guessed triple is accepted by cargo and
 then builds the wrong thing, where an empty one fails somewhere you can see it.
 
 **$HOME** is empty when neither `HOME` nor `USERPROFILE` is set.
+
+### spawn
+
+```sh
+task dev {
+    cargo build
+    spawn ./target/debug/app > app.log
+    echo "app restarted; logs in app.log"
+}
+```
+
+The replacement for `nohup ./app > log 2>&1 &`. It starts the program and
+returns immediately, and the child outlives the run: on Unix it gets a process
+group of its own, on Windows `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, so
+closing the terminal that ran `chore dev` does not take the server with it.
+The pid is reported on stderr: `spawned ./target/debug/app (pid 41207)`.
+
+**A program, and only a program.** `spawn` resolves on `PATH` — never a task,
+never a builtin — because what it starts has to keep running after chore has
+exited, and both of those *are* chore. `spawn build` is an error, and `chore
+check` says so before the run gets that far.
+
+**Its output.** stdin is null, and so are stdout and stderr unless the
+statement redirects them: a process that outlives the run must not be writing
+to a terminal chore has handed back. `> log` and `>> log` take **both**
+streams — there is no `2>&1` to write, and `> log 2> log` would be two handles
+racing for one file — so a bare `>` means "everything this thing says goes
+here". A `2> err` beside it splits them again, and a `2> err` on its own keeps
+the errors and drops the rest.
+
+Under `--dry` the line is echoed and nothing is spawned; no redirect file is
+opened either, so a preview cannot truncate yesterday's log.
+
+Nothing waits for the child and nothing reports on it later: its exit code is
+not the run's, and a `spawn` that started something which dies a second later
+still succeeded. When the result matters, run the program instead.
 
 ### parallel
 
@@ -756,7 +795,10 @@ Reports syntax errors, reserved names, unknown commands, undefined variables
 declared twice in one header, a parameter read as `$name` where parameters are
 positional, include cycles, an `include` pointing at a file named `chorefile`
 inside the project, an unmet `require`, and non-portable commands (`curl`,
-`unzip`, `tar`, `cp`, `rm`) with the builtin that replaces them. A default is checked in the
+`unzip`, `tar`, `cp`, `rm`, `nohup`) with the builtin that replaces them. A
+`spawn` whose first word names a task or a builtin is an error, and one that
+names a program this machine has never heard of is a warning like any other
+`PATH` miss. A default is checked in the
 scope it will be evaluated in, so it may read `$1`…`$(n-1)` but not its own
 slot or a later one.
 
@@ -787,9 +829,34 @@ command's exit code, a `$( ... )` capture, a task argument, a global, and a
 platform name the chorefile has assigned over are all treated as unknown, and
 an unknown condition is never taken as proof that a branch is skipped.
 
-Only the `PATH` lookup is affected. An undefined variable and a non-portable
-command are wrong on every platform, so `check` reports them inside a platform
-guard exactly as it does outside one.
+Only the `PATH` lookup is affected by *this machine's* platform. An undefined
+variable and a non-portable command are wrong on every platform, so `check`
+reports them inside a platform guard exactly as it does outside one.
+
+The `script sh -` warning reads the same guards, but asks the other question:
+not "does this host enter the branch" but "which platforms does the chorefile
+still allow here". A shell block guarded off every platform the shell is
+missing from is silent — on every host, since that is a fact about the file:
+
+```sh
+if $OS == macos || $OS == linux {
+    script sh - {            # silent: windows is excluded
+        ./configure && make
+    }
+} else {
+    fail "no shell here"
+}
+
+if $OS == windows {
+    script sh - {            # still warned about: windows has no `sh`
+        ./configure && make
+    }
+}
+```
+
+Only `$OS` narrows it, plus the `$EXE` and `$ENV` values `$OS` alone fixes;
+`$ARCH`, `$PLATFORM` and anything the chorefile assigned are unknown here and
+narrow nothing, so an unreadable guard silences nothing.
 
 Warnings do not fail the run: `chore check` exits nonzero only for errors, so a
 tool that exists solely in CI does not break the gate.
