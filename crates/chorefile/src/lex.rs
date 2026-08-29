@@ -37,6 +37,11 @@ pub enum Token {
     Gt,
     GtGt,
     ErrGt,
+    /// `2>&1`, spelled exactly and lexed whole: the `&` in it is not the `&`
+    /// of `&&`, and letting the two meet in the parser would make
+    /// `cmd 2>&1 && other` ambiguous at exactly the place a reader is least
+    /// able to see it.
+    ErrToOut,
     Bang,
     Caret,
     Newline,
@@ -61,6 +66,7 @@ impl Token {
             Self::Gt => "`>`".into(),
             Self::GtGt => "`>>`".into(),
             Self::ErrGt => "`2>`".into(),
+            Self::ErrToOut => "`2>&1`".into(),
             Self::Bang => "`!`".into(),
             Self::Caret => "`^`".into(),
             Self::Newline => "end of line".into(),
@@ -210,13 +216,31 @@ impl Lexer<'_> {
                 b'|' => self.punct(Token::Pipe, 1),
                 b'>' if self.peek(1) == Some(b'>') => self.punct(Token::GtGt, 2),
                 b'>' => self.punct(Token::Gt, 1),
+                // Before the `2>` arm: the longer spelling wins, and the
+                // rest of `2>&...` is refused here rather than left to the
+                // bare-`&` arm, which would answer a redirect with advice
+                // about chaining.
+                b'2' if self.err_to_out() => self.punct(Token::ErrToOut, 4),
+                b'2' if self.src[self.i..].starts_with("2>&") => {
+                    return syntax(
+                        "`2>&1` is the only stream redirect, and it is written exactly: no \
+                         spaces, and nothing but `1` after the `&`",
+                        self.span(self.i, 3),
+                    );
+                }
                 b'2' if self.peek(1) == Some(b'>') => self.punct(Token::ErrGt, 2),
                 b'!' if self.peek(1) != Some(b'=') => self.punct(Token::Bang, 1),
                 b'^' => self.punct(Token::Caret, 1),
-                b'&' => return syntax("`&` is not supported; use `&&`", self.span(self.i, 1)),
+                b'&' => {
+                    return syntax(
+                        "`&` is not supported; use `&&` to chain, or `2>&1` — written exactly, \
+                         with no space in it — to send stderr where stdout is going",
+                        self.span(self.i, 1),
+                    );
+                }
                 b'<' => {
                     return syntax(
-                        "`<` is not supported; only `>`, `>>` and `2>` redirect",
+                        "`<` is not supported; only `>`, `>>`, `2>` and `2>&1` redirect",
                         self.span(self.i, 1),
                     );
                 }
@@ -225,6 +249,13 @@ impl Lexer<'_> {
         }
         self.push(Token::Eof, self.src.len(), self.src.len());
         Ok(self.out)
+    }
+
+    /// `2>&1`, and nothing that merely starts with it: `2>&12` is a mistake
+    /// worth a diagnostic, not a redirect followed by an argument `2`.
+    fn err_to_out(&self) -> bool {
+        self.src[self.i..].starts_with("2>&1")
+            && !matches!(self.peek(4), Some(b) if !is_word_end(b))
     }
 
     fn byte(&self, i: usize) -> u8 {
@@ -283,8 +314,7 @@ impl Lexer<'_> {
         let mut quoted = false;
         while self.i < self.src.len() {
             match self.byte(self.i) {
-                b' ' | b'\t' | b'\r' | b'\n' => break,
-                b'{' | b'}' | b'(' | b')' | b'|' | b'&' | b'>' | b'<' => break,
+                b if is_word_end(b) => break,
                 b'\'' | b'"' => {
                     self.quoted_run()?;
                     quoted = true;
@@ -475,6 +505,17 @@ pub(crate) fn line_indent(source: &str, at: usize) -> &str {
 }
 
 /// A shell identifier: the name half of an assignment, or a `$name`.
+/// Where a word stops: whitespace, or an operator. Kept in one place because
+/// the `2>&1` lookahead asks the same question — the redirect has to be the
+/// whole token, so that `2>&12` is a mistake worth reporting rather than a
+/// redirect with a stray argument behind it.
+fn is_word_end(b: u8) -> bool {
+    matches!(
+        b,
+        b' ' | b'\t' | b'\r' | b'\n' | b'{' | b'}' | b'(' | b')' | b'|' | b'&' | b'>' | b'<'
+    )
+}
+
 pub(crate) fn is_ident(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')

@@ -575,6 +575,33 @@ task t {
     assert_eq!(found.len(), 3, "{found:#?}");
 }
 
+/// `2>&1` has no target word, so the walk that looks for undefined variables
+/// in a redirect's target must step over it rather than trip on it.
+#[test]
+fn a_targetless_redirect_is_not_an_undefined_variable() {
+    let source = "\
+task t {
+    echo hi > $out 2>&1
+    echo hi 2>&1
+}
+";
+    let found = matching(source, "undefined variable");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("out"), "{found:#?}");
+}
+
+/// Two answers for one stream is refused before the run, like any other thing
+/// the file cannot mean.
+#[test]
+fn stderr_in_two_places_is_a_check_error() {
+    let found = errors("task t {\n    echo hi 2> err.txt 2>&1\n}\n");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0].message.contains("stderr to one place"),
+        "{found:#?}"
+    );
+}
+
 #[test]
 fn each_interpolation_gets_its_own_position() {
     let source = "task t {\n    echo \"$a/$b\"\n}\n";

@@ -182,8 +182,8 @@ fn reads(block: &ast::Block) -> Vec<String> {
                 for arg in &cmd.args {
                     word(arg, out);
                 }
-                for redirect in &cmd.redirects {
-                    word(&redirect.target, out);
+                for redirect in cmd.redirects.iter().filter_map(|r| r.target.as_ref()) {
+                    word(redirect, out);
                 }
             }
             // Only the interpreter's argv reads chore variables.

@@ -102,7 +102,7 @@ fn script_in_chain(chain: &Chain) -> Option<&Script> {
         Chain::Script(s) => Some(s),
         Chain::Single(c) => std::iter::once(&c.name)
             .chain(&c.args)
-            .chain(c.redirects.iter().map(|r| &r.target))
+            .chain(c.redirects.iter().filter_map(|r| r.target.as_ref()))
             .find_map(script_in_word),
         Chain::And(a, b) | Chain::Or(a, b) | Chain::Pipe(a, b) => {
             script_in_chain(a).or_else(|| script_in_chain(b))
@@ -196,8 +196,13 @@ fn render_redirects(redirects: &[Redirect]) -> String {
             RedirectKind::Stdout => ">",
             RedirectKind::StdoutAppend => ">>",
             RedirectKind::Stderr => "2>",
+            RedirectKind::StderrToStdout => {
+                out.push_str(" 2>&1");
+                continue;
+            }
         };
-        out.push_str(&format!(" {op} {}", render_word(&r.target)));
+        let target = r.target.as_ref().expect("a target for a file redirect");
+        out.push_str(&format!(" {op} {}", render_word(target)));
     }
     out
 }
@@ -357,6 +362,79 @@ fn chaining_and_redirects() {
         body("task t {\n a && b || c\n a | b | c\n a > out\n b >> out\n c 2> err\n ^find . x\n}"),
         "{ ((a && b) || c); ((a | b) | c); a > out; b >> out; c 2> err; ^find . x }"
     );
+}
+
+/// `2>&1` is one token, in either position around a `>`, and the `&` in it is
+/// not the `&` of `&&`: a chain written after it still parses.
+#[test]
+fn stderr_to_stdout_parses_in_either_order_and_chains() {
+    assert_eq!(
+        body("task t {\n a 2>&1\n b > out 2>&1\n c 2>&1 > out\n}"),
+        "{ a 2>&1; b > out 2>&1; c 2>&1 > out }"
+    );
+    assert_eq!(body("task t {\n a 2>&1 && b\n}"), "{ (a 2>&1 && b) }");
+    assert_eq!(body("task t {\n a 2>&1 | b\n}"), "{ (a 2>&1 | b) }");
+}
+
+/// The operator's span is the operator, with nothing after it to include —
+/// which is the whole difference from every other redirect.
+#[test]
+fn a_stderr_to_stdout_span_covers_the_operator_alone() {
+    let src = "task t {\n echo hi > out.log 2>&1\n}";
+    let f = file(src);
+    let Stmt::Command(Chain::Single(cmd)) = &f.tasks[0].body[0] else {
+        panic!("expected a command");
+    };
+    assert_eq!(&src[cmd.redirects[0].span.range()], "> out.log");
+    assert_eq!(&src[cmd.redirects[1].span.range()], "2>&1");
+    assert!(cmd.redirects[1].target.is_none(), "it names a stream");
+}
+
+/// A `script` block's redirects go through the same parser, so it takes one
+/// too.
+#[test]
+fn a_script_block_takes_a_stderr_to_stdout_redirect() {
+    assert_eq!(
+        body("task t {\n script node - {\n     x\n } > out.txt 2>&1\n}"),
+        "{ script node - \"x\\n\" > out.txt 2>&1 }"
+    );
+}
+
+#[test]
+fn error_stderr_to_stdout_must_be_spelled_exactly() {
+    for src in [
+        "task t {\n echo hi 2>& 1\n}",
+        "task t {\n echo hi 2>&2\n}",
+        "task t {\n echo hi 2>&11\n}",
+    ] {
+        let message = error(src);
+        assert!(
+            message.contains("`2>&1`") && message.contains("exactly"),
+            "message for {src:?} was: {message}"
+        );
+    }
+    // A space *before* the `&` splits it into a `2>` with no target, so the
+    // advice arrives from the bare-`&` arm instead — still naming `2>&1`.
+    let message = error("task t {\n echo hi 2> &1\n}");
+    assert!(message.contains("`2>&1`"), "message was: {message}");
+}
+
+/// Two answers to "where does stderr go" is refused rather than resolved by
+/// the order they were typed in, which is the thing `2>&1` is famous for
+/// getting wrong.
+#[test]
+fn error_stderr_to_stdout_conflicts_with_a_stderr_file() {
+    for src in [
+        "task t {\n echo hi 2> err 2>&1\n}",
+        "task t {\n echo hi 2>&1 2> err\n}",
+        "task t {\n script node - {\n     x\n } 2> err 2>&1\n}",
+    ] {
+        let message = error(src);
+        assert!(
+            message.contains("stderr to one place"),
+            "message for {src:?} was: {message}"
+        );
+    }
 }
 
 #[test]

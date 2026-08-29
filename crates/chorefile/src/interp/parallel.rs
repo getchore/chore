@@ -55,7 +55,7 @@ use crate::exec::{EnvOverlay, Output};
 
 use super::memo::{CtxId, Memo};
 use super::run::{Shared, write_file};
-use super::{BuiltinTable, Called, Dest, Interpreter, Mode, Repeat};
+use super::{BuiltinTable, Called, Dest, Errs, Interpreter, Mode, Repeat};
 
 /// The `--fail-fast` flag, and the tasks to run.
 struct Plan {
@@ -122,12 +122,7 @@ struct Ran {
 impl<'a> Interpreter<'a> {
     /// `parallel [--fail-fast] <task>...`: run the named tasks concurrently,
     /// wait for all of them, and fail if any failed.
-    pub(super) fn parallel(
-        &mut self,
-        argv: &[String],
-        dest: Dest,
-        stderr: Option<PathBuf>,
-    ) -> Result<Output> {
+    pub(super) fn parallel(&mut self, argv: &[String], dest: Dest, errs: Errs) -> Result<Output> {
         let plan = Plan::parse(&argv[1..])?;
         // Every name is checked before any of them runs: half a `parallel`
         // followed by "unknown task" is a worse answer than none of it.
@@ -144,7 +139,7 @@ impl<'a> Interpreter<'a> {
         } else {
             self.run_siblings(&plan)
         };
-        self.deliver(ran, dest, stderr)
+        self.deliver(ran, dest, errs)
     }
 
     /// `--dry` runs the siblings one after another, in the order they were
@@ -264,7 +259,7 @@ impl<'a> Interpreter<'a> {
 
     /// Print the blocks in the order the tasks were named, then answer for
     /// the call as a whole.
-    fn deliver(&mut self, ran: Vec<Ran>, dest: Dest, stderr: Option<PathBuf>) -> Result<Output> {
+    fn deliver(&mut self, ran: Vec<Ran>, dest: Dest, errs: Errs) -> Result<Output> {
         let mut out = Vec::new();
         let mut err = Vec::new();
         let mut fault = None;
@@ -304,15 +299,25 @@ impl<'a> Interpreter<'a> {
             }
         }
 
+        // `2>&1` on a `parallel` is settled here rather than by the caller:
+        // the two streams are already whole blocks by this point, so joining
+        // them is appending one to the other. Every sibling's stdout comes
+        // first and every sibling's stderr after it, which is what the blocks
+        // mean — the interleaving between the two streams is the one thing
+        // `parallel` never preserved anyway.
+        if matches!(errs, Errs::ToStdout) {
+            out.append(&mut err);
+        }
+
         // The output goes out before any `?`: the blocks are what the run
         // produced, and a fault in one sibling must not swallow what the
         // others printed.
-        match &stderr {
+        match &errs {
             // Under `--dry` nothing is written, the same rule a redirect on
             // any other command follows.
-            Some(path) if self.mode == Mode::Run => write_file(path, &err, false)?,
-            Some(_) => {}
-            None => {
+            Errs::File(path) if self.mode == Mode::Run => write_file(path, &err, false)?,
+            Errs::File(_) | Errs::ToStdout => {}
+            Errs::Inherit => {
                 self.err.write_all(&err)?;
                 self.err.flush()?;
             }

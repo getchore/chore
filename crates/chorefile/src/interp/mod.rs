@@ -314,6 +314,24 @@ enum Dest {
     File { path: PathBuf, append: bool },
 }
 
+/// Where a command's stderr goes.
+///
+/// The companion to [`Dest`], and deliberately a separate answer: stdout's
+/// destination is decided by the caller — a `$( )`, a pipe — as well as by
+/// the statement's own `>`, while stderr is only ever the statement's
+/// business.
+enum Errs {
+    /// Nowhere in particular: the terminal, or whatever the interpreter's
+    /// stderr currently is — a parallel sibling's block, a caller's `2>`.
+    Inherit,
+    /// `2> file`.
+    File(PathBuf),
+    /// `2>&1`: the same place stdout ends up, *after* every redirect on the
+    /// command has been applied. So `> log 2>&1` and `2>&1 > log` both put
+    /// both streams in `log`, and neither has to be read left to right.
+    ToStdout,
+}
+
 /// Per-call execution flags, threaded down a chain.
 #[derive(Clone, Copy)]
 struct Flags {
