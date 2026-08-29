@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chorefile::builtins::pack::{self, Codec, Format, Target};
-use chorefile::exec::{Ctx, Output};
+use chorefile::exec::{Ctx, EnvOverlay, Output};
 
 // ---------------------------------------------------------------------------
 // harness
@@ -30,6 +30,7 @@ fn run(dir: &Path, dry: bool, argv: &[&str]) -> chorefile::Result<(Output, Strin
             root: dir,
             task: "",
             stdin: None,
+            env: &EnvOverlay::default(),
             dry,
             force: false,
             out: &mut out,

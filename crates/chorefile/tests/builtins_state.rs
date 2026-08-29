@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use chorefile::builtins::state;
 use chorefile::error::{Error, Result};
-use chorefile::exec::{Ctx, Output};
+use chorefile::exec::{Ctx, EnvOverlay, Output};
 
 /// A temp directory that cleans itself up, so a failing assertion does not
 /// leave litter behind.
@@ -64,6 +64,7 @@ fn call(dir: &Path, task: &str, dry: bool, force: bool, argv: &[&str]) -> Result
         root: dir,
         task,
         stdin: None,
+        env: &EnvOverlay::default(),
         dry,
         force,
         out: &mut out,

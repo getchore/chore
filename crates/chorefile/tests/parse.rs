@@ -331,6 +331,27 @@ fn assignment_only_splits_at_a_statement_start() {
 }
 
 #[test]
+fn a_binding_in_envs_argument_list_is_a_plain_word() {
+    // `env`'s per-command form leans on this: only a *statement*'s first word
+    // can be an assignment, so `CGO_ENABLED=0` inside an argument list arrives
+    // as one word for the interpreter to split.
+    assert_eq!(
+        body("task t {\n env CGO_ENABLED=0 go build\n}"),
+        "{ env CGO_ENABLED=0 go build }"
+    );
+    assert_eq!(
+        body("task t {\n env A=1 B=$x go build\n}"),
+        "{ env A=1 B=$x go build }"
+    );
+    // And a `^` still belongs to a statement's command name only, which is
+    // what keeps the per-command form from having to interpret one.
+    assert!(
+        error("task t {\n env A=1 ^go build\n}").contains("`^` may only prefix"),
+        "a caret in an argument is a syntax error"
+    );
+}
+
+#[test]
 fn chaining_and_redirects() {
     assert_eq!(
         body("task t {\n a && b || c\n a | b | c\n a > out\n b >> out\n c 2> err\n ^find . x\n}"),

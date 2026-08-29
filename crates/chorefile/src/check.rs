@@ -961,6 +961,42 @@ impl<'a> Checker<'a> {
         if !cmd.force_path && name == "parallel" {
             self.parallel_tasks(&args, cmd.span);
         }
+        // Only when every argument is literal: `literal` drops the ones that
+        // are not, and a dropped word would shift the command out of place.
+        if !cmd.force_path && name == "env" && args.len() == cmd.args.len() {
+            self.env_prefixed(&args, cmd.span, scope);
+        }
+    }
+
+    /// `env NAME=value <cmd> [args...]` runs a command, so `check` has to see
+    /// one.
+    ///
+    /// Without this the whole line reads as arguments to a builtin, and
+    /// `env CGO_ENABLED=0 cargooo build` — a typo in the command, in a form
+    /// whose entire point is that a command follows — is reported by nothing.
+    /// The words are already checked for undefined variables by the caller;
+    /// what is left is the resolution every other command name gets, with the
+    /// same `^` rule and the same platform guard.
+    fn env_prefixed(&mut self, args: &[&str], span: Span, scope: &Scope) {
+        // The interpreter's rule, and the reason it is one word: if the first
+        // argument has an `=`, this is the per-command form. `env NAME value`
+        // and `env NAME` set and read, and neither has a command in it.
+        if !args.first().is_some_and(|first| first.contains('=')) {
+            return;
+        }
+        // The leading bindings, then the command. A first word that has an `=`
+        // but is not a binding is the interpreter's error to report, and a
+        // form with no command at all is too: there is no command name here to
+        // say anything about either way.
+        if !is_binding(args[0]) {
+            return;
+        }
+        let Some(first) = args.iter().find(|word| !is_binding(word)) else {
+            return;
+        };
+        // Never `^`-forced: the parser takes a `^` only in front of a
+        // statement's command name, so one cannot be written here at all.
+        self.resolution(first, false, span, scope);
     }
 
     // -- script blocks ------------------------------------------------------
@@ -1608,6 +1644,13 @@ fn literal(word: &Word) -> Option<&str> {
         },
         _ => None,
     }
+}
+
+/// A `NAME=value` word in `env`'s per-command form, read the way the
+/// interpreter's `binding` reads it: an identifier, an `=`, and anything.
+fn is_binding(word: &str) -> bool {
+    word.split_once('=')
+        .is_some_and(|(name, _)| crate::lex::is_ident(name))
 }
 
 /// Which kind of host shell an interpreter is, if it is one.

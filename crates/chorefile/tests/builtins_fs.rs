@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use chorefile::builtins::fs as builtins;
 use chorefile::error::{Error, Result};
-use chorefile::exec::{Ctx, Output};
+use chorefile::exec::{Ctx, EnvOverlay, Output};
 
 /// A temp directory that cleans itself up, so a failing assertion does not
 /// leave litter behind.
@@ -62,6 +62,7 @@ fn run_streams(dir: &Path, dry: bool, args: &[&str]) -> (Result<Output>, String,
             root: dir,
             task: "",
             stdin: None,
+            env: &EnvOverlay::default(),
             dry,
             force: false,
             out: &mut out,
@@ -108,11 +109,14 @@ fn message(result: Result<Output>) -> String {
 fn lookup_covers_this_modules_builtins_only() {
     for name in [
         "copy", "move", "remove", "mkdir", "chmod", "which", "find", "read", "write", "sha256",
-        "exists", "echo", "env", "fail", "sleep",
+        "exists", "echo", "fail", "sleep",
     ] {
         assert!(builtins::lookup(name).is_some(), "{name} missing");
     }
-    for name in ["download", "extract", "archive", "cp", ""] {
+    // `env` is reserved, but the interpreter resolves it itself: a set
+    // belongs to the frame, and the per-command form has a command in its
+    // arguments. See `interp::run::Interpreter::env_command`.
+    for name in ["download", "extract", "archive", "cp", "env", ""] {
         assert!(builtins::lookup(name).is_none(), "{name} unexpected");
     }
 }
@@ -378,24 +382,7 @@ fn find_needs_a_directory() {
     assert!(message(result).starts_with("find: not a directory"));
 }
 
-// --- env / fail / sleep ----------------------------------------------------
-
-#[test]
-fn env_gets_and_sets() {
-    let dir = Dir::new("env");
-    let name = "CHOREFILE_TEST_ENV_VAR";
-    run(dir.path(), &["env", name, "value"]);
-    assert_eq!(run(dir.path(), &["env", name]), "value\n");
-
-    // The diagnostic goes to `err`: on stdout it would end up inside a
-    // `$(env NAME)` capture, and in `Output::stderr` it would reach nobody.
-    let (result, out, err) = run_streams(dir.path(), false, &["env", "CHOREFILE_TEST_UNSET_VAR"]);
-    let output = result.expect("no error");
-    assert_eq!(output.code, 1);
-    assert_eq!(out, "");
-    assert!(output.stderr.is_empty());
-    assert!(err.contains("is not set"), "diagnostics: {err:?}");
-}
+// --- fail / sleep ----------------------------------------------------------
 
 #[test]
 fn fail_always_errors_with_its_message() {
@@ -505,7 +492,6 @@ fn dry_skips_everything_with_an_effect() {
         vec!["mkdir", "made"],
         vec!["chmod", "700", "a.txt"],
         vec!["write", "written.txt", "text"],
-        vec!["env", "CHOREFILE_TEST_DRY_VAR", "set"],
         vec!["sleep", "30"],
     ] {
         let (result, out) = run_in(dir.path(), true, &args);
@@ -519,7 +505,6 @@ fn dry_skips_everything_with_an_effect() {
     assert!(!dir.path().join("written.txt").exists());
     assert!(dir.path().join("a.txt").exists());
     assert!(dir.path().join("tree/b.txt").exists());
-    assert!(std::env::var("CHOREFILE_TEST_DRY_VAR").is_err());
 }
 
 #[test]

@@ -27,6 +27,28 @@
 //! builtin as `Ctx::root`; [`Interpreter::merged`] takes it from
 //! [`Merged::root`] so a caller cannot supply a different one by accident.
 //!
+//! # `env` is per-call, and the process environment is never written
+//!
+//! `env NAME value` binds a name in the running frame and nowhere else. The
+//! bindings live in [`EnvOverlay`] on the interpreter, scoped by
+//! [`Frame::env_depth`] the way `cwd` is scoped by the frame itself: a task
+//! sees what it set and what its callers set, everything it calls sees them
+//! too, and all of it goes away when the call returns. `run_program` layers
+//! the overlay onto each child process with `Command::env`, and the builtins
+//! read it through [`Ctx::env`](crate::exec::Ctx::env), so `env HTTPS_PROXY
+//! ...` reaches the `download` on the next line without the run's own
+//! environment ever changing.
+//!
+//! Nothing calls `std::env::set_var`. A set that reached the process would
+//! outlive the task that wrote it — the bug this design exists to remove —
+//! and `parallel` puts several interpreters on several threads, where writing
+//! the environment races every other thread reading it. Siblings therefore
+//! cannot see each other's sets at all: each has its own interpreter, and its
+//! own overlay, copied from the parent's at the moment of the `parallel`.
+//!
+//! `env NAME=value <cmd>` is the same overlay opened for exactly one command.
+//! See `Interpreter::env_command`.
+//!
 //! # What `--dry` does with a command that cannot run
 //!
 //! A preview skips effects but still runs captures and conditions, so a
@@ -149,7 +171,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ast::{Block, CompareOp, Cond, File, Stmt, Task, Word};
 use crate::error::{Error, Result};
-use crate::exec::{Builtin, Output};
+use crate::exec::{Builtin, EnvOverlay, Output};
 use crate::resolve::Merged;
 use crate::{builtins, vars};
 
@@ -215,13 +237,19 @@ pub type BuiltinTable = fn(&str) -> Option<Builtin>;
 // State
 // ---------------------------------------------------------------------------
 
-/// One task invocation: its locals, its positional arguments, and its
-/// directory. Dropping the frame is what stops a `cd` leaking to the caller.
+/// One task invocation: its locals, its positional arguments, its directory
+/// and its environment bindings. Dropping the frame is what stops a `cd` — or
+/// an `env NAME value` — leaking to the caller.
 struct Frame {
     task: String,
     args: Vec<String>,
     vars: HashMap<String, String>,
     cwd: PathBuf,
+    /// How deep [`Interpreter::envs`] was when this frame was pushed. Popping
+    /// the frame unwinds the overlay back to it, which is what makes
+    /// `env NAME value` per-call: everything the task set — and everything
+    /// the tasks it called set — goes away with it, exactly as `cd` does.
+    env_depth: usize,
     /// `--dry` only: which of `vars` hold a value the preview invented, and
     /// the command whose answer is missing. Parallel to `vars` rather than
     /// folded into it so that a value stays a `String` everywhere it is read,
@@ -366,6 +394,11 @@ pub struct Interpreter<'a> {
     /// context; every parallel child gets its own.
     ctx: CtxId,
     frames: Vec<Frame>,
+    /// The names `env NAME value` has bound, layered over the process
+    /// environment. One per interpreter, so a `parallel` sibling's sets are
+    /// its own; scoped by [`Frame::env_depth`], so a task's sets die with its
+    /// call. See [`EnvOverlay`].
+    envs: EnvOverlay,
     globals_done: bool,
     /// Set when a called task ran `exit`, so the caller unwinds too.
     pending_exit: Option<i32>,
@@ -436,6 +469,7 @@ impl<'a> Interpreter<'a> {
             args: Vec::new(),
             vars: HashMap::new(),
             cwd: root.clone(),
+            env_depth: 0,
             invented: HashMap::new(),
             args_invented: None,
         };
@@ -448,6 +482,7 @@ impl<'a> Interpreter<'a> {
             memo,
             ctx,
             frames: vec![frame],
+            envs: EnvOverlay::default(),
             globals_done: false,
             pending_exit: None,
             quiet: false,

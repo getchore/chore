@@ -9,7 +9,7 @@
 //!
 //! *Failure* comes in two flavours. A command that could not do its job
 //! returns [`Error::Run`] and stops the task. A command that answers a
-//! question — `which`, `exists`, `env` reading an unset name — answers "no"
+//! question — `which`, `exists`, and `env` reading an unset name — answers "no"
 //! with a nonzero exit code instead, because those are the forms `if` and
 //! `try` are built to consume; an error would make `if which cargo` unusable.
 
@@ -37,7 +37,6 @@ pub fn lookup(name: &str) -> Option<Builtin> {
         "sha256" => sha256,
         "exists" => exists,
         "echo" => echo,
-        "env" => env,
         "fail" => fail,
         "sleep" => sleep,
         _ => return None,
@@ -62,12 +61,6 @@ fn usage(text: &str) -> Error {
 
 fn line(ctx: &mut Ctx<'_>, text: &str) -> Result<()> {
     writeln!(ctx.out, "{text}").map_err(Error::Io)
-}
-
-/// One diagnostic line. It goes to `ctx.err` so that it reaches the terminal
-/// even when stdout is captured, and lands in the file when `2>` asks for it.
-fn diag(ctx: &mut Ctx<'_>, text: &str) -> Result<()> {
-    writeln!(ctx.err, "{text}").map_err(Error::Io)
 }
 
 // --- copy / move -----------------------------------------------------------
@@ -276,11 +269,17 @@ fn which(ctx: &mut Ctx<'_>) -> Result<Output> {
         return Err(usage("which <name>"));
     };
     let name = name.clone();
+    // Read before the borrow of `ctx` that printing needs, and read through
+    // the overlay like every other environment lookup in a builtin.
+    let pathext = ctx.env.get("PATHEXT");
 
     // A name with a separator is a path, not a `PATH` lookup.
     if name.contains('/') || name.contains('\\') {
         let base = ctx.path(&name);
-        return match candidates(&base).into_iter().find(|p| is_executable(p)) {
+        return match candidates(&base, &pathext)
+            .into_iter()
+            .find(|p| is_executable(p))
+        {
             Some(found) => {
                 line(ctx, &vars::display(&found))?;
                 Ok(Output::ok())
@@ -289,10 +288,15 @@ fn which(ctx: &mut Ctx<'_>) -> Result<Output> {
         };
     }
 
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    // The `PATH` the *run* has, which is the one a spawned command will be
+    // looked up on: `env PATH ...` earlier in this task moved it.
+    let path = ctx.env.get("PATH").unwrap_or_default();
     for dir in std::env::split_paths(&path).filter(|d| !d.as_os_str().is_empty()) {
         let base = dir.join(&name);
-        if let Some(found) = candidates(&base).into_iter().find(|p| is_executable(p)) {
+        if let Some(found) = candidates(&base, &pathext)
+            .into_iter()
+            .find(|p| is_executable(p))
+        {
             line(ctx, &vars::display(&found))?;
             return Ok(Output::ok());
         }
@@ -301,10 +305,12 @@ fn which(ctx: &mut Ctx<'_>) -> Result<Output> {
 }
 
 /// The name as written, plus the `PATHEXT` variants on Windows.
-fn candidates(base: &Path) -> Vec<PathBuf> {
+fn candidates(base: &Path, pathext: &Option<String>) -> Vec<PathBuf> {
     let mut out = vec![base.to_path_buf()];
     if cfg!(windows) {
-        let ext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        let ext = pathext
+            .clone()
+            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
         let name = base.file_name().unwrap_or_default().to_string_lossy();
         for suffix in ext.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             out.push(base.with_file_name(format!("{name}{suffix}")));
@@ -500,45 +506,13 @@ fn exists_on_disk(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
-// --- echo / env / fail / sleep ---------------------------------------------
+// --- echo / fail / sleep ---------------------------------------------------
 
 /// `echo <text...>` — arguments joined with single spaces, one newline.
 fn echo(ctx: &mut Ctx<'_>) -> Result<Output> {
     let text = ctx.rest().join(" ");
     line(ctx, &text)?;
     Ok(Output::ok())
-}
-
-/// `env <NAME>` prints a variable, `env <NAME> <value>` sets one for the rest
-/// of the run and for the processes it spawns.
-///
-/// Reading an unset name exits 1 rather than failing the task, so
-/// `if env CI` and `try env CI` both behave. Reading runs under `--dry`;
-/// setting does not.
-fn env(ctx: &mut Ctx<'_>) -> Result<Output> {
-    match ctx.rest() {
-        [name] => match std::env::var(name) {
-            Ok(value) => {
-                line(ctx, &value)?;
-                Ok(Output::ok())
-            }
-            Err(_) => {
-                diag(ctx, &format!("env: {name} is not set"))?;
-                Ok(Output::failed(1))
-            }
-        },
-        [name, value] => {
-            if !ctx.dry {
-                let (name, value) = (name.clone(), value.clone());
-                // SAFETY: `chore` is single-threaded while a task runs — the
-                // interpreter waits for each command before starting the next
-                // — so no other thread can be reading the environment here.
-                unsafe { std::env::set_var(name, value) };
-            }
-            Ok(Output::ok())
-        }
-        _ => Err(usage("env <NAME> [value]")),
-    }
 }
 
 /// `fail <msg>` — stops the task with `msg`. Under `try` it is just a nonzero

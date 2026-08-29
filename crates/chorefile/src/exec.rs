@@ -45,6 +45,75 @@ impl Output {
     }
 }
 
+/// The environment a command runs in: the names `env` has bound, layered
+/// over the process environment.
+///
+/// Chore never calls `std::env::set_var`. A set belongs to the frame that
+/// wrote it, exactly as `cd` and a local do — a `run` task that sets
+/// `TERRA_SOCKET` must not still be setting it for the task called after it —
+/// and `parallel` puts several interpreters on several threads, where writing
+/// the process environment is racy and, in edition 2024, unsafe. So the
+/// bindings live here instead: the interpreter layers them onto every child
+/// process with [`std::process::Command::env`], and every builtin that reads
+/// the environment reads it through [`EnvOverlay::get`] rather than through
+/// `std::env::var`, so `env HTTPS_PROXY ...` is visible to the `download`
+/// that follows it.
+#[derive(Default, Clone)]
+pub struct EnvOverlay {
+    /// Innermost last, so a search from the back finds the binding in force
+    /// and a replay from the front lets it win on a child's command line. A
+    /// `Vec` rather than a map because a scope is left by truncating back to
+    /// the length it had on the way in, which is the whole of the scoping.
+    layers: Vec<(String, Option<String>)>,
+}
+
+impl EnvOverlay {
+    /// What `name` holds for a command running now: the innermost binding, or
+    /// the process environment when nothing bound it. `None` is "unset", the
+    /// answer `env NAME` reports as exit 1.
+    pub fn get(&self, name: &str) -> Option<String> {
+        for (bound, value) in self.layers.iter().rev() {
+            if same_name(bound, name) {
+                return value.clone();
+            }
+        }
+        std::env::var(name).ok()
+    }
+
+    /// Bind a name from here until the scope that opened is unwound.
+    pub(crate) fn set(&mut self, name: String, value: Option<String>) {
+        self.layers.push((name, value));
+    }
+
+    /// The depth to hand back to [`unwind`](Self::unwind) when this scope ends.
+    pub(crate) fn depth(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Drop every binding made since `depth` was taken.
+    pub(crate) fn unwind(&mut self, depth: usize) {
+        self.layers.truncate(depth);
+    }
+
+    /// Every binding, outermost first, for a process about to be spawned.
+    pub(crate) fn bindings(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.layers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_deref()))
+    }
+}
+
+/// Windows environment names are case-insensitive, so `env path ...` and
+/// `$PATH` have to be one entry there and two everywhere else. ASCII case is
+/// the whole rule: it is what the Windows API itself applies.
+fn same_name(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
 /// Everything a command needs to run.
 pub struct Ctx<'a> {
     /// Fully interpolated argv. `args[0]` is the command name.
@@ -60,6 +129,11 @@ pub struct Ctx<'a> {
     pub task: &'a str,
     /// Piped input, when this command is on the right of a `|`.
     pub stdin: Option<&'a [u8]>,
+    /// The environment as this command sees it. A builtin that wants a
+    /// variable asks this rather than `std::env::var`, so a name `env` bound
+    /// in an enclosing frame is visible to it and one bound in a sibling
+    /// `parallel` task is not.
+    pub env: &'a EnvOverlay,
     /// `--dry`: echo, and do nothing that has an effect. Builtins that only
     /// read still run, because conditions and captures depend on them.
     pub dry: bool,
