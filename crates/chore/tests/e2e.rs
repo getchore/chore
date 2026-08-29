@@ -1225,3 +1225,95 @@ fn init_cannot_be_shadowed_by_a_task() {
     assert_eq!(check.code, 1, "{}", check.stdout);
     assert!(check.stdout.contains("init"), "{}", check.stdout);
 }
+
+// ---------------------------------------------------------------------------
+// spawn
+// ---------------------------------------------------------------------------
+//
+// The one command that outlives the run. The child here is `chore` itself,
+// which is the only program every platform running these tests is guaranteed
+// to have — and it gives the test a child that takes a known, visible amount
+// of time to finish its work.
+
+#[test]
+fn a_spawned_process_outlives_the_run_and_keeps_writing() {
+    let bin = env!("CARGO_BIN_EXE_chore").replace('\\', "/");
+    let dir = Dir::new();
+    dir.chorefile(&format!(
+        "\
+# Slow enough that the parent is certainly gone before it finishes.
+task slow {{
+    sleep 2
+    write done.txt finished
+}}
+
+task dev {{
+    spawn \"{bin}\" slow > slow.log
+    echo carried on
+}}
+"
+    ));
+
+    let run = chore(&dir, &["dev"]).ok();
+    // The run went straight on to its next statement, and said what it left
+    // running — on stderr, where diagnostics go.
+    assert_eq!(run.printed("carried on"), 1, "{}", run.stdout);
+    assert!(run.stderr.contains("spawned"), "{}", run.stderr);
+    assert!(run.stderr.contains("pid"), "{}", run.stderr);
+    // Nothing waited: the child is still sleeping now that chore has exited.
+    assert!(!dir.exists("done.txt"), "chore waited for the child");
+
+    // ...and it finishes anyway, orphaned, with its output in the file the
+    // `>` named.
+    assert!(
+        wait_for(&dir, "done.txt"),
+        "the spawned child never finished"
+    );
+    assert_eq!(dir.read("done.txt"), "finished\n");
+    let log = dir.read("slow.log");
+    assert!(
+        log.contains("sleep 2"),
+        "the redirect caught nothing: {log}"
+    );
+}
+
+#[test]
+fn spawn_of_a_task_is_refused_before_anything_runs() {
+    let dir = Dir::new();
+    dir.chorefile("task dev {\n    spawn slow\n}\n\ntask slow {\n    write ran.txt yes\n}\n");
+    let run = chore(&dir, &["dev"]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    assert!(run.stderr.contains("is a task"), "{}", run.stderr);
+    assert!(!dir.exists("ran.txt"));
+    // And `check` says so without running anything at all.
+    let check = chore(&dir, &["check"]);
+    assert_eq!(check.code, 1, "{}", check.stdout);
+    assert!(check.stdout.contains("spawn"), "{}", check.stdout);
+}
+
+#[test]
+fn dry_spawns_nothing_and_writes_no_log() {
+    let bin = env!("CARGO_BIN_EXE_chore").replace('\\', "/");
+    let dir = Dir::new();
+    dir.chorefile(&format!(
+        "task slow {{\n    write done.txt finished\n}}\n\ntask dev {{\n    spawn \"{bin}\" slow > slow.log\n}}\n"
+    ));
+    let run = chore(&dir, &["dev", "--dry"]).ok();
+    assert!(run.stdout.contains("$ spawn"), "{}", run.stdout);
+    assert!(!dir.exists("slow.log"), "a preview truncated the log");
+    assert!(!dir.exists("done.txt"));
+}
+
+/// Poll for a file a detached child is about to write. A fixed sleep would be
+/// either slower than it needs to be or flaky on a loaded machine.
+fn wait_for(dir: &Dir, name: &str) -> bool {
+    for _ in 0..200 {
+        if dir.exists(name) {
+            // Created before it is written: give the child its moment.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}

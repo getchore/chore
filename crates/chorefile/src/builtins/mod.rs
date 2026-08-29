@@ -5,7 +5,8 @@
 /// `check` reports it if one tries.
 pub const NAMES: &[&str] = &[
     "download", "extract", "archive", "copy", "move", "remove", "mkdir", "chmod", "which", "find",
-    "read", "write", "sha256", "exists", "changed", "echo", "env", "fail", "sleep", "parallel",
+    "read", "write", "sha256", "exists", "changed", "echo", "env", "fail", "sleep", "spawn",
+    "parallel",
 ];
 
 /// Non-portable commands `check` flags, with the builtin to use instead.
@@ -23,6 +24,7 @@ pub const REPLACEMENTS: &[(&str, &str)] = &[
     ("sha256sum", "sha256"),
     ("test", "exists"),
     ("sleep", "sleep"),
+    ("nohup", "spawn"),
 ];
 
 pub fn is_builtin(name: &str) -> bool {
