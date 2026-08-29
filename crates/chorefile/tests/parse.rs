@@ -840,6 +840,36 @@ fn the_first_line_of_the_block_wins() {
 }
 
 #[test]
+fn a_description_stops_at_the_end_of_its_first_sentence() {
+    let f = file("# Type-check the workspace. Runs clippy too, so it is slow.\ntask t { }");
+    assert_eq!(f.tasks[0].doc.as_deref(), Some("Type-check the workspace."));
+    let f = file("# Really? Yes.\ntask t { }");
+    assert_eq!(f.tasks[0].doc.as_deref(), Some("Really?"));
+}
+
+/// A period inside a version, a path or an abbreviation is not the end of a
+/// sentence, and a comment without one is shown whole.
+#[test]
+fn a_period_that_does_not_end_a_sentence_is_kept() {
+    for (line, want) in [
+        ("# Needs chore 1.4.0 or newer", "Needs chore 1.4.0 or newer"),
+        (
+            "# Build one target, e.g. aarch64-apple-darwin.",
+            "Build one target, e.g. aarch64-apple-darwin.",
+        ),
+        (
+            "# Run target/debug/app in dev mode",
+            "Run target/debug/app in dev mode",
+        ),
+        ("# Build it", "Build it"),
+        ("# Build it.", "Build it."),
+    ] {
+        let f = file(&format!("{line}\ntask t {{ }}"));
+        assert_eq!(f.tasks[0].doc.as_deref(), Some(want), "{line}");
+    }
+}
+
+#[test]
 fn a_multi_line_comment_block_describes_the_task_by_its_first_line() {
     let f = file(
         "# Run the app under the debugger.\n\

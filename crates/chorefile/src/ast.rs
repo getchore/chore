@@ -59,7 +59,8 @@ pub struct Task {
     /// It is the first non-empty line of the contiguous `#` block directly
     /// above the task — one line, however many the block holds, because that
     /// is what a listing has room for and the summary is what a block leads
-    /// with. A blank line ends a block, so a file header is not a description.
+    /// with. A blank line ends a block, so a file header is not a description,
+    /// and the line is cut at the end of its first sentence.
     pub doc: Option<String>,
     pub body: Block,
     pub span: Span,

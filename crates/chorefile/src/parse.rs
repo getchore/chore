@@ -199,7 +199,7 @@ impl<'a> Parser<'a> {
                     self.bump();
                     self.eat(&Token::Newline);
                     if doc.is_none() && !text.trim().is_empty() {
-                        doc = Some(text);
+                        doc = Some(first_sentence(&text));
                     }
                 }
                 Token::Word { .. } if self.at_keyword("task") => {
@@ -1226,4 +1226,42 @@ fn literal(word: &Word) -> Option<String> {
 /// `Build` while an ASCII-art `#---` keeps its shape.
 fn strip_doc(text: &str) -> String {
     text.strip_prefix(' ').unwrap_or(text).to_string()
+}
+
+/// The description stops at the end of its first sentence, terminator kept.
+///
+/// A listing has room for one line, and a comment that packs two sentences
+/// into its first — `Type-check the workspace. Runs clippy too, so it is
+/// slow.` — was written for the reader of the file, not the listing. The
+/// summary is the first sentence; what follows is the caveat.
+///
+/// A sentence ends at `.`, `!` or `?` followed by whitespace or the end of
+/// the line, so `1.4.0`, `target/debug` and `foo.bar` inside a sentence are
+/// untouched. A period after a single letter does not count, which is what
+/// keeps `e.g. aarch64-apple-darwin` and `i.e. the slow one` whole; the cost
+/// is a sentence ending in a one-letter word, which is rare enough to pay.
+fn first_sentence(line: &str) -> String {
+    let bytes = line.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if !matches!(b, b'.' | b'!' | b'?') {
+            continue;
+        }
+        let ends_line = bytes
+            .get(i + 1)
+            .is_none_or(|next| next.is_ascii_whitespace());
+        if !ends_line {
+            continue;
+        }
+        // `e.g.`: the letter before this period is itself preceded by a
+        // period, a space, or the start of the line.
+        let abbreviation = b == b'.'
+            && i >= 1
+            && bytes[i - 1].is_ascii_alphabetic()
+            && (i == 1 || matches!(bytes[i - 2], b'.' | b' '));
+        if abbreviation {
+            continue;
+        }
+        return line[..=i].to_string();
+    }
+    line.to_string()
 }

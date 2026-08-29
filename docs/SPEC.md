@@ -142,6 +142,13 @@ the rule is the first **non-empty** line of the block, which needs no second
 concept. A block of nothing but blank `#` lines leaves the task with no
 description, since there was never a line to show.
 
+That line is cut at the end of its first sentence, terminator kept:
+`# Type-check the workspace. Runs clippy too, so it is slow.` lists as
+"Type-check the workspace." A sentence ends at `.`, `!` or `?` followed by a
+space or the end of the line, so `1.4.0` and `foo.bar` pass through, and a
+period after a single letter is not an end, so `e.g. aarch64-apple-darwin`
+stays whole.
+
 The description is one line wherever it appears: `chore list`, `list --json`
 and `list --names` all carry that one line, and the rest of the block stays in
 the file for whoever opens it.
