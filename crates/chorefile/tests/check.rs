@@ -2634,3 +2634,56 @@ task gen {{
     );
     assert!(path_misses(&source).is_empty(), "{:#?}", run(&source));
 }
+
+// --- 15. env's per-command form -------------------------------------------
+//
+// `env NAME=value <cmd>` runs a command, so the command has to be resolved
+// like any other. Without that, a typo in the one position the form exists
+// for would be reported by nothing.
+
+#[test]
+fn the_command_after_a_binding_is_resolved() {
+    let found = path_misses(&format!("task t {{\n    env FOO=1 {MISSING}\n}}\n"));
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Warning);
+    assert!(found[0].message.contains(MISSING), "{found:#?}");
+}
+
+#[test]
+fn a_task_or_builtin_after_a_binding_resolves() {
+    for source in [
+        "task t {\n    env FOO=1 echo hi\n}\n",
+        "task t {\n    env FOO=1 inner\n}\ntask inner {\n    echo hi\n}\n",
+        // Several bindings, then the command.
+        "task t {\n    env FOO=1 BAR=2 echo hi\n}\n",
+    ] {
+        assert!(path_misses(source).is_empty(), "{:#?}", run(source));
+    }
+}
+
+#[test]
+fn the_reading_and_setting_forms_have_no_command_in_them() {
+    // `env NAME value` and `env NAME` are the old two forms: nothing here is
+    // a command, and reading the value as one would invent a finding.
+    for source in [
+        "task t {\n    env CGO_ENABLED 0\n}\n",
+        "task t {\n    env CGO_ENABLED\n}\n",
+    ] {
+        assert!(path_misses(source).is_empty(), "{:#?}", run(source));
+    }
+}
+
+#[test]
+fn a_guard_still_silences_the_command_after_a_binding() {
+    let source = format!(
+        "task t {{\n    if $OS == {} {{\n        env FOO=1 {MISSING}\n    }}\n}}\n",
+        other_os()
+    );
+    assert!(path_misses(&source).is_empty(), "{:#?}", run(&source));
+}
+
+#[test]
+fn an_undefined_variable_in_a_binding_is_reported() {
+    let found = matching("task t {\n    env FOO=$nope echo hi\n}\n", "nope");
+    assert_eq!(found.len(), 1, "{found:#?}");
+}

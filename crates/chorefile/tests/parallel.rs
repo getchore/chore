@@ -590,3 +590,63 @@ task b {
     let log = dir.read("log.txt").expect("log");
     assert!(log.contains('a') && log.contains('b'), "{log:?}");
 }
+
+// ---------------------------------------------------------------------------
+// env
+// ---------------------------------------------------------------------------
+
+#[test]
+fn siblings_cannot_see_each_others_env_sets() {
+    // Each sibling has its own interpreter and its own copy of the overlay,
+    // which is the whole reason `env` never writes the process environment:
+    // two threads setting one name there would race, and whichever won would
+    // decide what the other's `download` was configured with.
+    let dir = Dir::new("env-siblings");
+    let ran = run(
+        &dir,
+        "\
+task ci {
+    parallel a b
+    if env SHARED {
+        write leaked.txt yes
+    }
+}
+task a {
+    env SHARED a
+    sleep 0.1
+    write a.txt $(env SHARED)
+}
+task b {
+    env SHARED b
+    sleep 0.1
+    write b.txt $(env SHARED)
+}
+",
+        "ci",
+    );
+    assert_eq!(ran.code, Ok(0), "{}", ran.err);
+    assert_eq!(dir.read("a.txt").as_deref(), Some("a\n"));
+    assert_eq!(dir.read("b.txt").as_deref(), Some("b\n"));
+    // And nothing a sibling set outlives the `parallel`.
+    assert!(!dir.exists("leaked.txt"));
+}
+
+#[test]
+fn a_sibling_starts_with_the_environment_the_parallel_was_called_with() {
+    let dir = Dir::new("env-inherited");
+    let ran = run(
+        &dir,
+        "\
+task ci {
+    env FROM_PARENT yes
+    parallel a
+}
+task a {
+    write a.txt $(env FROM_PARENT)
+}
+",
+        "ci",
+    );
+    assert_eq!(ran.code, Ok(0), "{}", ran.err);
+    assert_eq!(dir.read("a.txt").as_deref(), Some("yes\n"));
+}

@@ -119,9 +119,32 @@ impl Interpreter<'_> {
         argv.push(name.clone());
         argv.extend(rest);
 
-        if !cmd.force_path {
+        self.dispatch(&argv, cmd.force_path, dest, stderr, stdin, flags, args_mark)
+    }
+
+    /// Resolve an expanded argv and run it: task → builtin → `PATH`, with a
+    /// `^` skipping straight to `PATH`.
+    ///
+    /// Split out of [`command`](Self::command) because `env NAME=value <cmd>`
+    /// has to resolve its command exactly as a bare one is resolved, and
+    /// "exactly" is only true if it is the same code. Everything before this
+    /// point — expanding the words, applying the redirects, echoing the line —
+    /// has already happened by the time either caller arrives.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &mut self,
+        argv: &[String],
+        force_path: bool,
+        dest: Dest,
+        stderr: Option<PathBuf>,
+        stdin: Option<&[u8]>,
+        flags: Flags,
+        args_mark: Option<String>,
+    ) -> Result<Output> {
+        let name = argv[0].clone();
+        if !force_path {
             if name == "cd" {
-                return self.cd(&argv);
+                return self.cd(argv);
             }
             // Like `cd`, and unlike every other builtin: its arguments are
             // task names and it has to call them, which needs the
@@ -130,14 +153,20 @@ impl Interpreter<'_> {
             // `builtins::NAMES`, so `check` stops a task from taking the
             // name.
             if name == "parallel" {
-                return self.parallel(&argv, dest, stderr);
+                return self.parallel(argv, dest, stderr);
+            }
+            // For the same reason, twice over: a set belongs to the frame,
+            // which only the interpreter has, and `env NAME=value <cmd>` has
+            // a command in its arguments that only the interpreter can run.
+            if name == "env" {
+                return self.env_command(argv, dest, stderr, stdin, flags);
             }
             // Also resolved here rather than through the table, and for the
             // same kind of reason: a builtin is handed writers, and `spawn`
             // needs the redirect's *path* — the child outlives this process,
             // so it must hold the file descriptor itself.
             if name == "spawn" {
-                return self.spawn(&argv, dest, stderr);
+                return self.spawn(argv, dest, stderr);
             }
             if self.task(&name).is_some() {
                 // Set immediately before the call and taken by `call_task`:
@@ -147,7 +176,7 @@ impl Interpreter<'_> {
                 return self.run_task_command(&name, &argv[1..], dest, stderr);
             }
             if let Some(f) = (self.builtins)(&name) {
-                return self.run_builtin(f, &argv, dest, stderr, stdin);
+                return self.run_builtin(f, argv, dest, stderr, stdin);
             }
             if builtins::is_builtin(&name) {
                 return Err(Error::Run {
@@ -155,7 +184,183 @@ impl Interpreter<'_> {
                 });
             }
         }
-        self.run_program(&argv, dest, stderr, stdin, flags)
+        self.run_program(argv, dest, stderr, stdin, flags)
+    }
+
+    /// `env <NAME>`, `env <NAME> <value>`, and `env NAME=value <cmd> [args]`.
+    ///
+    /// # Three forms, one word of disambiguation
+    ///
+    /// **If the first argument contains an `=`, this is the per-command
+    /// form.** That is the whole rule, and it is decided on the first argument
+    /// alone so that a reader never has to count words: `env FOO=1 ls` and
+    /// `env FOO=1` are the same form, one of them missing its command.
+    /// `env NAME value` and `env NAME` are unchanged, because a variable name
+    /// with an `=` in it is not a name anything can set.
+    ///
+    /// # Why the per-command form exists
+    ///
+    /// `env NAME value` sets a name for the rest of the *call*, which is the
+    /// right scope for "this task needs `CGO_ENABLED=0`" and the wrong one for
+    /// "this one command needs it". `FOO=x cmd` is the shell and `just`
+    /// spelling of the second, and a chorefile has no way to write it: a
+    /// `NAME=value` word at the start of a statement is an assignment. So it
+    /// is spelled `env FOO=x cmd`, and the bindings last exactly as long as
+    /// the command — a task called this way keeps them for its whole call,
+    /// since the frame it pushes sits inside the scope opened here.
+    ///
+    /// # `--dry`
+    ///
+    /// A set happens even under `--dry`. It no longer touches anything outside
+    /// the interpreter, so there is no effect to skip, and previewing it makes
+    /// a later `if env NAME` in the same preview tell the truth instead of
+    /// answering from whatever the developer's shell happened to export. The
+    /// value is a real one the chorefile named, not one the preview invented,
+    /// so it carries no mark: see the module docs.
+    fn env_command(
+        &mut self,
+        argv: &[String],
+        dest: Dest,
+        stderr: Option<PathBuf>,
+        stdin: Option<&[u8]>,
+        flags: Flags,
+    ) -> Result<Output> {
+        let args = &argv[1..];
+        if args.first().is_some_and(|first| first.contains('=')) {
+            return self.env_prefixed(args, dest, stderr, stdin, flags);
+        }
+        match args {
+            // Reading. A miss is exit 1 rather than an error, so `if env CI`
+            // and `try env CI` both behave. The diagnostic is a diagnostic:
+            // on stdout it would end up inside a `$(env NAME)`.
+            [name] => match self.envs.get(name) {
+                Some(value) => {
+                    self.env_answer(format!("{value}\n").into_bytes(), 0, None, dest, stderr)
+                }
+                None => self.env_answer(
+                    Vec::new(),
+                    1,
+                    Some(format!("env: {name} is not set")),
+                    dest,
+                    stderr,
+                ),
+            },
+            [name, value] => {
+                self.envs.set(name.clone(), Some(value.clone()));
+                self.env_answer(Vec::new(), 0, None, dest, stderr)
+            }
+            _ => Err(Error::Run {
+                message: "usage: env <NAME> [value], or env NAME=value <cmd> [args...]".into(),
+            }),
+        }
+    }
+
+    /// Send `env`'s output and diagnostic where the caller asked for them.
+    ///
+    /// `run_builtin` does this for every builtin it dispatches, and `env` is
+    /// resolved by the interpreter instead, so it does the same three things
+    /// itself: stdout to the terminal, to a capture, or to a `>` file, and the
+    /// diagnostic to stderr or to a `2>` file. Nothing is written to a file
+    /// under `--dry`, as for any other redirect.
+    fn env_answer(
+        &mut self,
+        bytes: Vec<u8>,
+        code: i32,
+        diag: Option<String>,
+        dest: Dest,
+        stderr: Option<PathBuf>,
+    ) -> Result<Output> {
+        match &stderr {
+            Some(path) if self.mode == Mode::Run => {
+                let text = diag.map(|d| format!("{d}\n")).unwrap_or_default();
+                write_file(path, text.as_bytes(), false)?;
+            }
+            Some(_) => {}
+            None => {
+                if let Some(text) = diag {
+                    let _ = writeln!(self.err, "{text}");
+                    let _ = self.err.flush();
+                }
+            }
+        }
+        let mut out = Output::failed(code);
+        match dest {
+            Dest::Stream => {
+                self.out.write_all(&bytes)?;
+                self.out.flush()?;
+            }
+            Dest::Capture => out.stdout = bytes,
+            Dest::File { path, append } => {
+                if self.mode == Mode::Run {
+                    write_file(&path, &bytes, append)?;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// `env NAME=value [NAME=value...] <cmd> [args...]`.
+    ///
+    /// The leading words that are `NAME=value` are the bindings; the first
+    /// word that is not begins the command, which is resolved and run through
+    /// [`dispatch`](Self::dispatch) like any other. The bindings are unwound
+    /// afterwards whatever the command did — including on the error path,
+    /// which is why the result is held rather than returned with a `?`.
+    fn env_prefixed(
+        &mut self,
+        args: &[String],
+        dest: Dest,
+        stderr: Option<PathBuf>,
+        stdin: Option<&[u8]>,
+        flags: Flags,
+    ) -> Result<Output> {
+        let mut bindings = Vec::new();
+        let mut rest = args;
+        while let Some((word, tail)) = rest.split_first() {
+            let Some((name, value)) = binding(word) else {
+                break;
+            };
+            bindings.push((name, value));
+            rest = tail;
+        }
+        if bindings.is_empty() {
+            // The first word had an `=` — that is how we got here — but is not
+            // a name anything could bind.
+            return Err(Error::Run {
+                message: format!(
+                    "env: `{}` is not a NAME=value binding: a name is a letter or `_` followed \
+                     by letters, digits and `_`",
+                    args[0]
+                ),
+            });
+        }
+        let Some((name, cmd_args)) = rest.split_first() else {
+            let (last_name, last_value) = bindings.last().expect("a binding, checked above");
+            return Err(Error::Run {
+                message: format!(
+                    "env: `{last_name}={last_value}` needs a command to run it for; to set a \
+                     variable for the rest of this task, write `env {last_name} {last_value}`"
+                ),
+            });
+        };
+        // No `^` here: the parser accepts one only in front of a statement's
+        // command name, so `env FOO=1 ^ls` is a syntax error rather than
+        // something to interpret. A command that has to skip a task of the
+        // same name is written on a line of its own, with the `env NAME value`
+        // form above it.
+        let mut argv = Vec::with_capacity(cmd_args.len() + 1);
+        argv.push(name.clone());
+        argv.extend(cmd_args.iter().cloned());
+
+        let depth = self.envs.depth();
+        for (name, value) in bindings {
+            self.envs.set(name, Some(value));
+        }
+        // No `?`: the bindings are this command's and must not survive it,
+        // whether it succeeded, failed or unwound.
+        let out = self.dispatch(&argv, false, dest, stderr, stdin, flags, None);
+        self.envs.unwind(depth);
+        out
     }
 
     /// Apply `>`, `>>` and `2>`. A `>` wins over the destination the caller
@@ -286,6 +491,10 @@ impl Interpreter<'_> {
                 root: &root,
                 task: &task,
                 stdin,
+                // The frame's `env NAME value` bindings, so a builtin that
+                // reads the environment reads the one the chorefile built
+                // rather than the one the process was started with.
+                env: &self.envs,
                 dry,
                 force,
                 out: out_writer,
@@ -366,6 +575,22 @@ impl Interpreter<'_> {
         Ok(out)
     }
 
+    /// The overlay, layered *over* the inherited environment rather than
+    /// replacing it: `env_clear` would take `PATH`, `HOME` and everything
+    /// else the child needs with it, and a chorefile that sets one variable
+    /// is not asking for an empty environment. Outermost first, so an inner
+    /// binding overwrites the one it shadows. Every child chore starts —
+    /// waited for or `spawn`ed — goes through here, so there is one answer
+    /// to "what environment does a process see".
+    fn layer_env(&self, command: &mut process::Command) {
+        for (name, value) in self.envs.bindings() {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
+    }
+
     fn run_program(
         &mut self,
         argv: &[String],
@@ -383,6 +608,7 @@ impl Interpreter<'_> {
 
         let mut command = process::Command::new(vars::to_native(&argv[0]));
         command.args(&argv[1..]).current_dir(self.cwd());
+        self.layer_env(&mut command);
 
         command.stdin(match (stdin, self.captive) {
             (Some(_), _) => Stdio::piped(),
@@ -553,6 +779,10 @@ impl Interpreter<'_> {
 
         let mut command = process::Command::new(vars::to_native(name));
         command.args(args).current_dir(self.cwd());
+        // A detached server is the child most likely to need what `env` set
+        // just above it — a socket path, a "don't activate" flag — so it gets
+        // the same environment every other child does.
+        self.layer_env(&mut command);
         command.stdin(Stdio::null());
         let (out, err) = detached_streams(&dest, stderr.as_deref())?;
         command.stdout(out).stderr(err);
@@ -834,6 +1064,15 @@ impl Interpreter<'_> {
         }
     }
 
+    /// Leave a task call: drop its frame, and with it every `env NAME value`
+    /// the call made. Always paired with the `frames.push` in `call_task`,
+    /// which is why the two halves of the environment scope live in one place.
+    fn pop_frame(&mut self) {
+        if let Some(frame) = self.frames.pop() {
+            self.envs.unwind(frame.env_depth);
+        }
+    }
+
     /// Call a task. `wants_value` is true when the caller is a `$(...)`, a
     /// pipe or a `>` — something that will read what the task printed.
     pub(super) fn call_task(
@@ -875,12 +1114,17 @@ impl Interpreter<'_> {
         // locals are not in scope — a default belongs to the task that
         // declared it, not to whoever happened to call it.
         let args_invented = self.pending_args_mark.take();
+        let env_depth = self.envs.depth();
         self.frames.push(Frame {
             task: name.to_string(),
             args: args.to_vec(),
             // The callee starts where the caller stands, and its own `cd`
             // dies with the frame.
             cwd: self.cwd().to_path_buf(),
+            // Everything this call binds with `env NAME value` is unwound to
+            // here when the frame goes, so a set dies with the call exactly
+            // as its `cd` and its locals do.
+            env_depth,
             vars: HashMap::new(),
             invented: HashMap::new(),
             // The mark on what the caller passed. It dies with the frame too,
@@ -892,7 +1136,7 @@ impl Interpreter<'_> {
             // The frame must not outlive the failure: a default that could
             // not be evaluated leaves no half-bound call behind.
             Err(e) => {
-                self.frames.pop();
+                self.pop_frame();
                 return Err(e);
             }
         };
@@ -944,7 +1188,7 @@ impl Interpreter<'_> {
             }
         }
         if let Some(called) = skipped {
-            self.frames.pop();
+            self.pop_frame();
             return Ok(Call {
                 called,
                 args: bound,
@@ -953,7 +1197,7 @@ impl Interpreter<'_> {
         }
 
         let flow = self.block(&task.body);
-        self.frames.pop();
+        self.pop_frame();
         // A task `--fail-fast` cut short between statements has not run, so
         // the key goes back: a later call must do the work rather than
         // believe it is already done.
@@ -1048,6 +1292,19 @@ impl Interpreter<'_> {
             .join(" ");
         format!("task `{name}` is missing required argument(s) {missing} (usage: {name} {usage})")
     }
+}
+
+/// `NAME=value` as `env`'s per-command form reads it: a valid identifier, an
+/// `=`, and the rest of the word — empty included, since `env FOO= cmd` binds
+/// the empty string exactly as the assignment `FOO=` does.
+///
+/// The lexer only turns `NAME=value` into an assignment at the start of a
+/// statement, so inside `env`'s argument list the word arrives here whole and
+/// already expanded: `env TOKEN=$(read .token) curl` binds what the capture
+/// produced.
+fn binding(word: &str) -> Option<(String, String)> {
+    let (name, value) = word.split_once('=')?;
+    crate::lex::is_ident(name).then(|| (name.to_string(), value.to_string()))
 }
 
 /// The block a pipe's bytes would land on, if the right-hand side of the pipe

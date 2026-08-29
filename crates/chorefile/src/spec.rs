@@ -331,13 +331,20 @@ arguments is word splitting at the call site, not the original spacing.",
     },
     Builtin {
         name: "env",
-        usage: "env <NAME> [value]",
+        usage: "env <NAME> [value], or env NAME=value <cmd> [args...]",
         summary: "read or set an environment variable",
         description: "With one argument it prints the value, or exits 1 when the name is \
 unset — a nonzero exit rather than an error, so `if env CI { }` works. With two it sets the \
-variable for the rest of the run and for every process the run spawns. Reading still happens \
-under --dry; setting does not.",
-        effects: true,
+variable for the rest of the call: the task that set it, everything that task calls, and every \
+process spawned inside it, and it is gone when the task returns — the same scope `cd` and a \
+local have. `env NAME=value <cmd>` sets names for one command only, the way `NAME=value cmd` \
+does in a shell; the command resolves task, then builtin, then PATH, like any other, and a task \
+called this way keeps the names for its whole call. A `^` may only prefix a statement's command \
+name, so it cannot appear there. If the first argument contains an `=` it is \
+that form. Chore never changes its own process environment, so a `parallel` sibling cannot see \
+what another sibling set. Reading and setting both happen under --dry, since neither has an \
+effect outside the run.",
+        effects: false,
         flags: NO_FLAGS,
     },
     Builtin {

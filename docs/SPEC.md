@@ -224,7 +224,8 @@ version=$(script uv run - {
 The command in front is expanded like any other, so `script $PYTHON -`
 interpolates. **The block is not.** No variables, no escapes, no quoting rules:
 a `$`, a backslash or a quote inside it means whatever the interpreter you
-handed it to says it means. Chore values reach a block through the environment:
+handed it to says it means. Chore values reach a block through the
+environment, which the block's interpreter is spawned with:
 
 ```sh
 env TARGET $TRIPLE
@@ -384,7 +385,8 @@ sha256   <file>
 exists   <path>               exit 0/1, for `if`
 changed  <path...>            exit 0/1, for `if`; records what it saw
 echo     <text...>
-env      <NAME> [value]       get or set
+env      <NAME> [value]       get, or set for the rest of the call
+env      NAME=value <cmd>     set for one command only
 fail     <msg>
 sleep    <seconds>
 spawn    <cmd> [args...]      start a program, do not wait; see below
@@ -487,8 +489,31 @@ task build {
 **which**, **exists** and **env <NAME>** report a miss as exit 1 rather than a
 hard failure, which is what lets them drive an `if`. Under fail-fast a bare
 `which foo` still stops the task. Put it in a condition or a `try`.
-**env NAME value** sets the variable for the rest of the run, including
-spawned children.
+**env NAME value** sets the variable for the rest of the *call* — the task
+that set it, everything that task calls, and every process spawned inside it —
+and it is gone when the task returns. That is the scope `cd` and a local
+already have, and it is why a `run` task that sets `TERRA_SOCKET` no longer
+sets it for whatever runs after it. Chore never changes its own process
+environment: the bindings are layered onto each child as it is spawned, and
+onto the builtins that read the environment, so `env HTTPS_PROXY ...` reaches
+the `download` on the next line.
+
+**env NAME=value \<cmd\> [args...]** is the per-command form — the shell's
+`FOO=x cmd`, which a chorefile cannot write because `FOO=x` at the start of a
+statement is an assignment. The leading `NAME=value` words are the bindings and
+what follows is a command, resolved task → builtin → `PATH` like any other; a
+task called this way keeps the bindings for its whole call. A `^` may only
+prefix a statement's command name, so it cannot appear here. **If the first
+argument contains an `=`, it is this form**, which is what keeps
+`env NAME value` and `env NAME` meaning exactly what they always did.
+`env NAME=value` with no command is an error.
+
+```sh
+task build {
+    env CGO_ENABLED=0 go build ./...
+    go test ./...             # CGO_ENABLED is whatever it was
+}
+```
 
 **sleep** accepts fractional seconds.
 
@@ -601,10 +626,13 @@ not just that task. It cannot unstart the siblings, so it takes effect once
 they have all finished and their output has been printed. `return` ends only
 the task that wrote it, and its code becomes that task's status.
 
-**cd** and locals are per-call, as ever. A task starts in the directory the
-`parallel` was called from, exactly as it would have if it had been called
-directly, and its own `cd` dies with it. `$ROOT`, `$NOW`, the globals and the
-environment are facts about the invocation and are shared.
+**cd**, locals and `env` are per-call, as ever. A task starts in the directory
+the `parallel` was called from, and with the environment the `parallel` was
+called with, exactly as it would have if it had been called directly; its own
+`cd` and its own `env NAME value` die with it. Siblings cannot see each other's
+sets — each has its own interpreter and its own copy — so two of them binding
+the same name is not a race. `$ROOT`, `$NOW` and the globals are facts about
+the invocation and are shared.
 
 **--dry** previews the tasks one after another instead of running them
 concurrently. A preview describes the work, and the same work is described
@@ -628,7 +656,9 @@ and conditions raced each other.
   task whose output was only ever streamed to the terminal has no remembered
   value, so capturing it afterwards runs it again. An empty string would
   otherwise be interpolated into a path.
-- `cd` changes the interpreter's directory, not the process's.
+- `cd` changes the interpreter's directory, not the process's, and
+  `env NAME value` changes the interpreter's environment, not the process's.
+  Both last for the call that made them.
 - `parallel` runs tasks concurrently and shares that record with them, so a
   task two siblings call still runs once.
 
@@ -636,6 +666,9 @@ and conditions raced each other.
 
 Echoes commands and skips the ones with effects. `fail` still fails, since a
 preview that swallowed a hard stop would describe a run that cannot happen.
+`env NAME value` is not skipped: it sets nothing outside the run, and a preview
+that carried it out is a preview whose later `if env NAME` tells the truth
+about the chorefile rather than about the shell it was previewed from.
 **Captures and conditions still run**: a `$(...)` that did not execute would
 leave every interpolated path downstream empty, and the preview would describe
 a run that could never happen.

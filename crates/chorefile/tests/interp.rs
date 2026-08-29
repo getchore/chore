@@ -175,6 +175,7 @@ fn table(name: &str) -> Option<Builtin> {
         "touch" => touch,
         "warn" => warn,
         "tty" => tty,
+        "look" => look,
         "emit" => emit,
         "boom" => boom,
         "exists" => exists,
@@ -277,6 +278,19 @@ fn read(ctx: &mut Ctx<'_>) -> Result<Output> {
         message: format!("read: cannot read {}", chorefile::vars::display(&path)),
     })?;
     write!(ctx.out, "{text}")?;
+    Ok(Output::ok())
+}
+
+/// `look <NAME...>` prints what the *builtin* sees in the environment, which is
+/// the overlay `env` writes rather than the process environment. `download`
+/// reads `GITHUB_TOKEN` this way, and `which` reads `PATH`.
+fn look(ctx: &mut Ctx<'_>) -> Result<Output> {
+    let seen: Vec<String> = ctx
+        .rest()
+        .iter()
+        .map(|name| ctx.env.get(name).unwrap_or_else(|| "<unset>".to_string()))
+        .collect();
+    writeln!(ctx.out, "{}", seen.join(" "))?;
     Ok(Output::ok())
 }
 
@@ -1793,6 +1807,310 @@ fn cd_moves_the_interpreter_and_does_not_leak_between_tasks() {
 }
 
 // ---------------------------------------------------------------------------
+// env
+//
+// `env NAME value` is per-call, like `cd` and locals, and nothing here — or
+// anywhere else — writes the process environment. The per-command form
+// `env NAME=value <cmd>` opens the same scope for exactly one command.
+// ---------------------------------------------------------------------------
+
+/// A name no real environment has, so a test that passes because the machine
+/// happened to export something is impossible.
+const UNIQUE: &str = "CHOREFILE_TEST_SCOPED_VAR";
+
+/// `env NAME value`.
+fn set(name: &str, value: &str) -> Stmt {
+    run(cmd("env", vec![lit(name), lit(value)]))
+}
+
+/// `look NAME` — what a builtin running now sees.
+fn look_at(name: &str) -> Stmt {
+    run(cmd("look", vec![lit(name)]))
+}
+
+#[test]
+fn a_set_reaches_the_tasks_this_one_calls_and_dies_with_it() {
+    let f = file(vec![
+        task("t", &[], vec![run(cmd("a", vec![])), run(cmd("c", vec![]))]),
+        task("a", &[], vec![set(UNIQUE, "from-a"), run(cmd("b", vec![]))]),
+        task("b", &[], vec![look_at(UNIQUE)]),
+        task("c", &[], vec![look_at(UNIQUE)]),
+    ]);
+    // `b` runs inside `a`'s call and sees it; `c` runs after `a` returned and
+    // does not. This is the bug the scope exists for: a `run` task that sets
+    // `TERRA_SOCKET` must not still be setting it for whatever comes next.
+    assert_eq!(go(&f, "t", &[]).printed(), ["from-a", "<unset>"]);
+    // And the process itself never learned about it.
+    assert!(std::env::var(UNIQUE).is_err());
+}
+
+#[test]
+fn a_set_at_the_top_of_a_task_is_visible_to_the_rest_of_it() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            look_at(UNIQUE),
+            set(UNIQUE, "one"),
+            look_at(UNIQUE),
+            set(UNIQUE, "two"),
+            look_at(UNIQUE),
+        ],
+    )]);
+    assert_eq!(go(&f, "t", &[]).printed(), ["<unset>", "one", "two"]);
+}
+
+#[test]
+fn reading_goes_through_the_overlay() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            set(UNIQUE, "value"),
+            run(cmd("env", vec![lit(UNIQUE)])),
+            // And into a capture, which is how a chorefile moves it into a
+            // variable.
+            assign(
+                "v",
+                unquoted(vec![part(PartKind::Capture(Box::new(cmd(
+                    "env",
+                    vec![lit(UNIQUE)],
+                ))))]),
+            ),
+            run(cmd("say", vec![unquoted(vec![var("v")])])),
+        ],
+    )]);
+    assert_eq!(go(&f, "t", &[]).printed(), ["value", "value"]);
+}
+
+#[test]
+fn reading_an_unset_name_is_an_answer_and_not_a_failure() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            if_stmt(
+                Cond::Command(cmd("env", vec![lit(UNIQUE)])),
+                vec![run(cmd("say", vec![lit("set")]))],
+                Some(vec![run(cmd("say", vec![lit("unset")]))]),
+            ),
+            set(UNIQUE, "now"),
+            if_stmt(
+                Cond::Command(cmd("env", vec![lit(UNIQUE)])),
+                vec![run(cmd("say", vec![lit("set")]))],
+                Some(vec![run(cmd("say", vec![lit("unset")]))]),
+            ),
+        ],
+    )]);
+    let ran = go(&f, "t", &[]);
+    assert_eq!(ran.printed(), ["unset", "set"]);
+    assert!(ran.err.contains("is not set"), "{:?}", ran.err);
+}
+
+#[test]
+fn the_per_command_form_binds_for_one_builtin_only() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            run(cmd(
+                "env",
+                vec![lit(&format!("{UNIQUE}=once")), lit("look"), lit(UNIQUE)],
+            )),
+            look_at(UNIQUE),
+        ],
+    )]);
+    assert_eq!(go(&f, "t", &[]).printed(), ["once", "<unset>"]);
+}
+
+#[test]
+fn the_per_command_form_takes_several_bindings() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![run(cmd(
+            "env",
+            vec![
+                lit("CHOREFILE_TEST_A=1"),
+                lit("CHOREFILE_TEST_B=2"),
+                lit("look"),
+                lit("CHOREFILE_TEST_A"),
+                lit("CHOREFILE_TEST_B"),
+            ],
+        ))],
+    )]);
+    assert_eq!(go(&f, "t", &[]).printed(), ["1 2"]);
+}
+
+#[test]
+fn the_per_command_form_reaches_a_whole_task_call() {
+    let f = file(vec![
+        task(
+            "t",
+            &[],
+            vec![
+                run(cmd(
+                    "env",
+                    vec![lit(&format!("{UNIQUE}=for-the-call")), lit("inner")],
+                )),
+                look_at(UNIQUE),
+            ],
+        ),
+        // The callee sees it for its whole body, and for anything it calls:
+        // the frame it pushes sits inside the scope the binding opened.
+        task(
+            "inner",
+            &[],
+            vec![look_at(UNIQUE), run(cmd("deeper", vec![]))],
+        ),
+        task("deeper", &[], vec![look_at(UNIQUE)]),
+    ]);
+    assert_eq!(
+        go(&f, "t", &[]).printed(),
+        ["for-the-call", "for-the-call", "<unset>"]
+    );
+}
+
+#[test]
+fn a_binding_shadows_an_outer_one_and_gives_it_back() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            set(UNIQUE, "outer"),
+            run(cmd(
+                "env",
+                vec![lit(&format!("{UNIQUE}=inner")), lit("look"), lit(UNIQUE)],
+            )),
+            look_at(UNIQUE),
+        ],
+    )]);
+    assert_eq!(go(&f, "t", &[]).printed(), ["inner", "outer"]);
+}
+
+#[test]
+fn an_empty_value_is_a_value() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![run(cmd(
+            "env",
+            vec![lit(&format!("{UNIQUE}=")), lit("look"), lit(UNIQUE)],
+        ))],
+    )]);
+    assert_eq!(go(&f, "t", &[]).printed(), [""]);
+}
+
+#[test]
+fn a_binding_with_no_command_says_how_to_set_one() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![run(cmd("env", vec![lit(&format!("{UNIQUE}=value"))]))],
+    )]);
+    let message = go(&f, "t", &[]).err_text();
+    assert!(message.contains("needs a command"), "{message}");
+    assert!(
+        message.contains(&format!("env {UNIQUE} value")),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_first_argument_with_an_equals_that_is_not_a_name_is_refused() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![run(cmd("env", vec![lit("not-a-name=1"), lit("say")]))],
+    )]);
+    let message = go(&f, "t", &[]).err_text();
+    assert!(message.contains("not a NAME=value binding"), "{message}");
+}
+
+#[test]
+fn a_set_under_dry_is_carried_out_so_a_later_read_is_truthful() {
+    // Nothing outside the run changes, so there is no effect to skip — and a
+    // preview whose `if env NAME` answered from the developer's own shell
+    // would describe branches the run will not take.
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            set(UNIQUE, "previewed"),
+            look_at(UNIQUE),
+            if_stmt(
+                Cond::Command(cmd("env", vec![lit(UNIQUE)])),
+                vec![run(cmd("say", vec![lit("branch taken")]))],
+                None,
+            ),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+    assert_eq!(ran.printed(), ["previewed", "branch taken"]);
+    // The value is one the chorefile named, not one the preview invented, so
+    // no note is printed about it.
+    assert!(!ran.err.contains("invented"), "{:?}", ran.err);
+    assert!(std::env::var(UNIQUE).is_err());
+}
+
+#[test]
+fn the_per_command_form_is_echoed_with_its_bindings() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![run(cmd(
+            "env",
+            vec![lit("CHOREFILE_TEST_A=1"), lit("say"), lit("hi")],
+        ))],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, &root());
+    assert_eq!(ran.echoed(), ["$ env CHOREFILE_TEST_A=1 say hi"]);
+}
+
+/// A real child process, which is the only proof that the overlay reaches the
+/// other side of a `spawn` — every other test here reads it inside chore.
+#[cfg(unix)]
+#[test]
+fn a_spawned_program_is_given_the_bindings() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            set(UNIQUE, "from-the-task"),
+            // `sh` prints what it was handed, and the capture brings it back.
+            assign(
+                "outer",
+                unquoted(vec![part(PartKind::Capture(Box::new(cmd(
+                    "sh",
+                    vec![
+                        lit("-c"),
+                        quoted(vec![text(&format!("printf %s \"${UNIQUE}\""))]),
+                    ],
+                ))))]),
+            ),
+            run(cmd("say", vec![unquoted(vec![var("outer")])])),
+            assign(
+                "inner",
+                unquoted(vec![part(PartKind::Capture(Box::new(cmd(
+                    "env",
+                    vec![
+                        lit(&format!("{UNIQUE}=for-one-command")),
+                        lit("sh"),
+                        lit("-c"),
+                        quoted(vec![text(&format!("printf %s \"${UNIQUE}\""))]),
+                    ],
+                ))))]),
+            ),
+            run(cmd("say", vec![unquoted(vec![var("inner")])])),
+        ],
+    )]);
+    assert_eq!(
+        go(&f, "t", &[]).printed(),
+        ["from-the-task", "for-one-command"]
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Echo and --dry
 // ---------------------------------------------------------------------------
 
@@ -2668,6 +2986,44 @@ fn a_spawned_program_keeps_running_and_both_streams_reach_one_file() {
     assert!(text.contains("err"), "{text}");
 }
 
+/// The child `spawn` most often starts is the server a task just configured
+/// with `env`, so a binding set in the task has to reach it — the same
+/// overlay every waited-for child gets, not the bare process environment.
+#[test]
+#[cfg(unix)]
+fn a_spawned_program_sees_what_env_set() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = Temp::new("spawn-env");
+    let script = dir.path().join("show.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\necho out $CHORE_SPAWN_SOCKET\necho err >&2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            run(cmd(
+                "env",
+                vec![lit("CHORE_SPAWN_SOCKET"), lit("/tmp/terra.sock")],
+            )),
+            run(cmd_with(
+                "spawn",
+                vec![lit(&chorefile::vars::display(&script))],
+                vec![redirect(RedirectKind::Stdout, "both.txt")],
+            )),
+        ],
+    )]);
+    exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path()).ok();
+
+    let text = wait_for_text(&dir.path().join("both.txt"));
+    assert!(text.contains("out /tmp/terra.sock"), "{text}");
+}
+
 /// Poll until a spawned child has written something, or give up — the child is
 /// on its own schedule, and a fixed sleep would be either slow or flaky.
 #[cfg(unix)]
@@ -3103,6 +3459,31 @@ mod script_blocks {
     }
 
     // -- the block reaches the interpreter ---------------------------------
+
+    /// The documented way a chore value reaches a block: `env` sets it, and
+    /// the block's interpreter is spawned with it. The set is per-call now, so
+    /// this is the test that the call it is inside is the one that spawns.
+    #[test]
+    fn a_block_is_spawned_with_what_env_set() {
+        let dir = Temp::new("script-env");
+        let out = dir.path().join("target.txt");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![
+                set("CHOREFILE_TEST_TARGET", "aarch64-apple-darwin"),
+                script(
+                    sh(),
+                    &format!("printf %s \"$CHOREFILE_TEST_TARGET\" > {}\n", shown(&out)),
+                ),
+            ],
+        )]);
+        go(&f, "t", &[]).ok();
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "aarch64-apple-darwin"
+        );
+    }
 
     #[test]
     fn the_body_reaches_the_interpreter_on_stdin() {

@@ -188,10 +188,15 @@ pub fn looks_like_dir(arg: &str) -> bool {
 
 /// The bearer token to send, if the environment offers one. Honouring both
 /// spellings means `gh auth` and CI both work without extra wiring.
-fn github_token() -> Option<String> {
+///
+/// Read through [`Ctx::env`] rather than `std::env::var`, so an
+/// `env GITHUB_TOKEN $(read .token)` earlier in the task is a token this
+/// download actually sends — chore's `env` binds a name for the frame, not
+/// for the process.
+fn github_token(ctx: &Ctx<'_>) -> Option<String> {
     ["GITHUB_TOKEN", "GH_TOKEN"]
         .iter()
-        .filter_map(|k| std::env::var(k).ok())
+        .filter_map(|k| ctx.env.get(k))
         .find(|v| !v.trim().is_empty())
 }
 
@@ -230,7 +235,7 @@ fn download(ctx: &mut Ctx<'_>) -> Result<Output> {
         .build()
         .new_agent();
 
-    let token = github_token();
+    let token = github_token(ctx);
     let mut last: Option<String> = None;
 
     for attempt in 0..=args.retries {

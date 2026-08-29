@@ -19,6 +19,13 @@
 //! - `$ROOT`, the globals, `$NOW` and the builtin table, which are facts about
 //!   the invocation. A sibling that computed its own `$NOW` would disagree
 //!   with its parent about what time the run started.
+//! - The environment overlay *as it stands at the call*, copied into each
+//!   child the way the current directory is. A sibling therefore sees every
+//!   `env NAME value` its callers made, and none that another sibling makes
+//!   while it runs: the copies are separate, so two siblings setting the same
+//!   name cannot race, and nothing they set outlives the `parallel`. This is
+//!   the reason `env` never touches the process environment, which they
+//!   really would share.
 //! - The current directory *at the call*, copied into each child the way
 //!   `call_task` copies it into a frame, so a task called from a `parallel`
 //!   starts exactly where it would have started had it been called directly.
@@ -44,7 +51,7 @@ use std::thread;
 
 use crate::ast::File;
 use crate::error::{Error, Result};
-use crate::exec::Output;
+use crate::exec::{EnvOverlay, Output};
 
 use super::memo::{CtxId, Memo};
 use super::run::{Shared, write_file};
@@ -353,6 +360,7 @@ impl<'a> Interpreter<'a> {
             repeat: self.repeat,
             globals: self.globals.clone(),
             globals_invented: self.globals_invented.clone(),
+            envs: self.envs.clone(),
             now: self.now.clone(),
             builtins: self.builtins,
             memo: Arc::clone(&self.memo),
@@ -376,6 +384,9 @@ struct Fork<'a> {
     mode: Mode,
     repeat: Repeat,
     globals: HashMap<String, String>,
+    /// The environment `env NAME value` had built by the time of the call.
+    /// Copied, not shared: see the module docs.
+    envs: EnvOverlay,
     /// The `--dry` marks on those globals: a sibling reading one must be told
     /// the same thing the parent would have been.
     globals_invented: HashMap<String, String>,
@@ -398,6 +409,7 @@ impl<'a> Fork<'a> {
             .with_error_output(err);
         child.globals = self.globals;
         child.globals_invented = self.globals_invented;
+        child.envs = self.envs;
         // The globals were evaluated once, before the first task, and their
         // values came with us. Running them again would repeat every `$(...)`
         // in them, once per sibling.
