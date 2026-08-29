@@ -36,16 +36,24 @@ const USAGE: u8 = 2;
 const SUBCOMMANDS: &[(&str, &str, &str)] = &[
     ("list", "[--json]", "tasks and descriptions"),
     ("help", "[builtin]", "syntax and builtins, or one builtin"),
-    ("check", "", "lint without running"),
+    ("check", "", "lint, unless a task takes the name"),
     ("spec", "", "full reference as JSON, for agents"),
     ("completions", "[shell]", "tab completion for task names"),
     ("init", "", "write a starter chorefile here"),
 ];
 
-/// The two flags `chore` keeps for itself, and what they do.
+/// The flags `chore` keeps for itself, and what they do.
+///
+/// `--check` is listed here rather than beside the subcommands because that is
+/// the difference worth showing: a chorefile can define `task check` and take
+/// the word, and the flag is the spelling no chorefile can reach.
 const FLAGS: &[(&str, &str)] = &[
     ("--dry", "echo commands without side effects"),
     ("--force", "disable run-once"),
+    (
+        "--check",
+        "lint without running, whatever the chorefile says",
+    ),
 ];
 
 /// Width of the left column in the subcommand list, and in the flag list.
@@ -295,29 +303,26 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
                 Err(Exit::usage(init::occupied(&dir)))
             }
         }
-        Command::Check => {
-            // `check` resolves for itself rather than going through `Loaded`:
-            // `check_path` turns a failure to merge — a missing included file,
-            // a cycle — into a finding in the list instead of an error that
-            // ends the run, which is what a CI gate wants. A chorefile too
-            // broken to load still gets a full report.
-            let path = discover()?;
-            let (findings, merged) = chorefile::check::check_path(&path);
-            let fallback;
-            let sources = match &merged {
-                Some(merged) => &merged.sources,
-                // Nothing merged, so nothing knows the text of the file the
-                // findings point into. Supply the one file we do have, and
-                // its findings keep their line and column.
-                None => {
-                    fallback = one_source(&path);
-                    &fallback
-                }
-            };
-            let errors = lint::report(out, &findings, sources, style)?;
-            Ok(if errors == 0 { OK } else { FAILED })
-        }
+        Command::Check => check(out, style),
         Command::Run { task, args } => {
+            // `chore check` is the lint only while the chorefile has nothing
+            // better to say: a project that defines `task check` gets its own
+            // task, and `chore --check` is the spelling that always lints.
+            //
+            // Asked here rather than in `args`, because the answer is in the
+            // file. Resolving twice — once for this question, once inside
+            // `check` — costs a parse and keeps `check`'s own error handling:
+            // a chorefile too broken to resolve defines no task, so it falls
+            // through to the lint that can report why.
+            if task == CHECK_TASK && !defines(CHECK_TASK) {
+                if !args.is_empty() || mode != Mode::Run || repeat != Repeat::Once {
+                    return Err(Exit::usage(format!(
+                        "no task `{CHECK_TASK}` here, so `chore {CHECK_TASK}` is the lint, \
+                         which takes no arguments"
+                    )));
+                }
+                return check(out, style);
+            }
             let loaded = Loaded::discover()?;
             // Before the task, and before the globals it would have been
             // preceded by: a chorefile that says it needs a newer `chore` has
@@ -328,6 +333,46 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
             run(&loaded, &task, &args, mode, repeat)
         }
     }
+}
+
+/// The one task name that also names a subcommand, and wins when it is
+/// defined. See the `Run` arm of `dispatch`.
+const CHECK_TASK: &str = "check";
+
+/// The lint over the chorefile governing the working directory.
+///
+/// It resolves for itself rather than going through `Loaded`: `check_path`
+/// turns a failure to merge — a missing included file, a cycle — into a
+/// finding in the list instead of an error that ends the run, which is what a
+/// CI gate wants. A chorefile too broken to load still gets a full report.
+fn check(out: &mut dyn Write, style: Style) -> Result<u8, Exit> {
+    let path = discover()?;
+    let (findings, merged) = chorefile::check::check_path(&path);
+    let fallback;
+    let sources = match &merged {
+        Some(merged) => &merged.sources,
+        // Nothing merged, so nothing knows the text of the file the findings
+        // point into. Supply the one file we do have, and its findings keep
+        // their line and column.
+        None => {
+            fallback = one_source(&path);
+            &fallback
+        }
+    };
+    let errors = lint::report(out, &findings, sources, style)?;
+    Ok(if errors == 0 { OK } else { FAILED })
+}
+
+/// Whether the chorefile here defines a task by this name.
+///
+/// Every failure answers "no": a missing chorefile, one that does not parse,
+/// an include that does not exist. The caller is deciding whether a name was
+/// claimed, and a file that never assembled claimed nothing — the error it
+/// would have raised is raised, in full, by whatever runs next.
+fn defines(task: &str) -> bool {
+    discover().is_ok_and(|path| {
+        resolve::resolve(&path).is_ok_and(|merged| merged.file.tasks.iter().any(|t| t.name == task))
+    })
 }
 
 /// An unmet `require`, rendered the way `check` renders a finding: the line

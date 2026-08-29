@@ -63,13 +63,24 @@ fn syntax_error_points_into_the_file() {
 
 #[test]
 fn task_named_after_a_subcommand() {
-    for name in ["list", "help", "check", "spec"] {
+    for name in ["list", "help", "spec", "completions", "init"] {
         let found = errors(&format!("task {name} {{\n    echo hi\n}}\n"));
         assert!(
             found.iter().any(|d| d.message.contains("subcommand")),
             "{name}: {found:#?}"
         );
     }
+}
+
+/// `check` left the reserved list so that a Cargo project can write the task
+/// every Cargo project wants. Reporting it would be the whole point undone.
+#[test]
+fn a_task_named_check_is_not_a_finding() {
+    let found = run("task check {\n    cargo check\n}\n");
+    assert!(
+        !found.iter().any(|d| d.message.contains("subcommand")),
+        "{found:#?}"
+    );
 }
 
 #[test]

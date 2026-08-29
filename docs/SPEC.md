@@ -11,20 +11,28 @@ shell, so behavior is identical on macOS, Linux and Windows (gnu and msvc).
 chore <task> [args...] [--dry] [--force]
 chore list [--json|--names]         # tasks and descriptions
 chore help [builtin]                # syntax and builtins, or one builtin
-chore check                         # lint without running
+chore check                         # lint, unless a task takes the name
+chore --check                       # lint, whatever the chorefile says
 chore spec                          # full reference as JSON, for agents
 chore completions [shell] [--write] # tab completion for task names
 chore init                          # write a starter chorefile here
 ```
 
-`list`, `help`, `check`, `spec`, `completions` and `init` are reserved task
-names.
+`list`, `help`, `spec`, `completions` and `init` are reserved task names.
 `completions` joined that list after the others, so a chorefile that already
-had a task of that name is now reported by `chore check`, and the subcommand
-is what `chore completions` runs.
+had a task of that name is now reported by the lint, and the subcommand
+is what `chore completions` runs. `check` went the other way and left the list:
+every Cargo project wants `task check { cargo check }`, and nothing depends on
+the word the way completion scripts and tooling depend on `chore list`. So
+`chore check` runs the task where the chorefile defines one and lints where it
+does not, and `chore --check` is the lint either way — which is the spelling
+for a script or a CI job, since it does not change meaning when someone adds a
+task later.
 
 - `--dry` echoes commands without side effects.
 - `--force` disables run-once.
+- `--check` lints without running. It stands alone: nothing runs, so `--dry`,
+  `--force` and a task name beside it are usage errors rather than ignored.
 
 ### `list --names`
 
@@ -296,6 +304,12 @@ there it is an argument.
 Both kinds bind to `$1`, `$2`, …; a parameter's name is not a variable. `$#`
 counts what the call bound, defaults included, and `$@` is that list, which is
 how a task forwards itself to another.
+
+An **empty** value written unquoted disappears rather than becoming an empty
+argument, as in sh: with `$1` empty, `install.py $1 /usr/local/bin` passes two
+arguments, not three, and the program reads the destination as its first one.
+Quote it — `"$1"` — wherever the position is what the command counts. `--dry`
+prints the argv that survived, which is where this is visible.
 
 `env=` with nothing after it defaults to the empty string, exactly as the
 assignment `env=` does. `env=""` says the same thing more clearly. "Nothing
@@ -788,10 +802,14 @@ task's own `file` field. `chore list --names` is unchanged.
 
 ## check
 
+`chore --check` always lints. `chore check` lints too, unless the chorefile
+defines a task named `check`, in which case it runs the task — the name is not
+reserved.
+
 Builtins are reserved by convention, not by the interpreter: at runtime a task
-wins over a builtin of the same name, and it is `check` that reports it. The
-same is true of a task named after a subcommand. `chore list` is always the
-subcommand, so the task is unreachable.
+wins over a builtin of the same name, and it is the lint that reports it. The
+same is true of a task named after a reserved subcommand. `chore list` is
+always the subcommand, so the task is unreachable.
 
 Reports syntax errors, reserved names, unknown commands, undefined variables
 (in a parameter's default as much as in a body), duplicate names, a parameter

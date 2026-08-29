@@ -583,6 +583,58 @@ fn check_needs_a_chorefile() {
     assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
 }
 
+// `check` is the one subcommand a chorefile can take back, so the word and the
+// flag mean different things depending on the file underneath them.
+
+#[test]
+fn a_task_named_check_wins_the_word_but_not_the_flag() {
+    let dir = Dir::new();
+    dir.chorefile("task check {\n    echo ran the task\n}\n");
+
+    let run = chore(&dir, &["check"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    assert!(run.stdout.contains("ran the task"), "{}", run.stdout);
+
+    // The flag is what a script writes: it lints whatever the chorefile says,
+    // and a clean file lints clean.
+    let run = chore(&dir, &["--check"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    assert!(!run.stdout.contains("ran the task"), "{}", run.stdout);
+}
+
+#[test]
+fn without_a_task_named_check_both_spellings_lint() {
+    let dir = Dir::new();
+    dir.chorefile("task fetch {\n    curl https://example.com\n}\n");
+    for args in [&["check"][..], &["--check"][..]] {
+        let run = chore(&dir, args);
+        assert_eq!(run.code, 1, "{args:?}: {}{}", run.stdout, run.stderr);
+        assert!(run.stdout.contains("chorefile:2:"), "{}", run.stdout);
+    }
+}
+
+/// The reserved-name error would be the change undone: the point of freeing
+/// the name is that a chorefile may use it.
+#[test]
+fn linting_a_file_with_a_check_task_says_nothing_about_reserved_names() {
+    let dir = Dir::new();
+    dir.chorefile("task check {\n    echo hi\n}\n");
+    let run = chore(&dir, &["--check"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    assert!(!run.stdout.contains("subcommand"), "{}", run.stdout);
+}
+
+/// Nothing runs, so nothing the other flags do has anywhere to land.
+#[test]
+fn the_check_flag_stands_alone() {
+    let dir = Dir::new();
+    dir.chorefile(SAMPLE);
+    for args in [&["--check", "--dry"][..], &["--dry", "--check"][..]] {
+        let run = chore(&dir, args);
+        assert_eq!(run.code, 2, "{args:?}: {}{}", run.stdout, run.stderr);
+    }
+}
+
 #[test]
 fn help_lists_the_builtins() {
     let dir = Dir::new();
