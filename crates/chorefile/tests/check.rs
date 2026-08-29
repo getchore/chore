@@ -2687,3 +2687,69 @@ fn an_undefined_variable_in_a_binding_is_reported() {
     let found = matching("task t {\n    env FOO=$nope echo hi\n}\n", "nope");
     assert_eq!(found.len(), 1, "{found:#?}");
 }
+
+// --- 12. $env:: and dotenv -------------------------------------------------
+
+#[test]
+fn an_environment_variable_is_always_defined() {
+    // Whether this machine has it set is not a fact about the chorefile, so
+    // `check` says nothing either way.
+    let source = "\
+region=$env::AWS_REGION
+
+task deploy {
+    ./deploy $env::REGION \"$env::HOME/bin\"
+}
+";
+    assert!(
+        matching(source, "undefined variable").is_empty(),
+        "{:#?}",
+        run(source)
+    );
+}
+
+#[test]
+fn a_bare_name_the_environment_has_is_told_how_to_read_it() {
+    // `PATH` is set on every machine this can run on, and a chorefile that
+    // writes `$PATH` almost always meant the environment. The hint wins over
+    // a did-you-mean, which would offer a variable that merely looks similar.
+    let found = matching("task t {\n    echo $PATH\n}\n", "undefined variable");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    let help = found[0].help.as_deref().unwrap_or("");
+    assert!(help.contains("$env::PATH"), "{help}");
+    assert!(!help.contains("did you mean"), "{help}");
+}
+
+#[test]
+fn env_is_a_reserved_include_namespace() {
+    let found = matching("include libs/a.chore as env\n", "reserved");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Error);
+}
+
+#[test]
+fn a_computed_dotenv_path_is_an_error() {
+    let found = matching("task t {\n    dotenv $dir/.env\n}\n", "written out");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].severity, Severity::Error);
+}
+
+#[test]
+fn a_misspelt_optional_names_the_word() {
+    let found = matching("task t {\n    dotenv .env optionl\n}\n", "optionl");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].help.as_deref().unwrap_or("").contains("optional"));
+}
+
+#[test]
+fn a_dotenv_that_is_spelled_right_is_quiet() {
+    for source in [
+        "dotenv .env\ntask t {\n    echo hi\n}\n",
+        "dotenv .env.local optional\ntask t {\n    echo hi\n}\n",
+        // A missing file is not a finding: a `.env` is gitignored, so it is
+        // absent on every clean checkout and in CI.
+        "task t {\n    dotenv deploy/.env.prod\n    dotenv .env.local optional\n}\n",
+    ] {
+        assert!(run(source).is_empty(), "{:#?}", run(source));
+    }
+}

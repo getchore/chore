@@ -696,6 +696,83 @@ fn a_malformed_subcommand_is_a_usage_error_that_touches_nothing() {
 }
 
 // ---------------------------------------------------------------------------
+// dotenv and $env::NAME
+// ---------------------------------------------------------------------------
+
+/// The one thing no in-process test can prove: a variable a `.env` supplied
+/// reaches a real child process, through the same overlay `env NAME value`
+/// uses. The child is `chore` itself, run against a chorefile of its own —
+/// portable, unlike an `sh -c`, and it can only be reading the environment it
+/// was spawned with.
+#[test]
+fn a_child_process_sees_what_a_dotenv_supplied() {
+    let bin = env!("CARGO_BIN_EXE_chore").replace('\\', "/");
+    let dir = Dir::new();
+    dir.write(
+        ".env",
+        "# the project's defaults\nDOTENV_E2E=from-the-file\n",
+    );
+    dir.write(
+        "inner/chorefile",
+        "task show {\n    write out.txt $env::DOTENV_E2E\n}\n",
+    );
+    dir.chorefile(&format!(
+        "dotenv .env\n\ntask run {{\n    cd inner\n    \"{bin}\" show\n}}\n"
+    ));
+
+    chore(&dir, &["run"]).ok();
+    assert_eq!(dir.read("inner/out.txt"), "from-the-file\n");
+}
+
+#[test]
+fn a_dotenv_fills_in_a_global_and_the_environment_still_wins() {
+    let dir = Dir::new();
+    dir.write(".env", "DOTENV_E2E_REGION=eu-west-1\n");
+    dir.chorefile(
+        "dotenv .env\n\nregion=$env::DOTENV_E2E_REGION\n\n\
+         task show {\n    echo region $region\n}\n",
+    );
+
+    let run = chore(&dir, &["show"]).ok();
+    assert_eq!(run.printed("region eu-west-1"), 1, "{}", run.stdout);
+
+    // An override already in the environment beats the file — the rule that
+    // keeps `DOTENV_E2E_REGION=us-east-1 chore show` and a CI variable
+    // working against a `.env` that is checked in.
+    let output = Command::new(env!("CARGO_BIN_EXE_chore"))
+        .arg("show")
+        .env("DOTENV_E2E_REGION", "us-east-1")
+        .current_dir(dir.path())
+        .output()
+        .expect("run chore");
+    let run = Run::of(output).ok();
+    assert_eq!(run.printed("region us-east-1"), 1, "{}", run.stdout);
+}
+
+#[test]
+fn list_and_check_never_load_a_dotenv() {
+    // A `.env` is gitignored, so it is missing on a clean checkout and in CI.
+    // `chore list` answers "what is here" from the parse tree, exactly as it
+    // does for a global that reads a file that does not exist yet.
+    let dir = Dir::new();
+    dir.chorefile(
+        "dotenv .env\n\n# ship it\ntask deploy {\n    echo $env::DOTENV_E2E_MISSING\n}\n",
+    );
+
+    let listed = chore(&dir, &["list"]).ok();
+    assert!(listed.stdout.contains("deploy"), "{}", listed.stdout);
+    assert!(listed.stdout.contains("ship it"), "{}", listed.stdout);
+    chore(&dir, &["--check"]).ok();
+
+    // The run is where the missing file is a problem, and it says which file
+    // and how to say it may be absent.
+    let failed = chore(&dir, &["deploy"]);
+    assert_eq!(failed.code, 1, "{}{}", failed.stdout, failed.stderr);
+    assert!(failed.stderr.contains(".env"), "{}", failed.stderr);
+    assert!(failed.stderr.contains("optional"), "{}", failed.stderr);
+}
+
+// ---------------------------------------------------------------------------
 // top-level statements
 // ---------------------------------------------------------------------------
 

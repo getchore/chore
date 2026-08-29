@@ -137,6 +137,7 @@ fn file(tasks: Vec<Task>) -> File {
     File {
         require: None,
         includes: Vec::new(),
+        dotenvs: Vec::new(),
         globals: Vec::new(),
         tasks,
     }
@@ -2111,6 +2112,259 @@ fn a_spawned_program_is_given_the_bindings() {
 }
 
 // ---------------------------------------------------------------------------
+// $env::NAME and dotenv
+//
+// `$env::NAME` reads through the same overlay `env` writes, so everything a
+// chorefile put there — `env NAME value`, `env NAME=value cmd`, a `dotenv` —
+// is what it sees, and the process environment answers only when nothing did.
+// A `dotenv` fills in the names nothing has set, and never overrides one.
+// ---------------------------------------------------------------------------
+
+/// `$env::NAME` as a word.
+fn env_var(name: &str) -> WordPart {
+    var(&format!("env::{name}"))
+}
+
+/// `dotenv <path> [optional]`, as a task writes it.
+fn load(path: &Path, optional: bool) -> Stmt {
+    let mut args = vec![lit(&chorefile::vars::display(path))];
+    if optional {
+        args.push(lit("optional"));
+    }
+    run(cmd("dotenv", args))
+}
+
+/// A file with top-level `dotenv` directives and globals.
+fn with_dotenvs(dotenvs: Vec<Dotenv>, globals: Vec<Assign>, tasks: Vec<Task>) -> File {
+    File {
+        require: None,
+        includes: Vec::new(),
+        dotenvs,
+        globals,
+        tasks,
+    }
+}
+
+fn directive(path: &Path, optional: bool) -> Dotenv {
+    Dotenv {
+        path: chorefile::vars::display(path),
+        optional,
+        span: sp(),
+    }
+}
+
+fn global(name: &str, value: Word) -> Assign {
+    Assign {
+        name: name.into(),
+        value,
+        span: sp(),
+    }
+}
+
+/// Write a `.env` and return its path.
+fn dotenv_file(dir: &Temp, name: &str, text: &str) -> PathBuf {
+    let path = dir.path().join(name);
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn env_reads_the_process_environment() {
+    // `PATH` is the one name every platform this runs on has set.
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![run(cmd("say", vec![quoted(vec![env_var("PATH")])]))],
+    )]);
+    assert_eq!(go(&f, "t", &[]).printed(), [std::env::var("PATH").unwrap()]);
+}
+
+#[test]
+fn env_reads_the_overlay_before_the_process() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            set(UNIQUE, "from-the-task"),
+            run(cmd("say", vec![unquoted(vec![env_var(UNIQUE)])])),
+        ],
+    )]);
+    assert_eq!(go(&f, "t", &[]).printed(), ["from-the-task"]);
+}
+
+#[test]
+fn reading_an_unset_environment_variable_is_an_error() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![run(cmd("say", vec![unquoted(vec![env_var(UNIQUE)])]))],
+    )]);
+    let message = go(&f, "t", &[]).err_text();
+    assert!(
+        message.contains(&format!("environment variable `{UNIQUE}` is not set")),
+        "{message}"
+    );
+    // And the message points at the two forms whose miss is an answer.
+    assert!(message.contains(&format!("if env {UNIQUE}")), "{message}");
+    assert!(message.contains("try env"), "{message}");
+}
+
+#[test]
+fn a_top_level_dotenv_is_loaded_before_the_globals() {
+    let dir = Temp::new("dotenv-globals");
+    let path = dotenv_file(&dir, ".env", &format!("{UNIQUE}=from-the-file\n"));
+    let f = with_dotenvs(
+        vec![directive(&path, false)],
+        // A global reading `$env::NAME` is the reason the load comes first.
+        vec![global("where", unquoted(vec![env_var(UNIQUE)]))],
+        vec![task(
+            "t",
+            &[],
+            vec![
+                run(cmd("say", vec![unquoted(vec![var("where")])])),
+                look_at(UNIQUE),
+            ],
+        )],
+    );
+    assert_eq!(
+        exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path()).printed(),
+        ["from-the-file", "from-the-file"]
+    );
+}
+
+#[test]
+fn a_task_scoped_dotenv_dies_with_the_call() {
+    let dir = Temp::new("dotenv-scope");
+    let path = dotenv_file(&dir, ".env.prod", &format!("{UNIQUE}=from-the-file\n"));
+    let f = file(vec![
+        task("t", &[], vec![run(cmd("a", vec![])), run(cmd("c", vec![]))]),
+        task("a", &[], vec![load(&path, false), run(cmd("b", vec![]))]),
+        task("b", &[], vec![look_at(UNIQUE)]),
+        task("c", &[], vec![look_at(UNIQUE)]),
+    ]);
+    // Exactly the scope `env NAME value` has: `b` runs inside `a`'s call and
+    // sees it, `c` runs after it returned and does not.
+    assert_eq!(
+        exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path()).printed(),
+        ["from-the-file", "<unset>"]
+    );
+    assert!(std::env::var(UNIQUE).is_err());
+}
+
+#[test]
+fn a_name_already_set_wins_over_the_file() {
+    let dir = Temp::new("dotenv-precedence");
+    let path = dotenv_file(
+        &dir,
+        ".env",
+        &format!("{UNIQUE}=from-the-file\nCHOREFILE_TEST_ONLY_IN_FILE=filled-in\n"),
+    );
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            set(UNIQUE, "from-the-task"),
+            load(&path, false),
+            look_at(UNIQUE),
+            look_at("CHOREFILE_TEST_ONLY_IN_FILE"),
+        ],
+    )]);
+    // The CI rule: an override that is already in force stays in force, and
+    // the file only fills in what nothing had.
+    assert_eq!(
+        exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path()).printed(),
+        ["from-the-task", "filled-in"]
+    );
+}
+
+#[test]
+fn a_later_file_only_fills_in_what_no_earlier_one_named() {
+    let dir = Temp::new("dotenv-two-files");
+    let first = dotenv_file(&dir, ".env", &format!("{UNIQUE}=first\n"));
+    let second = dotenv_file(
+        &dir,
+        ".env.local",
+        &format!("{UNIQUE}=second\nCHOREFILE_TEST_SECOND_ONLY=second\n"),
+    );
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            load(&first, false),
+            load(&second, false),
+            look_at(UNIQUE),
+            look_at("CHOREFILE_TEST_SECOND_ONLY"),
+        ],
+    )]);
+    assert_eq!(
+        exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path()).printed(),
+        ["first", "second"]
+    );
+}
+
+#[test]
+fn a_missing_optional_file_is_skipped() {
+    let dir = Temp::new("dotenv-optional");
+    let missing = dir.path().join(".env.local");
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            load(&missing, true),
+            run(cmd("say", vec![lit("carried on")])),
+        ],
+    )]);
+    assert_eq!(
+        exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path()).printed(),
+        ["carried on"]
+    );
+}
+
+#[test]
+fn a_missing_required_file_fails_and_names_the_word_that_would_allow_it() {
+    let dir = Temp::new("dotenv-missing");
+    let missing = dir.path().join(".env");
+    let f = file(vec![task("t", &[], vec![load(&missing, false)])]);
+    let message = exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path()).err_text();
+    assert!(message.contains(".env"), "{message}");
+    assert!(message.contains("optional"), "{message}");
+}
+
+#[test]
+fn a_malformed_line_names_the_file_and_the_line() {
+    let dir = Temp::new("dotenv-malformed");
+    let path = dotenv_file(&dir, ".env", "A=1\nnot a binding\n");
+    let f = file(vec![task("t", &[], vec![load(&path, false)])]);
+    let message = exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path()).err_text();
+    assert!(message.contains(".env:2:"), "{message}");
+}
+
+#[test]
+fn a_dotenv_is_loaded_under_dry_and_echoed_like_any_command() {
+    // Reading a file is an input, not an effect: a preview whose conditions
+    // read `$env::NAME` has to see what the run would see.
+    let dir = Temp::new("dotenv-dry");
+    let path = dotenv_file(&dir, ".env", &format!("{UNIQUE}=previewed\n"));
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            load(&path, false),
+            run(cmd("say", vec![unquoted(vec![env_var(UNIQUE)])])),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, dir.path());
+    assert_eq!(ran.printed(), ["previewed"]);
+    assert_eq!(ran.echoed().len(), 2, "{:?}", ran.echoed());
+    assert!(
+        ran.echoed()[0].starts_with("$ dotenv "),
+        "{:?}",
+        ran.echoed()
+    );
+    assert!(std::env::var(UNIQUE).is_err());
+}
+
+// ---------------------------------------------------------------------------
 // Echo and --dry
 // ---------------------------------------------------------------------------
 
@@ -3361,6 +3615,7 @@ fn root_cannot_be_reassigned_by_a_global_or_a_task() {
     let f = File {
         require: None,
         includes: Vec::new(),
+        dotenvs: Vec::new(),
         globals: vec![Assign {
             name: "ROOT".into(),
             value: lit("/somewhere/else"),

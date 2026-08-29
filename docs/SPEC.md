@@ -116,6 +116,8 @@ task name arg1 arg2 { }      $1 $2, $@ all, $# count
 include other.chore
 include libs/chorefile as libs       tasks become libs::build
 require 1.4.0                        the oldest chore that can run this file
+$env::NAME                   an environment variable
+dotenv .env [optional]       load a .env file
 ```
 
 ### Descriptions
@@ -344,6 +346,123 @@ task test {
 
 task → builtin → `PATH`. A leading `^` forces `PATH`: `^find`.
 
+## Environment
+
+```sh
+require 1.9.0
+dotenv .env                      # error if it is missing
+dotenv .env.local optional       # skipped if it is missing
+
+registry=$env::REGISTRY          # a global may read one
+
+task deploy {
+    dotenv deploy/.env.prod      # this call only
+    ./deploy $env::REGION
+}
+```
+
+### `$env::NAME`
+
+Reads an environment variable, anywhere a `$name` can be written, quoted
+(`"$env::HOME/bin"`) or braced (`${env::HOME}`) like any other.
+
+It is read through the interpreter's own environment first and the process
+environment second, so it sees everything the chorefile put there —
+`env NAME value`, `env NAME=value <cmd>`, a `dotenv` — and falls back to what
+`chore` was started with. There is no way for the two to disagree: `$env::CI`
+and `env CI` answer from the same place.
+
+**An unset name is a run error**, like any other undefined variable, because
+it is a name in the middle of a command line and an empty one silently builds
+a wrong path. Where a name may legitimately be absent, use the forms whose
+miss is an *answer*:
+
+```sh
+if env GITHUB_TOKEN { download gh://... }
+token=$(try env GITHUB_TOKEN)
+```
+
+`env` is a **reserved namespace**. `include x as env` is an error — it would
+make `$env::PATH` mean one thing in one file and another elsewhere — and
+`env::X=...` is not an assignment; the message points at `env X <value>`,
+which is the statement that actually sets one. Nothing else changes about
+`::`: it still joins an include's namespace to a name, and `$libs::dist` is
+still something only an include can construct.
+
+`check` treats every `$env::NAME` as defined. Whether this machine has it set
+is a fact about the machine, not about the chorefile, and a finding that
+disappears in CI is not a finding. The other direction is worth help, though:
+a bare `$FOO` that is undefined *and* set in the environment `check` is
+running in gets told so — "`FOO` is set in the environment: write `$env::FOO`"
+— instead of a did-you-mean.
+
+Under `--dry` it reads the real environment and yields a real value, not one
+of the marked values a preview invents: nothing had to be skipped to answer
+it.
+
+### `dotenv`
+
+Loads a file of `KEY=value` lines. **A name that is already set wins over the
+file** — the process environment, an earlier `env`, an earlier `dotenv` — so
+`REGION=us-east-1 chore deploy` and a variable a CI job exports still override
+a `.env` that is checked in. Load order is therefore the whole of the
+precedence rule: the first file to name a variable is the one that answers,
+and a later file only fills in what nothing had.
+
+`optional` is the literal word after the path, and means a missing file is
+skipped. Without it a missing file fails the run — which is what makes
+`dotenv .env` a statement about what the project needs rather than a wish.
+
+**At the top level** it is a directive, like `include`: the path is a literal
+and resolves relative to the file that wrote it, so a `dotenv .env` in
+`libs/tasks.chore` means `libs/.env` wherever `chore` was invoked from. Files
+load once, before the top-level assignments — so a global may read
+`$env::NAME` — and after `require` is checked. An included file's `dotenv`
+loads too, after every one written in the file that included it, which is the
+order that keeps a subproject's `.env` from deciding what the project runs
+with.
+
+`list`, `help`, `check` and `spec` never load one, for the same reason they
+never evaluate a global: they need the parse tree and nothing else, so they
+still work on a checkout where every `.env` is gitignored and absent.
+
+**Inside a task** it is a builtin. The path is relative to the task's current
+directory, like every other builtin path, and what it binds lasts exactly as
+long as `env NAME value` would — the task, everything it calls, every process
+spawned inside it — and is gone when the task returns.
+
+Under `--dry` it loads. Reading a file is an input, not an effect, and a
+preview whose `if $env::REGION == eu` answered from the developer's own shell
+would be describing a different run.
+
+### The file format
+
+```sh
+# a comment
+export API_URL=https://example.test    # `export` is allowed, and ignored
+PORT=8080            # a trailing comment, after whitespace
+COLOR=#ff0000        # a `#` touching the value belongs to it
+LITERAL='no \n escapes here'
+TEXT="a\tb\nc"       # \n \t \\ \" only
+EMPTY=
+```
+
+Blank lines and `#` lines are skipped. A key must be a name — a letter or `_`
+followed by letters, digits and `_` — and spaces around the `=` are allowed. A
+bare value is trimmed and loses a trailing ` # comment`; a single-quoted value
+is literal; a double-quoted value takes `\n`, `\t`, `\\` and `\"` and nothing
+else, so a Windows path keeps its backslashes. CRLF line endings are fine.
+
+**There is no `${OTHER}` expansion.** The dialects disagree about what it
+reads, what an unset name expands to and how to escape the `$`, and a
+chorefile has a language of its own for building a value out of another. A `$`
+in a value is a `$`.
+
+A malformed line is an error naming the file and the line, never a line
+quietly skipped: a run that ignored `DATABASE_URL "postgres://..."` would fail
+later with nothing to connect the two. On Windows, names match
+case-insensitively, the same rule `env` follows.
+
 ## Builtin variables
 
 Read-only, always set.
@@ -387,6 +506,7 @@ changed  <path...>            exit 0/1, for `if`; records what it saw
 echo     <text...>
 env      <NAME> [value]       get, or set for the rest of the call
 env      NAME=value <cmd>     set for one command only
+dotenv   <path> [optional]    load a .env file for the rest of the call
 fail     <msg>
 sleep    <seconds>
 spawn    <cmd> [args...]      start a program, do not wait; see below
@@ -514,6 +634,10 @@ task build {
     go test ./...             # CGO_ENABLED is whatever it was
 }
 ```
+
+To read a variable into a *word* rather than onto stdout, write `$env::NAME`;
+`dotenv` fills the same environment from a file. Both are in
+[Environment](#environment).
 
 **sleep** accepts fractional seconds.
 
@@ -668,7 +792,10 @@ Echoes commands and skips the ones with effects. `fail` still fails, since a
 preview that swallowed a hard stop would describe a run that cannot happen.
 `env NAME value` is not skipped: it sets nothing outside the run, and a preview
 that carried it out is a preview whose later `if env NAME` tells the truth
-about the chorefile rather than about the shell it was previewed from.
+about the chorefile rather than about the shell it was previewed from. `dotenv`
+is not skipped either — reading a file is an input, not an effect — and
+`$env::NAME` reads the real environment, so it is never one of the invented
+values below.
 **Captures and conditions still run**: a `$(...)` that did not execute would
 leave every interpolated path downstream empty, and the preview would describe
 a run that could never happen.
@@ -720,10 +847,11 @@ branch chosen this way says so. None of this exists in a real run.
 
 ### Top-level statements
 
-Top-level assignments are evaluated once, before the first task. `list`,
-`help`, `check` and `spec` never evaluate them, since they only need the parse
-tree, so `chore list` does no I/O and works even when a file a global reads is
-missing.
+Top-level assignments are evaluated once, before the first task, and a
+top-level `dotenv` is loaded once before *them*, so a global may read
+`$env::NAME`. `list`, `help`, `check` and `spec` never evaluate an assignment
+or load a `dotenv`, since they only need the parse tree, so `chore list` does
+no I/O and works even when a file a global reads — or a `.env` — is missing.
 
 ## require
 
@@ -798,6 +926,11 @@ legitimate choice when the directory really is its own project.
   files is an error.
 - `::` is reserved in task names. A cycle names the whole loop and is an
   error.
+- `as env` is an error: `$env::NAME` reads the environment in every file, so
+  the namespace cannot also be an include's.
+- A `dotenv` in an included file loads too, relative to *that* file, after
+  every `dotenv` in the file that included it. See
+  [Environment](#environment).
 
 ### What `as` renames, and what it leaves alone
 
@@ -891,7 +1024,10 @@ inside the project, an unmet `require`, and non-portable commands (`curl`,
 `unzip`, `tar`, `cp`, `rm`, `nohup`) with the builtin that replaces them. A
 `spawn` whose first word names a task or a builtin is an error, and one that
 names a program this machine has never heard of is a warning like any other
-`PATH` miss. A default is checked in the
+`PATH` miss. A `dotenv` path built from a variable or a capture is an error,
+and so is a misspelt `optional`, which is named; a *missing* `.env` is not a
+finding, since it is gitignored and absent on every clean checkout — that is
+what `optional`, and the run, are for. A default is checked in the
 scope it will be evaluated in, so it may read `$1`…`$(n-1)` but not its own
 slot or a later one.
 

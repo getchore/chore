@@ -8,8 +8,8 @@
 use std::path::Path;
 
 use crate::ast::{
-    Assign, Block, Chain, Command, CompareOp, Cond, File, For, If, Include, Param, PartKind,
-    Redirect, RedirectKind, Require, Script, Stmt, Task, VarRef, Word, WordPart,
+    Assign, Block, Chain, Command, CompareOp, Cond, Dotenv, File, For, If, Include, Param,
+    PartKind, Redirect, RedirectKind, Require, Script, Stmt, Task, VarRef, Word, WordPart,
 };
 use crate::error::{Error, Location, Result, Span};
 use crate::lex::{self, Spanned, Token};
@@ -231,6 +231,11 @@ impl<'a> Parser<'a> {
                     file.includes.push(self.include()?);
                     self.end_of_stmt()?;
                 }
+                Token::Word { .. } if self.at_keyword("dotenv") => {
+                    doc = None;
+                    file.dotenvs.push(self.dotenv()?);
+                    self.end_of_stmt()?;
+                }
                 Token::Word { .. } if self.tokens[self.i + 1].token == Token::Assign => {
                     doc = None;
                     file.globals.push(self.assign()?);
@@ -343,6 +348,46 @@ impl<'a> Parser<'a> {
         Ok(Include {
             path,
             namespace,
+            span: Span::new(start, end),
+        })
+    }
+
+    /// `dotenv <path> [optional]`, at the top level.
+    ///
+    /// The path is a literal, exactly as an `include`'s is: which files a
+    /// chorefile reads is a fact about the file, and one assembled from a
+    /// `$( )` could not be reported by `check` or read off the page.
+    ///
+    /// `optional` is a bare word rather than a `--flag` because this is a
+    /// directive and not a command — there is no argv here for a flag to be
+    /// part of — and it is spelled in full because it is read far more often
+    /// than it is written.
+    fn dotenv(&mut self) -> Result<Dotenv> {
+        let start = self.bump().span.start;
+        let path_word = self.word("a path after `dotenv`")?;
+        let Some(path) = literal(&path_word) else {
+            return self.err_at(
+                "a `dotenv` path must be a plain path, without interpolation",
+                path_word.span,
+            );
+        };
+        let mut end = path_word.span.end;
+        let mut optional = false;
+        if matches!(self.kind(), Token::Word { .. }) {
+            let word = self.word("`optional`")?;
+            if literal(&word).as_deref() != Some("optional") {
+                return self.err_at(
+                    "the only word `dotenv` takes after its path is `optional`, which \
+                     skips the file when it is missing",
+                    word.span,
+                );
+            }
+            optional = true;
+            end = word.span.end;
+        }
+        Ok(Dotenv {
+            path,
+            optional,
             span: Span::new(start, end),
         })
     }
@@ -578,6 +623,31 @@ impl<'a> Parser<'a> {
             return self.err_at("expected a name", name_tok.span);
         };
         let name = text.clone();
+        // A namespaced name is never something a chorefile writes: only an
+        // `include ... as` constructs one, and `env::` is the machine's.
+        // Assigning `env::X` reads like the way to set a variable for a
+        // child, so the message is the form that actually does that rather
+        // than a flat refusal.
+        if let Some(var) = crate::vars::env_ref(&name) {
+            return self.err_at(
+                format!(
+                    "`{name}` cannot be assigned: `$env::{var}` reads the environment, and \
+                     nothing writes it by assignment — use `env {var} <value>` to set it for \
+                     the rest of the call, or `env {var}=<value> <cmd>` for one command"
+                ),
+                name_tok.span,
+            );
+        }
+        if name.contains(crate::NAMESPACE_SEP) {
+            return self.err_at(
+                format!(
+                    "`{name}` cannot be assigned: `{}` joins a namespace to a name, and only \
+                     `include ... as` constructs one",
+                    crate::NAMESPACE_SEP
+                ),
+                name_tok.span,
+            );
+        }
         let eq = self.bump().span;
         // `x=` with nothing after it assigns the empty string.
         let value = match self.kind() {
@@ -1024,7 +1094,20 @@ impl<'a> Parser<'a> {
                 Ok(end)
             }
             Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
-                let end = scan(b, i + 1, |c| c.is_ascii_alphanumeric() || c == b'_');
+                let mut end = scan(b, i + 1, |c| c.is_ascii_alphanumeric() || c == b'_');
+                // `$env::NAME`. Only this namespace is written by hand: an
+                // include's — `$libs::dist` — is constructed by the resolver
+                // and exists in the tree without ever being spelled in a
+                // file. Scanning `::` for any name would make `$a::b` look
+                // like a variable that nothing can define.
+                if text[i + 1..end] == *crate::vars::ENV_NAMESPACE
+                    && let Some(rest) = text[end..].strip_prefix(crate::NAMESPACE_SEP)
+                    && rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                {
+                    end = scan(b, end + crate::NAMESPACE_SEP.len(), |c| {
+                        c.is_ascii_alphanumeric() || c == b'_'
+                    });
+                }
                 let span = Span::new(base + i, base + end);
                 let var = self.var_ref(&text[i + 1..end], span)?;
                 out.push_var(var, span);
@@ -1048,6 +1131,9 @@ impl<'a> Parser<'a> {
                 Ok(n) => Ok(VarRef::Positional(n)),
                 Err(_) => self.err_at("parameter number is too large", span),
             },
+            // `$env::NAME`, and its braced spelling `${env::NAME}`, which the
+            // scanner above never sees.
+            _ if crate::vars::env_ref(name).is_some() => Ok(VarRef::Named(name.to_string())),
             _ if lex::is_ident(name) => Ok(VarRef::Named(name.to_string())),
             _ => self.err_at(format!("`{name}` is not a variable name"), span),
         }

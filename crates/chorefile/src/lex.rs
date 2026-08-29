@@ -291,7 +291,7 @@ impl Lexer<'_> {
                 }
                 b'$' if self.peek(1) == Some(b'(') => self.capture_run()?,
                 b'$' if self.peek(1) == Some(b'{') => self.braced_run()?,
-                b'=' if self.stmt_start && !quoted && is_ident(&self.src[start..self.i]) => {
+                b'=' if self.stmt_start && !quoted && is_assign_name(&self.src[start..self.i]) => {
                     let text = self.src[start..self.i].to_string();
                     self.push(Token::Word { text, quoted }, start, self.i);
                     self.push(Token::Assign, self.i, self.i + 1);
@@ -472,6 +472,18 @@ pub(crate) fn line_indent(source: &str, at: usize) -> &str {
         .find(|c| c != ' ' && c != '\t')
         .map_or(at, |n| start + n);
     &source[start..end]
+}
+
+/// What may sit to the left of a statement's `=`.
+///
+/// An identifier, or a namespaced name like `env::TOKEN`. A namespaced one is
+/// never a legal assignment — only an `include ... as` constructs a
+/// namespace, and `env::` is the machine's — but it has to *split* here for
+/// the parser to be able to say so: left whole, `env::TOKEN=x` is one word
+/// and reads as the name of a command nothing has ever heard of, which is the
+/// least useful thing that could be said about it.
+fn is_assign_name(s: &str) -> bool {
+    s.split(crate::NAMESPACE_SEP).all(is_ident)
 }
 
 /// A shell identifier: the name half of an assignment, or a `$name`.

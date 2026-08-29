@@ -827,3 +827,79 @@ fn a_met_requirement_anywhere_in_the_tree_is_quiet() {
     let path = dir.chorefile("require 1.0.0\ninclude libs/a.chore\ntask build { helper }\n");
     assert!(require::unmet(&resolve(&path)).is_none());
 }
+
+// ---------------------------------------------------------------------------
+// dotenv
+// ---------------------------------------------------------------------------
+
+/// Every `dotenv` the merged tree carries, as `(path, optional)`.
+fn dotenvs(merged: &Merged) -> Vec<(String, bool)> {
+    merged
+        .file
+        .dotenvs
+        .iter()
+        .map(|d| (d.path.clone(), d.optional))
+        .collect()
+}
+
+#[test]
+fn a_dotenv_in_an_included_file_is_relative_to_that_file() {
+    // The rule `include` has, for the same reason: a fragment is written
+    // without knowing what will pull it in, so `dotenv .env` beside it means
+    // the one beside it.
+    let dir = Dir::new();
+    dir.write("libs/a.chore", "dotenv .env\ntask helper { echo hi }\n");
+    let path = dir.chorefile("dotenv .env\ninclude libs/a.chore\ntask build { helper }\n");
+
+    assert_eq!(
+        dotenvs(&resolve(&path)),
+        [
+            (vars::display(&dir.path(".env")), false),
+            (vars::display(&dir.path("libs/.env")), false),
+        ]
+    );
+}
+
+#[test]
+fn the_including_file_loads_first_so_its_values_win() {
+    // Loading order is precedence — the first file to name a variable wins —
+    // so a subproject's `.env` must not decide what the project that included
+    // it runs with.
+    let dir = Dir::new();
+    dir.write(
+        "libs/a.chore",
+        "dotenv inner.env\ntask helper { echo hi }\n",
+    );
+    let path = dir.chorefile(
+        "include libs/a.chore\ndotenv outer.env\ndotenv missing.env optional\n\
+         task build { helper }\n",
+    );
+
+    assert_eq!(
+        dotenvs(&resolve(&path)),
+        [
+            (vars::display(&dir.path("outer.env")), false),
+            (vars::display(&dir.path("missing.env")), true),
+            (vars::display(&dir.path("libs/inner.env")), false),
+        ]
+    );
+}
+
+#[test]
+fn a_missing_dotenv_file_does_not_stop_a_resolve() {
+    // `resolve` reads chorefiles and never a `.env`: `chore list` and `chore
+    // check` have to work on a checkout where every `.env` is gitignored.
+    let dir = Dir::new();
+    let path = dir.chorefile("dotenv .env\ntask build { echo hi }\n");
+    assert_eq!(dotenvs(&resolve(&path)).len(), 1);
+}
+
+#[test]
+fn env_is_a_reserved_include_namespace() {
+    let dir = Dir::new();
+    dir.write("libs/a.chore", "task helper { echo hi }\n");
+    let path = dir.chorefile("include libs/a.chore as env\ntask build { echo hi }\n");
+    let message = error(&path);
+    assert!(message.contains("`as env` is reserved"), "{message}");
+    assert!(message.contains("$env::"), "{message}");
+}

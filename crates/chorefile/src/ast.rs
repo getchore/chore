@@ -12,6 +12,9 @@ pub struct File {
     pub require: Option<Require>,
     /// `include` directives, in source order.
     pub includes: Vec<Include>,
+    /// `dotenv` directives, in source order. Loaded once, before the
+    /// top-level assignments, so a global may read `$env::NAME`.
+    pub dotenvs: Vec<Dotenv>,
     /// Top-level assignments. Evaluated once before the first task runs, and
     /// never by `list`, `help`, `check` or `spec` — those only need the tree.
     pub globals: Vec<Assign>,
@@ -39,6 +42,26 @@ pub struct Include {
     /// `as name`: tasks and globals are exposed as `name::task`. Without it
     /// they merge flat, and any duplicate is a `check` error.
     pub namespace: Option<String>,
+    pub span: Span,
+}
+
+/// `dotenv .env [optional]`: a file of `KEY=value` lines layered *under* the
+/// environment before anything runs.
+///
+/// A literal path, like an `include`'s, and for the same reason: which files
+/// a chorefile reads must not depend on a value computed at run time, or
+/// `check` — and a reader — could no longer say what the run consults.
+#[derive(Debug)]
+pub struct Dotenv {
+    /// As written, relative to the file holding the directive.
+    /// [`resolve`](crate::resolve) replaces it with the resolved path as it
+    /// merges: the merged tree has forgotten which file each directive came
+    /// from, and the rule is relative to *that* file.
+    pub path: String,
+    /// `optional`: a missing file is skipped instead of failing the run. The
+    /// word is written out at the directive, so which file is allowed to be
+    /// absent is visible where the file is named.
+    pub optional: bool,
     pub span: Span,
 }
 
