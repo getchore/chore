@@ -374,9 +374,10 @@ on PATH only — a task or a builtin is an error, since what `spawn` starts has 
 and the run carries on without waiting. The child is detached: its own process group on Unix, \
 DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP on Windows, so it survives the terminal that started \
 the run. stdin is null, and so are stdout and stderr unless the statement redirects them: a \
-process that outlives the run must not keep writing to the terminal. `> log` takes both streams, \
-since there is no `2>&1` to write; `2> err` splits them again. The pid is reported on stderr. \
-Skipped under --dry, which opens no file either.",
+process that outlives the run must not keep writing to the terminal. `> log` takes both streams; \
+`2> err` splits them again. `> log 2>&1` is accepted and means what the bare `> log` means, for \
+people arriving from `nohup ./app > log 2>&1 &`. The pid is reported on stderr. Skipped under \
+--dry, which opens no file either.",
         effects: true,
         flags: NO_FLAGS,
     },
@@ -644,6 +645,14 @@ status is the last command's",
     Operator {
         symbol: "2>",
         meaning: "write stderr to a file",
+    },
+    Operator {
+        symbol: "2>&1",
+        meaning: "send stderr wherever stdout is going -- a file, a capture, a pipe, or the \
+terminal. Spelled exactly, and it takes no filename. Read after every other redirect on the \
+command, so `> log 2>&1` and `2>&1 > log` both put both streams in `log`, where sh reads the \
+second differently. Into a file the two streams share one handle. A `2> f` on the same command \
+is an error: two places for one stream",
     },
 ];
 

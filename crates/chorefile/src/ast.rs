@@ -265,8 +265,13 @@ pub struct Command {
 #[derive(Debug)]
 pub struct Redirect {
     pub kind: RedirectKind,
-    pub target: Word,
-    /// The operator and its target together, as in `> out.txt`.
+    /// The file to write to. `None` for [`RedirectKind::StderrToStdout`],
+    /// which names a stream rather than a path — the one redirect with
+    /// nothing after the operator, which is why this is an `Option` rather
+    /// than a `Word` every walk can assume is there.
+    pub target: Option<Word>,
+    /// The operator and its target together, as in `> out.txt`, or just the
+    /// operator where there is no target.
     pub span: Span,
 }
 
@@ -278,6 +283,17 @@ pub enum RedirectKind {
     StdoutAppend,
     /// `2>`
     Stderr,
+    /// `2>&1` — send stderr wherever stdout is going.
+    ///
+    /// Deliberately *not* sh's general stream dup: `2>&1` is the only
+    /// spelling, there is no `1>&2` and no `3>&`, and it is read as a
+    /// statement about the command rather than as an operation performed in
+    /// written order. `> log 2>&1` and `2>&1 > log` therefore both mean "both
+    /// streams into `log`", where sh gives the second one a stderr still
+    /// pointed at the terminal. Order-dependence is the part of `2>&1`
+    /// everyone gets wrong, and a task runner has nothing to gain from
+    /// reproducing it.
+    StderrToStdout,
 }
 
 /// One argument, before interpolation.

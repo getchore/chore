@@ -379,7 +379,7 @@ fn reserved_names_and_operators_are_documented() {
     assert!(doc.contains(chorefile::NAMESPACE_SEP));
 
     let symbols: Vec<&str> = spec::chaining().iter().map(|o| o.symbol).collect();
-    assert_eq!(symbols, ["&&", "||", "|", ">", ">>", "2>"]);
+    assert_eq!(symbols, ["&&", "||", "|", ">", ">>", "2>", "2>&1"]);
 }
 
 /// The one subcommand a chorefile may take back. An agent reading the spec has

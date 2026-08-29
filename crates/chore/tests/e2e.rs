@@ -753,6 +753,31 @@ task go {
     assert!(checked.stdout.contains("write"), "{}", checked.stdout);
 }
 
+/// The line a justfile arrives with: a build that says half of what it has to
+/// say on stderr, both halves into one log, and a `check` that is happy with
+/// it.
+#[test]
+#[cfg(unix)]
+fn a_merge_puts_both_streams_in_one_log() {
+    let dir = Dir::new();
+    dir.chorefile(
+        r#"
+task build {
+    sh -c "echo compiling; echo warning: unused >&2" > build.log 2>&1
+    echo done
+}
+"#,
+    );
+
+    let checked = chore(&dir, &["check"]);
+    assert_eq!(checked.code, 0, "{}{}", checked.stdout, checked.stderr);
+    let run = chore(&dir, &["build"]).ok();
+    assert_eq!(dir.read("build.log"), "compiling\nwarning: unused\n");
+    // Neither half reached the terminal, and the run carried on.
+    assert!(!run.stderr.contains("unused"), "stderr was {}", run.stderr);
+    assert!(run.stdout.contains("done"), "stdout was {}", run.stdout);
+}
+
 // ---------------------------------------------------------------------------
 // bugs
 // ---------------------------------------------------------------------------

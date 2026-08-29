@@ -603,7 +603,10 @@ impl Renamer<'_> {
             self.word(arg, locals);
         }
         for redirect in &mut cmd.redirects {
-            self.word(&mut redirect.target, locals);
+            // `2>&1` has no target word to rewrite — it names a stream.
+            if let Some(target) = &mut redirect.target {
+                self.word(target, locals);
+            }
         }
     }
 

@@ -7,7 +7,9 @@ edition = "2024"
 version = "1.8.0"
 license = "MIT"
 repository = "https://github.com/getchore/chore"
-rust-version = "1.85"
+# 1.87 for `std::io::pipe`, which is what lets `cmd 2>&1` hand a captured
+# command's two streams one pipe instead of two buffers to guess an order for.
+rust-version = "1.87"
 
 [workspace.dependencies]
 chorefile = { path = "crates/chorefile", version = "1.8.0" }

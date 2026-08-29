@@ -70,6 +70,30 @@ const COMPARE_OPS: [(&str, CompareOp); 5] = [
     ("ends-with", CompareOp::EndsWith),
 ];
 
+/// What `2> file` beside `2>&1` is answered with. One command, two answers to
+/// "where does stderr go": sh picks by written order, which is the part of
+/// `2>&1` people get wrong, so chore refuses to pick at all.
+const TWO_PLACES: &str = "a command sends stderr to one place: `2> file` and `2>&1` are both \
+written here. Keep the file, or keep `2>&1` and let the `>` decide where both streams go";
+
+/// The span of the redirect that made a command's stderr ambiguous, if one
+/// did. Reported from the second operator, which is the one a reader would
+/// delete.
+fn split_stderr(redirects: &[Redirect]) -> Option<Span> {
+    let mut seen: Option<RedirectKind> = None;
+    for r in redirects {
+        let kind = match r.kind {
+            RedirectKind::Stderr | RedirectKind::StderrToStdout => r.kind,
+            _ => continue,
+        };
+        match seen {
+            Some(first) if first != kind => return Some(r.span),
+            _ => seen = Some(kind),
+        }
+    }
+    None
+}
+
 struct Parser<'a> {
     tokens: Vec<Spanned>,
     i: usize,
@@ -742,8 +766,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// The `>`, `>>` and `2>` redirections written after a script block, which
-    /// take their targets exactly as a command's do.
+    /// The `>`, `>>`, `2>` and `2>&1` redirections written after a script
+    /// block, which take their targets exactly as a command's do.
     fn redirects(&mut self) -> Result<Vec<Redirect>> {
         let mut out = Vec::new();
         loop {
@@ -751,12 +775,30 @@ impl<'a> Parser<'a> {
                 Token::Gt => RedirectKind::Stdout,
                 Token::GtGt => RedirectKind::StdoutAppend,
                 Token::ErrGt => RedirectKind::Stderr,
-                _ => return Ok(out),
+                Token::ErrToOut => RedirectKind::StderrToStdout,
+                _ => {
+                    if let Some(span) = split_stderr(&out) {
+                        return self.err_at(TWO_PLACES, span);
+                    }
+                    return Ok(out);
+                }
             };
             let op = self.bump().span;
+            if kind == RedirectKind::StderrToStdout {
+                out.push(Redirect {
+                    kind,
+                    target: None,
+                    span: op,
+                });
+                continue;
+            }
             let target = self.word("a file to redirect to")?;
             let span = Span::new(op.start, target.span.end);
-            out.push(Redirect { kind, target, span });
+            out.push(Redirect {
+                kind,
+                target: Some(target),
+                span,
+            });
         }
     }
 
@@ -883,6 +925,7 @@ impl<'a> Parser<'a> {
                 Token::Gt => RedirectKind::Stdout,
                 Token::GtGt => RedirectKind::StdoutAppend,
                 Token::ErrGt => RedirectKind::Stderr,
+                Token::ErrToOut => RedirectKind::StderrToStdout,
                 Token::Caret => {
                     return self.err("`^` may only prefix a command name");
                 }
@@ -894,13 +937,25 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             let op = self.bump().span;
+            if kind == RedirectKind::StderrToStdout {
+                end = op.end;
+                redirects.push(Redirect {
+                    kind,
+                    target: None,
+                    span: op,
+                });
+                continue;
+            }
             let target = self.word("a file to redirect to")?;
             end = target.span.end;
             redirects.push(Redirect {
                 kind,
-                target,
+                target: Some(target),
                 span: Span::new(op.start, end),
             });
+        }
+        if let Some(span) = split_stderr(&redirects) {
+            return self.err_at(TWO_PLACES, span);
         }
         Ok(Command {
             name,

@@ -968,7 +968,12 @@ impl<'a> Checker<'a> {
             self.word(arg, scope);
         }
         for r in &cmd.redirects {
-            self.word(&r.target, scope);
+            // `2>&1` names a stream, not a path, so it has no word to walk —
+            // and a walk that assumed one would report the missing target as
+            // an undefined variable, which is the opposite of the truth.
+            if let Some(target) = &r.target {
+                self.word(target, scope);
+            }
         }
 
         // A name built from a variable or a capture is only knowable at run

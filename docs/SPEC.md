@@ -159,8 +159,42 @@ any command's exit code
 ### Chaining
 
 ```
-a && b     a || b     a | b     a > f     a >> f     a 2> f
+a && b     a || b     a | b     a > f     a >> f     a 2> f     a 2>&1
 ```
+
+#### `2>&1`
+
+Send stderr wherever stdout is going. It is spelled exactly `2>&1` — no
+spaces, nothing else after the `&` — and takes no filename, since it names a
+stream rather than a place.
+
+**Where "wherever stdout is going" is decided once, at the end.** After every
+redirect on the command has been read, not while reading them:
+
+```sh
+cargo build > log 2>&1        # both streams into log
+cargo build 2>&1 > log        # the same thing
+x=$(cargo build 2>&1)         # both streams into x
+cargo build 2>&1 | grep error # both streams into the pipe
+cargo build 2>&1              # stdout is the terminal, where stderr already is
+```
+
+The second line is the one sh reads differently: there the dup happens where
+it is written, while stdout is still the terminal, so `2>&1 > log` leaves
+stderr on the terminal and puts only stdout in `log`. That order-dependence is
+the thing everyone gets wrong about `2>&1`, and reproducing it would buy a
+chorefile nothing.
+
+Into a file, both streams share one open file — one handle, one offset — so
+two lines written at the same moment do not land on top of each other. `2> f`
+and `2>&1` on the same command is an error, in `chore check` as well as at run
+time: it asks for stderr in two places at once, and picking one by the order
+they were typed is exactly the guess above.
+
+It works for a program on `PATH`, for a task (whose commands' diagnostics all
+go the same way for as long as the call lasts), for a builtin, and for a
+`script` block. On `spawn` it is accepted and means what a bare `> log`
+already means there — see [spawn](#spawn).
 
 ### Word splitting
 
@@ -560,10 +594,15 @@ check` says so before the run gets that far.
 **Its output.** stdin is null, and so are stdout and stderr unless the
 statement redirects them: a process that outlives the run must not be writing
 to a terminal chore has handed back. `> log` and `>> log` take **both**
-streams — there is no `2>&1` to write, and `> log 2> log` would be two handles
-racing for one file — so a bare `>` means "everything this thing says goes
-here". A `2> err` beside it splits them again, and a `2> err` on its own keeps
-the errors and drops the rest.
+streams — `> log 2> log` would be two handles racing for one file — so a bare
+`>` means "everything this thing says goes here". A `2> err` beside it splits
+them again, and a `2> err` on its own keeps the errors and drops the rest.
+
+`spawn ./app > log 2>&1` is accepted and means exactly what the bare `> log`
+already meant, down to the same code path: the file is opened once and the
+child's stderr is a clone of its stdout. It is spelled out because
+`nohup ./app > log 2>&1 &` is the line people arrive with, and there is
+nothing to gain from making them delete half of it.
 
 Under `--dry` the line is echoed and nothing is spawned; no redirect file is
 opened either, so a preview cannot truncate yesterday's log.

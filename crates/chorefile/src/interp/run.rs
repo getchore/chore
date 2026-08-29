@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
@@ -19,7 +19,7 @@ use crate::exec::{Builtin, Ctx, Output};
 use crate::{builtins, vars};
 
 use super::memo::Claimed;
-use super::{Call, Called, Dest, Flags, Flow, Frame, Interpreter, MAX_DEPTH, Mode, Repeat};
+use super::{Call, Called, Dest, Errs, Flags, Flow, Frame, Interpreter, MAX_DEPTH, Mode, Repeat};
 
 impl Interpreter<'_> {
     pub(super) fn chain(
@@ -109,7 +109,7 @@ impl Interpreter<'_> {
         };
         let (name, rest) = (name.clone(), rest.to_vec());
 
-        let (dest, stderr) = self.redirects(&cmd.redirects, dest)?;
+        let (dest, errs) = self.redirects(&cmd.redirects, dest)?;
 
         if flags.echo && !self.quiet {
             self.echo(&name, &rest, cmd.force_path, &cmd.redirects)?;
@@ -119,7 +119,7 @@ impl Interpreter<'_> {
         argv.push(name.clone());
         argv.extend(rest);
 
-        self.dispatch(&argv, cmd.force_path, dest, stderr, stdin, flags, args_mark)
+        self.dispatch(&argv, cmd.force_path, dest, errs, stdin, flags, args_mark)
     }
 
     /// Resolve an expanded argv and run it: task → builtin → `PATH`, with a
@@ -136,7 +136,7 @@ impl Interpreter<'_> {
         argv: &[String],
         force_path: bool,
         dest: Dest,
-        stderr: Option<PathBuf>,
+        errs: Errs,
         stdin: Option<&[u8]>,
         flags: Flags,
         args_mark: Option<String>,
@@ -153,30 +153,30 @@ impl Interpreter<'_> {
             // `builtins::NAMES`, so `check` stops a task from taking the
             // name.
             if name == "parallel" {
-                return self.parallel(argv, dest, stderr);
+                return self.parallel(argv, dest, errs);
             }
             // For the same reason, twice over: a set belongs to the frame,
             // which only the interpreter has, and `env NAME=value <cmd>` has
             // a command in its arguments that only the interpreter can run.
             if name == "env" {
-                return self.env_command(argv, dest, stderr, stdin, flags);
+                return self.env_command(argv, dest, errs, stdin, flags);
             }
             // Also resolved here rather than through the table, and for the
             // same kind of reason: a builtin is handed writers, and `spawn`
             // needs the redirect's *path* — the child outlives this process,
             // so it must hold the file descriptor itself.
             if name == "spawn" {
-                return self.spawn(argv, dest, stderr);
+                return self.spawn(argv, dest, errs);
             }
             if self.task(&name).is_some() {
                 // Set immediately before the call and taken by `call_task`:
                 // a builtin or a program on `PATH` has no frame to carry it,
                 // so nothing else may see it.
                 self.pending_args_mark = args_mark;
-                return self.run_task_command(&name, &argv[1..], dest, stderr);
+                return self.run_task_command(&name, &argv[1..], dest, errs);
             }
             if let Some(f) = (self.builtins)(&name) {
-                return self.run_builtin(f, argv, dest, stderr, stdin);
+                return self.run_builtin(f, argv, dest, errs, stdin);
             }
             if builtins::is_builtin(&name) {
                 return Err(Error::Run {
@@ -184,7 +184,7 @@ impl Interpreter<'_> {
                 });
             }
         }
-        self.run_program(argv, dest, stderr, stdin, flags)
+        self.run_program(argv, dest, errs, stdin, flags)
     }
 
     /// `env <NAME>`, `env <NAME> <value>`, and `env NAME=value <cmd> [args]`.
@@ -221,13 +221,13 @@ impl Interpreter<'_> {
         &mut self,
         argv: &[String],
         dest: Dest,
-        stderr: Option<PathBuf>,
+        errs: Errs,
         stdin: Option<&[u8]>,
         flags: Flags,
     ) -> Result<Output> {
         let args = &argv[1..];
         if args.first().is_some_and(|first| first.contains('=')) {
-            return self.env_prefixed(args, dest, stderr, stdin, flags);
+            return self.env_prefixed(args, dest, errs, stdin, flags);
         }
         match args {
             // Reading. A miss is exit 1 rather than an error, so `if env CI`
@@ -235,19 +235,19 @@ impl Interpreter<'_> {
             // on stdout it would end up inside a `$(env NAME)`.
             [name] => match self.envs.get(name) {
                 Some(value) => {
-                    self.env_answer(format!("{value}\n").into_bytes(), 0, None, dest, stderr)
+                    self.env_answer(format!("{value}\n").into_bytes(), 0, None, dest, errs)
                 }
                 None => self.env_answer(
                     Vec::new(),
                     1,
                     Some(format!("env: {name} is not set")),
                     dest,
-                    stderr,
+                    errs,
                 ),
             },
             [name, value] => {
                 self.envs.set(name.clone(), Some(value.clone()));
-                self.env_answer(Vec::new(), 0, None, dest, stderr)
+                self.env_answer(Vec::new(), 0, None, dest, errs)
             }
             _ => Err(Error::Run {
                 message: "usage: env <NAME> [value], or env NAME=value <cmd> [args...]".into(),
@@ -260,23 +260,30 @@ impl Interpreter<'_> {
     /// `run_builtin` does this for every builtin it dispatches, and `env` is
     /// resolved by the interpreter instead, so it does the same three things
     /// itself: stdout to the terminal, to a capture, or to a `>` file, and the
-    /// diagnostic to stderr or to a `2>` file. Nothing is written to a file
-    /// under `--dry`, as for any other redirect.
+    /// diagnostic to stderr, to a `2>` file, or — under `2>&1` — onto the end
+    /// of the same bytes stdout is carrying, which is what makes
+    /// `x=$(env NOPE 2>&1)` catch the reason it came back empty. Nothing is
+    /// written to a file under `--dry`, as for any other redirect.
     fn env_answer(
         &mut self,
-        bytes: Vec<u8>,
+        mut bytes: Vec<u8>,
         code: i32,
         diag: Option<String>,
         dest: Dest,
-        stderr: Option<PathBuf>,
+        errs: Errs,
     ) -> Result<Output> {
-        match &stderr {
-            Some(path) if self.mode == Mode::Run => {
+        match &errs {
+            Errs::File(path) if self.mode == Mode::Run => {
                 let text = diag.map(|d| format!("{d}\n")).unwrap_or_default();
                 write_file(path, text.as_bytes(), false)?;
             }
-            Some(_) => {}
-            None => {
+            Errs::File(_) => {}
+            Errs::ToStdout => {
+                if let Some(text) = diag {
+                    bytes.extend_from_slice(format!("{text}\n").as_bytes());
+                }
+            }
+            Errs::Inherit => {
                 if let Some(text) = diag {
                     let _ = writeln!(self.err, "{text}");
                     let _ = self.err.flush();
@@ -310,7 +317,7 @@ impl Interpreter<'_> {
         &mut self,
         args: &[String],
         dest: Dest,
-        stderr: Option<PathBuf>,
+        errs: Errs,
         stdin: Option<&[u8]>,
         flags: Flags,
     ) -> Result<Output> {
@@ -358,18 +365,29 @@ impl Interpreter<'_> {
         }
         // No `?`: the bindings are this command's and must not survive it,
         // whether it succeeded, failed or unwound.
-        let out = self.dispatch(&argv, false, dest, stderr, stdin, flags, None);
+        let out = self.dispatch(&argv, false, dest, errs, stdin, flags, None);
         self.envs.unwind(depth);
         out
     }
 
-    /// Apply `>`, `>>` and `2>`. A `>` wins over the destination the caller
-    /// asked for, exactly as in sh.
-    fn redirects(&mut self, redirects: &[Redirect], dest: Dest) -> Result<(Dest, Option<PathBuf>)> {
+    /// Apply `>`, `>>`, `2>` and `2>&1`. A `>` wins over the destination the
+    /// caller asked for, exactly as in sh.
+    ///
+    /// `2>&1` is recorded rather than resolved: what it means is "wherever
+    /// stdout goes", and stdout's destination is only final once the whole
+    /// list has been read. That is what makes it order-free — the one
+    /// deliberate departure from sh, where `2>&1 > log` leaves stderr on the
+    /// terminal because the dup happened while stdout was still there.
+    fn redirects(&mut self, redirects: &[Redirect], dest: Dest) -> Result<(Dest, Errs)> {
         let mut dest = dest;
-        let mut stderr = None;
+        let mut errs = Errs::Inherit;
         for r in redirects {
-            let target = self.expand_to_string(&r.target)?;
+            if r.kind == RedirectKind::StderrToStdout {
+                errs = Errs::ToStdout;
+                continue;
+            }
+            let target =
+                self.expand_to_string(r.target.as_ref().expect("a target, see `parse`"))?;
             let path = self.resolve(&target);
             match r.kind {
                 RedirectKind::Stdout => {
@@ -379,10 +397,42 @@ impl Interpreter<'_> {
                     }
                 }
                 RedirectKind::StdoutAppend => dest = Dest::File { path, append: true },
-                RedirectKind::Stderr => stderr = Some(path),
+                RedirectKind::Stderr => errs = Errs::File(path),
+                // Handled above, before the target was reached for.
+                RedirectKind::StderrToStdout => unreachable!(),
             }
         }
-        Ok((dest, stderr))
+        Ok((dest, errs))
+    }
+
+    /// Deliver what `2>&1` collected: the bytes a builtin or a task wrote to
+    /// stderr, sent wherever its stdout went.
+    ///
+    /// After the stdout bytes rather than woven through them. Chore's own
+    /// commands write into buffers and hand them over at the end, so there is
+    /// no moment at which the two streams could be interleaved faithfully; a
+    /// program on `PATH` is the case where the ordering is real, and there
+    /// the two streams share one pipe or one file handle instead of coming
+    /// through here. A `>` file is appended to for the same reason: the
+    /// stdout bytes were written a moment ago, and truncating now would throw
+    /// them away.
+    fn merged_errs(&mut self, diag: &[u8], dest: &Dest, out: &mut Output) -> Result<()> {
+        if diag.is_empty() {
+            return Ok(());
+        }
+        match dest {
+            Dest::Stream => {
+                self.out.write_all(diag)?;
+                self.out.flush()?;
+            }
+            Dest::Capture => out.stdout.extend_from_slice(diag),
+            Dest::File { path, .. } => {
+                if self.mode == Mode::Run {
+                    write_file(path, diag, true)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn resolve(&self, path: &str) -> PathBuf {
@@ -416,16 +466,26 @@ impl Interpreter<'_> {
         Ok(())
     }
 
-    /// Append `> f`, `>> f` and `2> f` to an echo line, targets expanded.
-    /// Shared with `echo_script`, so a redirected block reads the same as a
-    /// redirected command.
+    /// Append `> f`, `>> f`, `2> f` and `2>&1` to an echo line, targets
+    /// expanded. Shared with `echo_script`, so a redirected block reads the
+    /// same as a redirected command.
+    ///
+    /// In the order they were written, `2>&1` included, even though chore
+    /// reads it as order-free: the echo is what the chorefile says, and a
+    /// preview that reordered a line would be describing a different one.
     fn echo_redirects(&mut self, line: &mut String, redirects: &[Redirect]) -> Result<()> {
         for r in redirects {
-            let target = self.expand_to_string(&r.target)?;
+            if r.kind == RedirectKind::StderrToStdout {
+                line.push_str(" 2>&1");
+                continue;
+            }
+            let target =
+                self.expand_to_string(r.target.as_ref().expect("a target, see `parse`"))?;
             line.push_str(match r.kind {
                 RedirectKind::Stdout => " > ",
                 RedirectKind::StdoutAppend => " >> ",
                 RedirectKind::Stderr => " 2> ",
+                RedirectKind::StderrToStdout => unreachable!(),
             });
             line.push_str(&quote(&target));
         }
@@ -453,7 +513,7 @@ impl Interpreter<'_> {
         f: Builtin,
         argv: &[String],
         dest: Dest,
-        stderr: Option<PathBuf>,
+        errs: Errs,
         stdin: Option<&[u8]>,
     ) -> Result<Output> {
         let cwd = self.cwd().to_path_buf();
@@ -461,12 +521,20 @@ impl Interpreter<'_> {
         let task = self.frame().task.clone();
         let dry = self.mode == Mode::Dry;
         let force = self.repeat == Repeat::Always;
+        // `2>&1` collects the diagnostics into a buffer and delivers them once
+        // the builtin has returned, which is the only ordering available: a
+        // builtin hands over `ctx.out` and `ctx.err` as two finished pieces,
+        // and there is no live handle to point at a second stream the way
+        // there is for a program on `PATH`.
+        let merged = matches!(errs, Errs::ToStdout);
         // Only a streamed command writes to the terminal; a capture or a `>`
         // hands the builtin a buffer, and progress redraws must stop there.
         // A parallel child streams into a buffer its parent prints later, so
-        // there is no terminal on the other end of it either.
+        // there is no terminal on the other end of it either. Nor is there
+        // under `2>&1`: a progress display redrawn into a buffer is a screenful
+        // of carriage returns, not progress.
         let interactive =
-            matches!(dest, Dest::Stream) && !self.captive && io::stdout().is_terminal();
+            matches!(dest, Dest::Stream) && !merged && !self.captive && io::stdout().is_terminal();
         let mut sink = Vec::new();
         let mut diag = Vec::new();
 
@@ -478,12 +546,12 @@ impl Interpreter<'_> {
                 Dest::Stream => &mut *self.out,
                 _ => &mut sink,
             };
-            // Without `2>`, diagnostics stream even when stdout is captured —
-            // sh does the same, and a silent `$(...)` would hide the reason it
-            // came back empty.
-            let err_writer: &mut dyn Write = match stderr {
-                Some(_) => &mut diag,
-                None => &mut *self.err,
+            // Without `2>` or `2>&1`, diagnostics stream even when stdout is
+            // captured — sh does the same, and a silent `$(...)` would hide
+            // the reason it came back empty.
+            let err_writer: &mut dyn Write = match errs {
+                Errs::File(_) | Errs::ToStdout => &mut diag,
+                Errs::Inherit => &mut *self.err,
             };
             let mut ctx = Ctx {
                 args: argv,
@@ -531,23 +599,41 @@ impl Interpreter<'_> {
                 if self.mode == Mode::Dry && argv[0] == "fail" {
                     self.note_invented_fail();
                 }
-                if let (Some(path), Mode::Run) = (&stderr, self.mode) {
+                if self.mode == Mode::Run && !matches!(errs, Errs::Inherit) {
                     if let Error::Run { message } = &e {
                         let _ = writeln!(diag, "{message}");
                     }
-                    // The builtin's own error is the task's failure; a fault
-                    // writing this file must not stand in for it.
-                    let _ = write_file(path, &diag, false);
+                    match (&errs, &dest) {
+                        // The builtin's own error is the task's failure; a
+                        // fault writing this file must not stand in for it.
+                        (Errs::File(path), _) => {
+                            let _ = write_file(path, &diag, false);
+                        }
+                        // `2>&1` into a `>` file: the same file, and the
+                        // stdout half never got written, so this truncates
+                        // rather than appends.
+                        (Errs::ToStdout, Dest::File { path, .. }) => {
+                            let _ = write_file(path, &diag, false);
+                        }
+                        (Errs::ToStdout, Dest::Stream) => {
+                            let _ = self.out.write_all(&diag);
+                            let _ = self.out.flush();
+                        }
+                        // A capture whose command is unwinding has no value
+                        // for anyone to read, so there is nowhere to put this;
+                        // the error itself carries the message out.
+                        (Errs::ToStdout, Dest::Capture) | (Errs::Inherit, _) => {}
+                    }
                 }
                 return Err(e);
             }
         };
 
-        match dest {
+        match &dest {
             Dest::Stream => {}
             Dest::Capture => {
                 if out.stdout.is_empty() {
-                    out.stdout = sink;
+                    out.stdout = mem::take(&mut sink);
                 }
             }
             Dest::File { path, append } => {
@@ -557,7 +643,7 @@ impl Interpreter<'_> {
                     &out.stdout
                 };
                 if !dry {
-                    write_file(&path, bytes, append)?;
+                    write_file(path, bytes, *append)?;
                 }
                 // The bytes went to the file and nowhere else: leaving them in
                 // `Output` would let `&&` splice them back into the caller's
@@ -565,12 +651,16 @@ impl Interpreter<'_> {
                 out.stdout.clear();
             }
         }
-        if let Some(path) = stderr {
+        match &errs {
             // Whatever the builtin wrote to `ctx.err` landed in `diag`, so the
             // file holds what a shell's `2>` would have caught.
-            if self.mode == Mode::Run {
-                write_file(&path, &diag, false)?;
+            Errs::File(path) => {
+                if self.mode == Mode::Run {
+                    write_file(path, &diag, false)?;
+                }
             }
+            Errs::ToStdout => self.merged_errs(&diag, &dest, &mut out)?,
+            Errs::Inherit => {}
         }
         Ok(out)
     }
@@ -595,7 +685,7 @@ impl Interpreter<'_> {
         &mut self,
         argv: &[String],
         dest: Dest,
-        stderr: Option<PathBuf>,
+        errs: Errs,
         stdin: Option<&[u8]>,
         flags: Flags,
     ) -> Result<Output> {
@@ -624,17 +714,40 @@ impl Interpreter<'_> {
         // `PATH` as well as of a builtin.
         let streamed = matches!(dest, Dest::Stream) && self.captive;
         let capture = matches!(dest, Dest::Capture);
-        match &dest {
-            Dest::Stream if streamed => command.stdout(Stdio::piped()),
-            Dest::Stream => command.stdout(Stdio::inherit()),
-            Dest::Capture => command.stdout(Stdio::piped()),
-            Dest::File { path, append } => command.stdout(open_file(path, *append)?),
-        };
-        match &stderr {
-            Some(path) => command.stderr(open_file(path, false)?),
-            None if streamed => command.stderr(Stdio::piped()),
-            None => command.stderr(Stdio::inherit()),
-        };
+        // `2>&1` on a program is the one case chore can hand to the OS whole,
+        // and it does: one destination, opened once, and *both* of the child's
+        // descriptors pointed at it. Two handles on one file would each keep
+        // their own offset and overwrite each other's lines; two pipes read
+        // separately would put every line of stderr after every line of
+        // stdout. A `try_clone` shares the offset, which is what `2>&1` means.
+        let mut merged = None;
+        match (&errs, &dest) {
+            (Errs::ToStdout, Dest::File { path, append }) => {
+                let file = open_file(path, *append)?;
+                command.stderr(file.try_clone()?).stdout(file);
+            }
+            (Errs::ToStdout, _) if capture || streamed => {
+                let (reader, writer) = io::pipe()?;
+                command.stderr(writer.try_clone()?).stdout(writer);
+                merged = Some(reader);
+            }
+            _ => {
+                match &dest {
+                    Dest::Stream if streamed => command.stdout(Stdio::piped()),
+                    Dest::Stream => command.stdout(Stdio::inherit()),
+                    Dest::Capture => command.stdout(Stdio::piped()),
+                    Dest::File { path, append } => command.stdout(open_file(path, *append)?),
+                };
+                match &errs {
+                    Errs::File(path) => command.stderr(open_file(path, false)?),
+                    // The remaining `2>&1` is stdout on the terminal, where
+                    // stderr already is: nothing to do, which is the whole of
+                    // what `chore build 2>&1` means.
+                    Errs::ToStdout | Errs::Inherit if streamed => command.stderr(Stdio::piped()),
+                    Errs::ToStdout | Errs::Inherit => command.stderr(Stdio::inherit()),
+                };
+            }
+        }
 
         let child = command.spawn().map_err(|e| {
             if e.kind() == io::ErrorKind::NotFound {
@@ -657,6 +770,11 @@ impl Interpreter<'_> {
             }
             Err(e) => return Err(e),
         };
+        // The parent's own copies of the child's stdout and stderr live in the
+        // `Command` until it is dropped, and a merged pipe nobody has closed
+        // this end of never reports EOF: the read below would wait for a
+        // writer that is this process.
+        drop(command);
         // Fed from a thread, and read back on this one. A pipe holds only a
         // page or two before it blocks, so writing the whole input here and
         // waiting afterwards deadlocks as soon as *both* sides are large: the
@@ -677,7 +795,15 @@ impl Interpreter<'_> {
                     let _ = pipe.write_all(bytes);
                 });
             }
-            if capture || streamed {
+            if let Some(mut reader) = merged {
+                // Drained while the child is still running, for the same
+                // reason the feed above runs on a thread: a pipe holds a page
+                // or two, and a child with more to say than that would block
+                // forever against a parent waiting for it to exit. Both
+                // streams are in here, in the order the child wrote them.
+                reader.read_to_end(&mut out.stdout)?;
+                out.code = child.wait()?.code().unwrap_or(1);
+            } else if capture || streamed {
                 let finished = child.wait_with_output()?;
                 out.code = finished.status.code().unwrap_or(1);
                 out.stdout = finished.stdout;
@@ -730,13 +856,20 @@ impl Interpreter<'_> {
     /// `spawn ./app` silent by design, and `spawn ./app > log` the way to keep
     /// anything.
     ///
-    /// **A bare `>` takes both streams.** `2>&1` is a stream dup, which this
-    /// language does not have, and the honest alternative — stderr to null
-    /// unless a `2>` names a file — throws away the half of the output that
-    /// says why the server died. Writing `> log 2> log` cannot mean it either:
-    /// two handles on one file each keep their own offset and overwrite each
-    /// other. So `>` alone means "everything this thing says goes here", and a
-    /// `2> other` splits the streams when that is what was wanted.
+    /// **A bare `>` takes both streams.** The honest alternative — stderr to
+    /// null unless something names a file — throws away the half of the
+    /// output that says why the server died, and `> log 2> log` cannot mean
+    /// it either: two handles on one file each keep their own offset and
+    /// overwrite each other. So `>` alone means "everything this thing says
+    /// goes here", and a `2> other` splits the streams when that is what was
+    /// wanted.
+    ///
+    /// `> log 2>&1` is accepted and means exactly what the bare `> log` next
+    /// to it already meant — it runs the same code, one file opened once with
+    /// the second descriptor a `try_clone` of the first. It is here because
+    /// `nohup ./app > log 2>&1 &` is the line people arrive with, and a
+    /// runner that refused the habit would be teaching a distinction that
+    /// does not exist on this side.
     ///
     /// # `--dry`
     ///
@@ -744,7 +877,7 @@ impl Interpreter<'_> {
     /// echo every command gets — and spawns nothing. No file is opened either:
     /// a preview that truncated `log` would have done the one thing about this
     /// command that is hard to undo.
-    fn spawn(&mut self, argv: &[String], dest: Dest, stderr: Option<PathBuf>) -> Result<Output> {
+    fn spawn(&mut self, argv: &[String], dest: Dest, errs: Errs) -> Result<Output> {
         let Some((name, args)) = argv[1..].split_first() else {
             return Err(Error::Run {
                 message: "usage: spawn <cmd> [args...]".into(),
@@ -784,7 +917,7 @@ impl Interpreter<'_> {
         // the same environment every other child does.
         self.layer_env(&mut command);
         command.stdin(Stdio::null());
-        let (out, err) = detached_streams(&dest, stderr.as_deref())?;
+        let (out, err) = detached_streams(&dest, &errs)?;
         command.stdout(out).stderr(err);
         detach(&mut command);
 
@@ -898,7 +1031,7 @@ impl Interpreter<'_> {
         // before the echo, for the same reasons they are in `command`: a `>`
         // overrides the destination the caller asked for, and the echo shows
         // the redirection that actually took effect.
-        let (dest, stderr) = self.redirects(&script.redirects, dest)?;
+        let (dest, errs) = self.redirects(&script.redirects, dest)?;
 
         // The body is not echoed. It is the one part of a chorefile with no
         // upper bound on its size, and forty lines of Python between two
@@ -920,7 +1053,7 @@ impl Interpreter<'_> {
             echo: false,
             needed: true,
         };
-        self.run_program(&argv, dest, stderr, Some(script.body.as_bytes()), inner)
+        self.run_program(&argv, dest, errs, Some(script.body.as_bytes()), inner)
             .map_err(|e| missing_interpreter(e, &argv[0]))
     }
 
@@ -969,18 +1102,19 @@ impl Interpreter<'_> {
     }
 
     /// A task used as a command. Its output goes wherever the caller asked,
-    /// so `$(task)`, `task | grep`, `task > f` and `task 2> f` behave like any
-    /// other command.
+    /// so `$(task)`, `task | grep`, `task > f`, `task 2> f` and `task 2>&1`
+    /// behave like any other command.
     fn run_task_command(
         &mut self,
         name: &str,
         args: &[String],
         dest: Dest,
-        stderr: Option<PathBuf>,
+        errs: Errs,
     ) -> Result<Output> {
-        // `2>` on a task diverts everything its commands report, for as long
-        // as the call lasts — the same reach `>` has over what they print.
-        let diag = stderr.as_ref().map(|_| {
+        // `2>` and `2>&1` on a task divert everything its commands report, for
+        // as long as the call lasts — the same reach `>` has over what they
+        // print.
+        let diag = (!matches!(errs, Errs::Inherit)).then(|| {
             let buf = Rc::new(RefCell::new(Vec::new()));
             let prev = mem::replace(&mut self.err, Box::new(Shared(Rc::clone(&buf))));
             (buf, prev)
@@ -1007,13 +1141,21 @@ impl Interpreter<'_> {
         // even when the task failed — that is when its diagnostics matter —
         // but the task's own error is the one worth reporting.
         let mut written = Ok(());
-        if let (Some((buf, prev)), Some(path)) = (diag, stderr) {
+        let mut merged = Vec::new();
+        if let Some((buf, prev)) = diag {
             self.err = prev;
-            if self.mode == Mode::Run {
-                let bytes = Rc::try_unwrap(buf)
-                    .map(RefCell::into_inner)
-                    .unwrap_or_default();
-                written = write_file(&path, &bytes, false);
+            let bytes = Rc::try_unwrap(buf)
+                .map(RefCell::into_inner)
+                .unwrap_or_default();
+            match &errs {
+                Errs::File(path) if self.mode == Mode::Run => {
+                    written = write_file(path, &bytes, false)
+                }
+                Errs::File(_) => {}
+                // Held until the value below has been recorded: where these
+                // bytes go depends on where the task's stdout went, and under
+                // a `>` that file has not been written yet.
+                Errs::ToStdout | Errs::Inherit => merged = bytes,
             }
         }
         let call = called?;
@@ -1041,13 +1183,18 @@ impl Interpreter<'_> {
             // the arguments the task ran with — defaults filled in — because
             // that is the key `call_task` will look it up under.
             self.remember(name, &call.args, &out.stdout);
-            if let Dest::File { path, append } = dest {
+            if let Dest::File { path, append } = &dest {
                 if self.mode == Mode::Run {
-                    write_file(&path, &out.stdout, append)?;
+                    write_file(path, &out.stdout, *append)?;
                 }
                 out.stdout.clear();
             }
         }
+        // After `remember`, deliberately: what a `2>&1` capture reads includes
+        // the diagnostics, and what run-once replays to the *next* caller is
+        // the value the task printed. A later plain `$(task)` must not be
+        // handed this call's stderr.
+        self.merged_errs(&merged, &dest, &mut out)?;
         // Released only now, after `remember` has had its chance to record
         // what the task printed: a parallel sibling blocked on this same task
         // then wakes to the value rather than to a bare "it ran", and reruns
@@ -1403,21 +1550,28 @@ fn borrow(dest: &Dest) -> Dest {
 ///
 /// A capture or a pipe gets null rather than a buffer: nothing will be there
 /// to read it, since the command returns before the child has written a byte.
-/// See [`Interpreter::spawn`] for why a `>` with no `2>` takes both streams,
-/// and why the second handle appends — the first has already truncated the
-/// file, and two appending handles interleave whole writes instead of
-/// overwriting each other.
-fn detached_streams(dest: &Dest, stderr: Option<&Path>) -> Result<(Stdio, Stdio)> {
-    let out = match dest {
-        Dest::File { path, append } => Stdio::from(open_file(path, *append)?),
-        Dest::Stream | Dest::Capture => Stdio::null(),
-    };
-    let err = match (stderr, dest) {
-        (Some(path), _) => Stdio::from(open_file(path, false)?),
-        (None, Dest::File { path, .. }) => Stdio::from(open_file(path, true)?),
-        (None, _) => Stdio::null(),
-    };
-    Ok((out, err))
+/// See [`Interpreter::spawn`] for why a `>` without a `2>` takes both streams.
+///
+/// `2>&1` and no redirect at all are the same case here — that is the promise
+/// `spawn`'s docs make — so the file is opened once and the child's stderr is
+/// a `try_clone` of its stdout: one description, one offset, and no chance of
+/// the two streams overwriting each other's lines.
+fn detached_streams(dest: &Dest, errs: &Errs) -> Result<(Stdio, Stdio)> {
+    if let (Errs::File(path), _) = (errs, dest) {
+        let out = match dest {
+            Dest::File { path, append } => Stdio::from(open_file(path, *append)?),
+            Dest::Stream | Dest::Capture => Stdio::null(),
+        };
+        return Ok((out, Stdio::from(open_file(path, false)?)));
+    }
+    match dest {
+        Dest::File { path, append } => {
+            let file = open_file(path, *append)?;
+            let dup = file.try_clone()?;
+            Ok((Stdio::from(file), Stdio::from(dup)))
+        }
+        Dest::Stream | Dest::Capture => Ok((Stdio::null(), Stdio::null())),
+    }
 }
 
 /// Cut the child loose from this process's terminal and signals.

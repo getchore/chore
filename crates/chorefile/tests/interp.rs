@@ -83,7 +83,16 @@ fn cmd_with(name: &str, args: Vec<Word>, redirects: Vec<Redirect>) -> Chain {
 fn redirect(kind: RedirectKind, target: &str) -> Redirect {
     Redirect {
         kind,
-        target: lit(target),
+        target: Some(lit(target)),
+        span: sp(),
+    }
+}
+
+/// `2>&1`, the one redirect with no target word.
+fn merge_streams() -> Redirect {
+    Redirect {
+        kind: RedirectKind::StderrToStdout,
+        target: None,
         span: sp(),
     }
 }
@@ -2111,6 +2120,224 @@ fn a_spawned_program_is_given_the_bindings() {
 }
 
 // ---------------------------------------------------------------------------
+// 2>&1
+// ---------------------------------------------------------------------------
+
+/// A real child with something to say on both streams, so the file proves the
+/// two descriptors share one offset: two handles would each start at zero and
+/// the second line would sit on top of the first.
+#[cfg(unix)]
+#[test]
+fn a_programs_streams_share_one_file_handle() {
+    // Written in the order sh writes them, and whole: a clobbered file would
+    // read `err\nut` or similar.
+    for redirects in [
+        vec![redirect(RedirectKind::Stdout, "both.txt"), merge_streams()],
+        // The order sh reads differently, and chore does not.
+        vec![merge_streams(), redirect(RedirectKind::Stdout, "both.txt")],
+    ] {
+        let dir = Temp::new("merge-file");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![run(cmd_with(
+                "sh",
+                vec![
+                    lit("-c"),
+                    quoted(vec![text("echo a-long-line-on-stdout; echo err >&2")]),
+                ],
+                redirects,
+            ))],
+        )]);
+        exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path()).ok();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("both.txt")).unwrap(),
+            "a-long-line-on-stdout\nerr\n"
+        );
+    }
+}
+
+/// `x=$(cmd 2>&1)` takes both streams, which is the whole reason the
+/// justfile it came from wrote `2>&1`.
+#[cfg(unix)]
+#[test]
+fn a_captured_program_with_a_merge_takes_both_streams() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            assign(
+                "both",
+                unquoted(vec![part(PartKind::Capture(Box::new(cmd_with(
+                    "sh",
+                    vec![lit("-c"), quoted(vec![text("echo out; echo err >&2")])],
+                    vec![merge_streams()],
+                ))))]),
+            ),
+            run(cmd("count", vec![unquoted(vec![var("both")])])),
+        ],
+    )]);
+    let ran = go(&f, "t", &[]);
+    // Both lines are in the value — split on whitespace, that is two words —
+    // and neither reached the terminal.
+    assert_eq!(ran.printed(), ["2"]);
+    assert_eq!(ran.err, "");
+}
+
+/// A pipe reads the merged stream too: `cmd 2>&1 | grep` is the form people
+/// write to search a build's diagnostics.
+#[cfg(unix)]
+#[test]
+fn a_merged_program_pipes_both_streams_onward() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            assign(
+                "lines",
+                unquoted(vec![part(PartKind::Capture(Box::new(Chain::Pipe(
+                    Box::new(cmd_with(
+                        "sh",
+                        vec![lit("-c"), quoted(vec![text("echo out; echo err >&2")])],
+                        vec![merge_streams()],
+                    )),
+                    Box::new(cmd("sh", vec![lit("-c"), quoted(vec![text("wc -l")])])),
+                ))))]),
+            ),
+            run(cmd("say", vec![unquoted(vec![var("lines")])])),
+        ],
+    )]);
+    // Both lines went down the pipe, so `wc -l` counted two.
+    assert_eq!(go(&f, "t", &[]).printed(), ["2"]);
+}
+
+/// A builtin's diagnostics go through chore rather than through a pipe, so
+/// they take the other route into the capture — and must arrive all the same.
+#[test]
+fn a_builtins_diagnostic_reaches_a_merged_capture() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            assign(
+                "both",
+                unquoted(vec![part(PartKind::Capture(Box::new(cmd_with(
+                    "warn",
+                    vec![lit("careful")],
+                    vec![merge_streams()],
+                ))))]),
+            ),
+            run(cmd("count", vec![unquoted(vec![var("both")])])),
+        ],
+    )]);
+    let ran = go(&f, "t", &[]);
+    // "to stdout" and "careful": three words, and nothing on the terminal.
+    assert_eq!(ran.printed(), ["3"]);
+    assert_eq!(ran.err, "");
+}
+
+/// A builtin that fails hard *is* its diagnostic, and a `>` file with `2>&1`
+/// is where it has to land — the same promise `2> file` already keeps.
+#[test]
+fn a_merge_catches_a_builtin_that_fails_hard() {
+    let dir = Temp::new("merge-error");
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            Stmt::Try(cmd_with(
+                "boom",
+                vec![lit("no"), lit("such"), lit("file")],
+                vec![redirect(RedirectKind::Stdout, "both.txt"), merge_streams()],
+            )),
+            run(cmd("say", vec![lit("done")])),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("both.txt")).unwrap(),
+        "no such file\n"
+    );
+    assert_eq!(ran.err, "");
+    assert_eq!(ran.printed(), ["done"]);
+}
+
+/// `env NAME` on a miss answers with an exit code and a diagnostic, and it is
+/// answered by the interpreter rather than by the builtin table — so it has
+/// its own path to the merged destination.
+#[test]
+fn a_merged_env_miss_puts_its_diagnostic_in_the_value() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            assign(
+                "answer",
+                unquoted(vec![part(PartKind::Capture(Box::new(Chain::Or(
+                    Box::new(cmd_with(
+                        "env",
+                        vec![lit("CHOREFILE_TEST_DEFINITELY_UNSET")],
+                        vec![merge_streams()],
+                    )),
+                    Box::new(cmd("say", vec![lit("fallback")])),
+                ))))]),
+            ),
+            run(cmd("count", vec![unquoted(vec![var("answer")])])),
+        ],
+    )]);
+    let ran = go(&f, "t", &[]);
+    // "env: NAME is not set" — five words — then "fallback".
+    assert_eq!(ran.printed(), ["6"]);
+    assert_eq!(ran.err, "");
+}
+
+/// A task's `2>&1` reaches every command inside the call, exactly as its `2>`
+/// does, and the merged bytes follow the task's stdout into the file.
+#[test]
+fn a_task_merge_diverts_what_its_commands_report() {
+    let dir = Temp::new("task-merge");
+    let f = file(vec![
+        task("inner", &[], vec![run(cmd("warn", vec![lit("careful")]))]),
+        task(
+            "t",
+            &[],
+            vec![run(cmd_with(
+                "inner",
+                vec![],
+                vec![redirect(RedirectKind::Stdout, "both.txt"), merge_streams()],
+            ))],
+        ),
+    ]);
+    let ran = exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path());
+    assert_eq!(ran.printed(), Vec::<String>::new());
+    assert_eq!(ran.err, "");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("both.txt")).unwrap(),
+        "to stdout\ncareful\n"
+    );
+}
+
+/// With no `>` on the command, stdout is the run's own output — so that is
+/// where the diagnostics go. On a terminal the two are the same place and the
+/// line reads as the no-op it is; here the harness keeps them apart, which is
+/// what makes the rule visible at all.
+#[test]
+fn a_merge_with_no_redirect_sends_diagnostics_to_stdout() {
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![run(cmd_with(
+            "warn",
+            vec![lit("careful")],
+            vec![merge_streams()],
+        ))],
+    )]);
+    let ran = go(&f, "t", &[]);
+    assert_eq!(ran.printed(), ["to stdout", "careful"]);
+    assert_eq!(ran.err, "");
+}
+
+// ---------------------------------------------------------------------------
 // Echo and --dry
 // ---------------------------------------------------------------------------
 
@@ -2131,6 +2358,37 @@ fn every_command_is_echoed_with_a_dollar_prefix() {
     let dir = Temp::new("echo");
     let ran = exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path());
     assert_eq!(ran.echoed(), [r#"$ say -G "MinGW Makefiles" >> log.txt"#]);
+}
+
+/// The echo is the line as written, `2>&1` in the position it was typed —
+/// chore reads the two orders the same way, but a preview that reordered
+/// them would be describing a chorefile nobody wrote.
+#[test]
+fn a_merge_is_echoed_where_it_was_written() {
+    let dir = Temp::new("merge-echo");
+    let f = file(vec![task(
+        "t",
+        &[],
+        vec![
+            run(cmd_with(
+                "say",
+                vec![lit("one")],
+                vec![redirect(RedirectKind::Stdout, "log.txt"), merge_streams()],
+            )),
+            run(cmd_with(
+                "say",
+                vec![lit("two")],
+                vec![merge_streams(), redirect(RedirectKind::Stdout, "log.txt")],
+            )),
+        ],
+    )]);
+    let ran = exec(&f, "t", &[], Mode::Dry, Repeat::Once, dir.path());
+    assert_eq!(
+        ran.echoed(),
+        ["$ say one > log.txt 2>&1", "$ say two 2>&1 > log.txt"]
+    );
+    // A preview opens no redirect file, `2>&1` or not.
+    assert!(!dir.path().join("log.txt").exists());
 }
 
 #[test]
@@ -2955,35 +3213,41 @@ fn dry_spawns_nothing_and_opens_no_redirect() {
 }
 
 /// A real child, and the redirect rule that makes `spawn` worth having: one
-/// `>` catches both of its streams, because there is no `2>&1` to write.
+/// `>` catches both of its streams. A `2>&1` beside it is accepted and means
+/// the same thing, because `nohup ./app > log 2>&1 &` is the line people
+/// arrive with.
 #[test]
 #[cfg(unix)]
 fn a_spawned_program_keeps_running_and_both_streams_reach_one_file() {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = Temp::new("spawn");
-    let script = dir.path().join("noisy.sh");
-    std::fs::write(&script, "#!/bin/sh\nsleep 0.2\necho out\necho err >&2\n").unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for redirects in [
+        vec![redirect(RedirectKind::Stdout, "both.txt")],
+        vec![redirect(RedirectKind::Stdout, "both.txt"), merge_streams()],
+    ] {
+        let dir = Temp::new("spawn");
+        let script = dir.path().join("noisy.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 0.2\necho out\necho err >&2\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let f = file(vec![task(
-        "t",
-        &[],
-        vec![run(cmd_with(
-            "spawn",
-            vec![lit(&chorefile::vars::display(&script))],
-            vec![redirect(RedirectKind::Stdout, "both.txt")],
-        ))],
-    )]);
-    let ran = exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path());
-    ran.ok();
-    // The run is over while the child is still sleeping: nothing waited.
-    let log = dir.path().join("both.txt");
-    assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
+        let f = file(vec![task(
+            "t",
+            &[],
+            vec![run(cmd_with(
+                "spawn",
+                vec![lit(&chorefile::vars::display(&script))],
+                redirects,
+            ))],
+        )]);
+        let ran = exec(&f, "t", &[], Mode::Run, Repeat::Once, dir.path());
+        ran.ok();
+        // The run is over while the child is still sleeping: nothing waited.
+        let log = dir.path().join("both.txt");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
 
-    let text = wait_for_text(&log);
-    assert!(text.contains("out"), "{text}");
-    assert!(text.contains("err"), "{text}");
+        let text = wait_for_text(&log);
+        assert_eq!(text, "out\nerr\n");
+    }
 }
 
 /// The child `spawn` most often starts is the server a task just configured
