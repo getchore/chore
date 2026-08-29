@@ -44,6 +44,23 @@ fn locate(error: Error, file: &Path) -> Error {
     }
 }
 
+/// Say which parameter of which task an error came out of, keeping its span.
+///
+/// A default is an ordinary word, so everything that can go wrong in a word can
+/// go wrong here — and the reader is looking at a task header, where "expected
+/// a default value after `=`" could belong to any of them. The prefix is added
+/// on the way out rather than passed down, so the word parser stays unaware of
+/// where it was called from.
+fn in_param(error: Error, task: &str, param: &str) -> Error {
+    match error {
+        Error::Syntax { message, at } => Error::Syntax {
+            message: format!("in parameter `{param}` of task `{task}`: {message}"),
+            at,
+        },
+        other => other,
+    }
+}
+
 /// Words that read as operators in a condition rather than as arguments.
 const COMPARE_OPS: [(&str, CompareOp); 5] = [
     ("==", CompareOp::Eq),
@@ -149,8 +166,26 @@ impl<'a> Parser<'a> {
 
     fn file(mut self) -> Result<File> {
         let mut file = File::default();
-        // The comment line directly above a task becomes its description; a
-        // blank line in between breaks the association.
+        // The description is the *first* line of the contiguous comment block
+        // directly above a task. A block is a run of `#` lines with nothing
+        // between them: a blank line, or any statement, ends it, which is what
+        // keeps a file header separated by a blank line from becoming the first
+        // task's description.
+        //
+        // First line rather than last because a block that says more than one
+        // thing says the summary first and the caveats after it, and `list` has
+        // room for one line. The last line of
+        //
+        //     # Run the app under the debugger.
+        //     # In CI it skips the styling.
+        //
+        // is true of the task and useless as its name in a list.
+        //
+        // A blank `#` inside the block is skipped rather than treated as a
+        // paragraph break: the rule is "the first non-empty line of the block",
+        // which needs no second concept and reads the same from either end. A
+        // block that is entirely blank leaves the task with no description at
+        // all, since there was never a line to show.
         let mut doc: Option<String> = None;
         loop {
             match self.kind().clone() {
@@ -163,7 +198,9 @@ impl<'a> Parser<'a> {
                     let text = strip_doc(&text);
                     self.bump();
                     self.eat(&Token::Newline);
-                    doc = Some(text);
+                    if doc.is_none() && !text.trim().is_empty() {
+                        doc = Some(text);
+                    }
                 }
                 Token::Word { .. } if self.at_keyword("task") => {
                     file.tasks.push(self.task(doc.take())?);
@@ -325,7 +362,7 @@ impl<'a> Parser<'a> {
                 );
             }
         };
-        let params = self.params()?;
+        let params = self.params(&name)?;
         let (body, end) = self.block()?;
         Ok(Task {
             name,
@@ -349,17 +386,29 @@ impl<'a> Parser<'a> {
     /// A default is left as a [`Word`]: quoting, `$name` and `$( )` all work,
     /// and the interpreter evaluates it at call time, in the called task's
     /// scope, only when the caller left the parameter out.
-    fn params(&mut self) -> Result<Vec<Param>> {
+    ///
+    /// Every error out of here names the parameter and the task. A header is
+    /// the one place where a mistake lands the parser somewhere that has
+    /// nothing to do with what went wrong: the list simply stops at the first
+    /// token that is not a word, and `block` then complains that it expected
+    /// `{`. "expected `{`, found `=`" is true and tells nobody which of four
+    /// parameters is malformed, so the parameter's name is carried into the
+    /// message rather than left for the reader to find by column number.
+    fn params(&mut self, task: &str) -> Result<Vec<Param>> {
         let mut params: Vec<Param> = Vec::new();
         while let Token::Word { text, quoted } = self.kind().clone() {
             if quoted || !lex::is_ident(&text) {
-                return self.err(format!("task parameter `{text}` must be a name"));
+                return self.err(format!(
+                    "in the header of task `{task}`: parameter `{text}` must be a name — \
+                     letters, digits and `_`, not starting with a digit; a default follows \
+                     it as `name=value`"
+                ));
             }
             let name_span = self.bump().span;
             let default = match self.kind() {
                 Token::Assign => {
                     let eq = self.bump().span;
-                    Some(self.default(eq)?)
+                    Some(self.default(eq).map_err(|e| in_param(e, task, &text))?)
                 }
                 _ => None,
             };
@@ -385,6 +434,26 @@ impl<'a> Parser<'a> {
             }
             params.push(param);
         }
+        // The list ran out of words. `{` is what should be here, and a newline
+        // before it is allowed, so those two go on to `block`, which reports a
+        // missing body in the words it has always used. Anything else is a
+        // broken parameter, and belongs to the header rather than to the body
+        // that has not started yet.
+        match self.kind() {
+            Token::LBrace | Token::Newline | Token::Eof => {}
+            other => {
+                let after = match params.last() {
+                    Some(p) => format!(", after parameter `{}`", p.name),
+                    None => String::new(),
+                };
+                return self.err(format!(
+                    "in the header of task `{task}`: expected a parameter name or `{{`, \
+                     found {}{after}; a parameter is a name, optionally followed by `=` \
+                     and one default value",
+                    other.describe()
+                ));
+            }
+        }
         Ok(params)
     }
 
@@ -393,9 +462,19 @@ impl<'a> Parser<'a> {
     /// `env=` with nothing after it is the empty string, exactly as the
     /// assignment `env=` is: one spelling of `name=`, one meaning. It still
     /// makes the parameter optional, and `env=""` says the same thing louder.
+    ///
+    /// The default has to be *touching* the `=`. The lexer keeps no whitespace,
+    /// so `force=bin` and `force= bin` arrive as the same three tokens, and the
+    /// only thing that tells them apart is whether the word starts exactly
+    /// where the `=` ended. Without that test, `task install force= bin=/usr/local/bin`
+    /// swallowed `bin` as `force`'s default and then met the `=` of `bin=` with
+    /// "expected `{`" — the promise that `env=` is the empty string held only
+    /// when nothing followed on the line.
     fn default(&mut self, eq: Span) -> Result<Word> {
         match self.kind() {
-            Token::Word { .. } => self.word("a default value after `=`"),
+            Token::Word { .. } if self.span().start == eq.end => {
+                self.word("a default value after `=`")
+            }
             _ => Ok(Word {
                 parts: Vec::new(),
                 quoted: true,

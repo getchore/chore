@@ -492,6 +492,61 @@ fn an_empty_default_is_the_empty_string() {
 }
 
 #[test]
+fn an_empty_default_may_be_followed_by_another_parameter() {
+    // The lexer keeps no whitespace, so `force= bin` and `force=bin` reach the
+    // parser as the same tokens and only the spans tell them apart. Getting
+    // this wrong swallowed `bin` as `force`'s default and then failed on the
+    // `=` of `bin=` with a complaint about a missing `{`.
+    let f = file("task install force= bin=/usr/local/bin { }");
+    assert_eq!(
+        render_params(&f.tasks[0]),
+        ["force=\"\"", "bin=/usr/local/bin"]
+    );
+    assert!(f.tasks[0].params.iter().all(|p| !p.required()));
+
+    let f = file("task install force= { }");
+    assert_eq!(render_params(&f.tasks[0]), ["force=\"\""]);
+
+    let f = file("task install force= bin= { }");
+    assert_eq!(render_params(&f.tasks[0]), ["force=\"\"", "bin=\"\""]);
+
+    let f = file("task install force=\"\" bin=x { }");
+    assert_eq!(render_params(&f.tasks[0]), ["force=\"\"", "bin=x"]);
+    assert!(f.tasks[0].params.iter().all(|p| !p.required()));
+}
+
+#[test]
+fn a_required_parameter_after_an_empty_default_is_still_rejected() {
+    // `force=` is optional however it is spelled, so what follows it may not
+    // be required — the same rule, reached through the empty default.
+    let message = error("task install force= bin { }");
+    assert!(
+        message.contains("required parameter `bin`")
+            && message.contains("optional parameter `force`"),
+        "unhelpful message: {message}"
+    );
+}
+
+#[test]
+fn a_parameter_error_names_the_parameter_and_the_task() {
+    let message = error("task t a=$0 { }");
+    assert!(
+        message.contains("in parameter `a` of task `t`"),
+        "message was: {message}"
+    );
+
+    let message = error("task t a|b { }");
+    assert!(
+        message.contains("in the header of task `t`") && message.contains("after parameter `a`"),
+        "message was: {message}"
+    );
+    assert!(
+        !message.contains("expected `{`,"),
+        "the header error should not read as a missing body: {message}"
+    );
+}
+
+#[test]
 fn a_required_parameter_cannot_follow_an_optional_one() {
     let message = error("task deploy env=staging target {\n echo $1\n}");
     assert!(
@@ -758,9 +813,61 @@ fn a_blank_line_breaks_the_doc_association() {
 }
 
 #[test]
-fn the_last_comment_line_wins() {
+fn the_first_line_of_the_block_wins() {
     let f = file("# first\n# second\ntask build { x }\n");
-    assert_eq!(f.tasks[0].doc.as_deref(), Some("second"));
+    assert_eq!(f.tasks[0].doc.as_deref(), Some("first"));
+}
+
+#[test]
+fn a_multi_line_comment_block_describes_the_task_by_its_first_line() {
+    let f = file(
+        "# Run the app under the debugger.\n\
+         # In CI, where CI=true, skips that styling;\n\
+         # else falls back to ad-hoc.\n\
+         task run { x }\n",
+    );
+    assert_eq!(
+        f.tasks[0].doc.as_deref(),
+        Some("Run the app under the debugger.")
+    );
+}
+
+#[test]
+fn a_blank_line_inside_the_block_starts_a_new_one() {
+    // The header paragraph is separated by a blank line, so it is a comment
+    // about the file and not a description of the task under it.
+    let f = file("# File header\n\n# Build it\n# how, exactly\ntask build { x }\n");
+    assert_eq!(f.tasks[0].doc.as_deref(), Some("Build it"));
+
+    let f = file("# File header\n# second line\n\ntask build { x }\n");
+    assert_eq!(f.tasks[0].doc, None);
+}
+
+#[test]
+fn a_blank_comment_line_is_skipped_rather_than_ending_the_block() {
+    // "the first non-empty line of the block": `#` alone is not a line to show
+    // in a listing, and a block of nothing but those leaves no description.
+    let f = file("#\n# Build it\ntask build { x }\n");
+    assert_eq!(f.tasks[0].doc.as_deref(), Some("Build it"));
+
+    let f = file("#\n#\ntask build { x }\n");
+    assert_eq!(f.tasks[0].doc, None);
+}
+
+#[test]
+fn each_task_takes_the_block_above_itself() {
+    let f =
+        file("# Build it\n# details\ntask build { x }\n# Test it\n# details\ntask test { y }\n");
+    assert_eq!(f.tasks[0].doc.as_deref(), Some("Build it"));
+    assert_eq!(f.tasks[1].doc.as_deref(), Some("Test it"));
+}
+
+#[test]
+fn a_comment_below_a_task_does_not_describe_the_one_above_it() {
+    // Two tasks back to back, with the block belonging to the second.
+    let f = file("task build { x }\n# Test it\ntask test { y }\n");
+    assert_eq!(f.tasks[0].doc, None);
+    assert_eq!(f.tasks[1].doc.as_deref(), Some("Test it"));
 }
 
 #[test]

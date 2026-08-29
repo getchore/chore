@@ -18,8 +18,8 @@ pub enum Token {
         text: String,
         quoted: bool,
     },
-    /// A `#` comment. Kept, because the one directly above a task is its
-    /// description.
+    /// A `#` comment. Kept, because the block directly above a task carries
+    /// its description.
     Comment(String),
     /// The raw text between the braces of a `script` block, verbatim and
     /// undecoded: the span is exactly the bytes it came from. It always sits

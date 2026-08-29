@@ -524,8 +524,11 @@ capture read it as they read any command's. Inside a `for` it leaves the task, n
         syntax: "task name [param[=default]...] { }",
         example: "# Build the release binary\ntask build target { cargo build --release \
 --target $target }",
-        meaning: "Define a task. Parameters bind to `$1`, `$2`, ... in the body. The comment \
-line directly above the `task` is its description, which `chore list` prints.",
+        meaning: "Define a task. Parameters bind to `$1`, `$2`, ... in the body, and a \
+parameter written `name=value` is optional; `name=` alone defaults to the empty string. The \
+task's description, which `chore list` prints, is the first line of the contiguous block of \
+`#` comment lines directly above the `task` — a blank line ends the block, so a file header \
+is not a description.",
     },
     Form {
         name: "require",

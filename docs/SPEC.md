@@ -30,8 +30,10 @@ is what `chore completions` runs.
 
 One task per line, `name<TAB>description`, in the same order as `chore list`.
 It is the format a completion script reads: no padding to strip, no JSON, and
-so no dependency on `jq`. A task with no comment above it prints its name, the
-tab, and nothing after it, so every line has the same two fields.
+so no dependency on `jq`. A task with no description prints its name, the tab,
+and nothing after it, so every line has the same two fields. The description is
+the one line described under [Descriptions](#descriptions), never the whole
+comment block.
 
 ### init
 
@@ -108,7 +110,33 @@ include libs/chorefile as libs       tasks become libs::build
 require 1.4.0                        the oldest chore that can run this file
 ```
 
-The comment line directly above a `task` is its description.
+### Descriptions
+
+A task's description is the **first line** of the contiguous block of `#` lines
+directly above it. A block is a run of comment lines with nothing between them;
+a blank line or any statement ends one, so a file header separated by a blank
+line describes the file rather than the first task.
+
+```sh
+# Run the app under the debugger.
+# In CI, where CI=true, skips that styling;
+# else falls back to ad-hoc.
+task run { ... }               # description: "Run the app under the debugger."
+```
+
+First line rather than last because a block that says more than one thing says
+the summary first and the caveats after it, and a listing has room for one line.
+A single comment above a task is its own first line, so the common case reads
+the way it always did.
+
+A blank `#` inside the block is skipped rather than read as a paragraph break:
+the rule is the first **non-empty** line of the block, which needs no second
+concept. A block of nothing but blank `#` lines leaves the task with no
+description, since there was never a line to show.
+
+The description is one line wherever it appears: `chore list`, `list --json`
+and `list --names` all carry that one line, and the rest of the block stays in
+the file for whoever opens it.
 
 ### Conditions
 
@@ -270,7 +298,21 @@ counts what the call bound, defaults included, and `$@` is that list, which is
 how a task forwards itself to another.
 
 `env=` with nothing after it defaults to the empty string, exactly as the
-assignment `env=` does. `env=""` says the same thing more clearly.
+assignment `env=` does. `env=""` says the same thing more clearly. "Nothing
+after it" means nothing *touching* it: the default is the word written against
+the `=`, so `task install force= bin=/usr/local/bin` declares two optional
+parameters rather than giving `force` a default of `bin`. It is still an
+optional parameter, so a required one may not follow it.
+
+An error anywhere in a header names the parameter it came from:
+
+```
+in parameter `force` of task `install`: parameters are numbered from `$1`
+```
+
+The parser otherwise stops at the first token that is not a parameter and
+reports a missing `{`, which is true and says nothing about which of four
+parameters is the wrong one.
 
 A task taking a variable number of arguments declares none and reads `$@`:
 

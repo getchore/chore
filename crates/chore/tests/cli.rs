@@ -187,6 +187,58 @@ fn list_shows_names_and_docs_in_source_order() {
     assert!(run.stdout.contains("build the project"), "{}", run.stdout);
 }
 
+/// A task's description is the first line of the comment block above it, so a
+/// header separated by a blank line describes the file and a multi-line block
+/// leads with the summary rather than trailing off into its own caveats.
+#[test]
+fn list_shows_the_first_line_of_the_comment_block_above_each_task() {
+    let dir = Dir::new();
+    dir.chorefile(
+        "# Tasks for this project.\n\
+         # Not a description of anything below.\n\
+         \n\
+         # Run the app under the debugger.\n\
+         # In CI, where CI=true, skips that styling;\n\
+         # else falls back to ad-hoc.\n\
+         task run {\n    echo running\n}\n\
+         \n\
+         # Build it.\n\
+         task build {\n    echo building\n}\n",
+    );
+    let run = chore(&dir, &["list", "--names"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "run\tRun the app under the debugger.\nbuild\tBuild it.\n"
+    );
+
+    let run = chore(&dir, &["list"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(
+        !run.stdout.contains("ad-hoc") && !run.stdout.contains("Not a description"),
+        "the rest of the block leaked into the listing:\n{}",
+        run.stdout
+    );
+}
+
+/// A block separated from the task by a blank line is a comment about the file,
+/// not a description, and a task takes only the block that touches it.
+#[test]
+fn list_leaves_a_detached_comment_block_out() {
+    let dir = Dir::new();
+    dir.chorefile(
+        "# File header\n\
+         # second line\n\
+         \n\
+         task build {\n    echo building\n}\n\
+         # Test it.\n\
+         task test {\n    echo testing\n}\n",
+    );
+    let run = chore(&dir, &["list", "--names"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.stdout, "build\t\ntest\tTest it.\n");
+}
+
 /// The task rows of a `chore list`: everything after the line that says which
 /// chorefile answered.
 fn task_lines(stdout: &str) -> impl Iterator<Item = &str> {

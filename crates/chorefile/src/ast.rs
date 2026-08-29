@@ -54,7 +54,12 @@ pub struct Task {
     /// refuses it rather than letting a chorefile declare something no caller
     /// can satisfy.
     pub params: Vec<Param>,
-    /// The comment line directly above the task, shown by `list`.
+    /// The task's one-line description, shown by `list`.
+    ///
+    /// It is the first non-empty line of the contiguous `#` block directly
+    /// above the task — one line, however many the block holds, because that
+    /// is what a listing has room for and the summary is what a block leads
+    /// with. A blank line ends a block, so a file header is not a description.
     pub doc: Option<String>,
     pub body: Block,
     pub span: Span,

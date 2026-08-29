@@ -7,7 +7,7 @@
 //!
 //! What it writes is deliberately not a tutorial. Four tasks, one of them
 //! calling the other two, is enough to show the shapes that matter: a task
-//! body, the comment above a task becoming its description in `chore list`,
+//! body, the comment block above a task describing it in `chore list`,
 //! and a task calling another by name. Anything longer would be read once and
 //! deleted, and the language reference already lives in `chore help`.
 //!
@@ -27,7 +27,7 @@ use crate::style::Style;
 /// non-portable, and a file that lints against the tool that wrote it is a
 /// poor first impression. The e2e tests run `check` on what this writes.
 const STARTER: &str = r#"# Project tasks. `chore list` shows them, `chore <task>` runs one.
-# The comment directly above a task is the description `chore list` prints.
+# The first line of the comment block above a task is what `chore list` prints.
 
 # Say hello, so there is something to run before anything else is filled in.
 task hello {
@@ -120,9 +120,9 @@ mod tests {
         }
     }
 
-    /// `chore list` reads the comment directly above a `task` as its
-    /// description, and demonstrating that convention is half the point of
-    /// shipping a starter at all.
+    /// `chore list` reads the first line of the comment block directly above a
+    /// `task` as its description, and demonstrating that convention is half the
+    /// point of shipping a starter at all.
     #[test]
     fn every_starter_task_has_a_description_above_it() {
         let lines: Vec<&str> = STARTER.lines().collect();
