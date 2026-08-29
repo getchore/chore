@@ -1702,7 +1702,7 @@ fn keep_std_handles_here() {
     const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
     const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetStdHandle(id: u32) -> Handle;
         fn SetHandleInformation(handle: Handle, mask: u32, flags: u32) -> i32;
     }
