@@ -1669,12 +1669,57 @@ fn detach(command: &mut process::Command) {
 /// Windows has no process groups to inherit, so the two flags say it directly:
 /// no console (`DETACHED_PROCESS`) and no share in this one's `^C`
 /// (`CREATE_NEW_PROCESS_GROUP`).
+///
+/// And one thing Unix gets for free: a child there receives exactly the three
+/// descriptors it was handed, because everything else is close-on-exec. A
+/// Windows child receives *every* handle in this process that is flagged
+/// inheritable — and when chore's own stdout is a pipe, as it is under a CI
+/// runner, `chore … | tee` or a test harness, that pipe's handle arrived
+/// flagged, so the spawned server would hold the pipe open and whoever reads
+/// it would wait for a process that was never meant to end. So before the
+/// spawn, chore's three standard handles lose the flag. It costs later
+/// children nothing: a `Stdio::inherit` duplicates the handle as inheritable
+/// at spawn time rather than trusting the flag on the original.
 #[cfg(windows)]
 fn detach(command: &mut process::Command) {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    keep_std_handles_here();
+}
+
+/// Clear `HANDLE_FLAG_INHERIT` on this process's stdin, stdout and stderr.
+/// See [`detach`] for why. A handle that is missing or invalid — a service
+/// with no console, say — is skipped, since there is nothing to leak.
+#[cfg(windows)]
+fn keep_std_handles_here() {
+    use std::ffi::c_void;
+    type Handle = *mut c_void;
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(id: u32) -> Handle;
+        fn SetHandleInformation(handle: Handle, mask: u32, flags: u32) -> i32;
+    }
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: both are plain kernel32 calls on a handle this process owns;
+        // neither takes a pointer we allocated, and a bad handle is answered
+        // with a failure code rather than undefined behaviour.
+        unsafe {
+            let handle = GetStdHandle(id);
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                continue;
+            }
+            // Failure means the flag stays: the spawn still happens, the
+            // child merely keeps the handle, which is what it did before.
+            let _ = SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+        }
+    }
 }
 
 /// Somewhere that is neither: the child still runs, and still outlives the
