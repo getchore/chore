@@ -33,6 +33,8 @@ use crate::style::Style;
 /// first file is not what this is for.
 const STARTER: &str = r#"# Project tasks. `chore list` shows them, `chore <task>` runs one.
 # The first line of the comment block above a task is what `chore list` prints.
+# Named `chorefile`, lowercase; chore finds it by walking up from wherever it runs.
+# When it grows, `include rust.chore` pulls in a fragment named for what it covers.
 
 # Say hello, so there is something to run before anything else is filled in.
 task hello {

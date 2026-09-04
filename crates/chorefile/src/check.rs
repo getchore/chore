@@ -753,7 +753,7 @@ impl<'a> Checker<'a> {
     /// `chore` finds the chorefile governing a directory by walking up from
     /// the working directory to the first file named exactly `chorefile`, and
     /// the directory holding it becomes `$ROOT`. That rule is the whole reason
-    /// `include` has its own extension: a fragment named `libs/tasks.chore`
+    /// `include` has its own extension: a fragment named `libs/libs.chore`
     /// cannot be reached by that walk, so it only ever means what its includer
     /// makes it mean. Name the same fragment `libs/chorefile` and it acquires
     /// a second life — `cd libs && chore <anything>` stops at it, showing only
@@ -800,7 +800,16 @@ impl<'a> Checker<'a> {
             .map(|p| self.relative(p))
             .filter(|d| !d.is_empty())
             .unwrap_or_else(|| ".".to_string());
-        let instead = format!("{dir}/tasks.{FILE_EXT}");
+        // Named for the directory it covers, which is what a fragment's name
+        // should say: `web/web.chore`, not a second `tasks.chore` in every
+        // directory of the tree.
+        let stem = resolved
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.is_empty())
+            .unwrap_or("tasks");
+        let instead = format!("{dir}/{stem}.{FILE_EXT}");
 
         self.push(
             Diagnostic::warning(

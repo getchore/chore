@@ -91,6 +91,9 @@ pub enum Error {
     /// No chorefile in the working directory or any parent.
     NotFound {
         from: PathBuf,
+        /// A file in `from` that was probably meant instead, if any: see
+        /// [`crate::near_miss`].
+        near: Option<String>,
     },
     Io(std::io::Error),
 }
@@ -102,12 +105,15 @@ impl fmt::Display for Error {
                 write!(f, "{}: {message}", crate::vars::display(&at.file))
             }
             Self::Run { message } => write!(f, "{message}"),
-            Self::NotFound { from } => write!(
-                f,
-                "no {} found in {} or any parent directory",
-                crate::FILE_NAME,
-                crate::vars::display(from)
-            ),
+            Self::NotFound { from, near } => {
+                write!(
+                    f,
+                    "no {} found in {} or any parent directory",
+                    crate::FILE_NAME,
+                    crate::vars::display(from)
+                )?;
+                write!(f, "\n  help: {}", not_found_help(near.as_deref()))
+            }
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -118,5 +124,32 @@ impl std::error::Error for Error {}
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Self::Io(e)
+    }
+}
+
+/// What to do about a directory with no chorefile, given what is there.
+///
+/// Three cases, each the one thing an agent or a person gets wrong: the name
+/// spelled with a capital, which opens fine on a case-insensitive disk and
+/// not on Linux; a `.chore` fragment mistaken for the file `chore` reads on
+/// its own; and an empty directory, where `init` is the answer.
+fn not_found_help(near: Option<&str>) -> String {
+    match near {
+        Some(name) if name.eq_ignore_ascii_case(crate::FILE_NAME) => format!(
+            "`{name}` is here, but only the exact lowercase name `{}` is read, on every \
+             platform; rename it",
+            crate::FILE_NAME
+        ),
+        Some(name) => format!(
+            "`{name}` is here; a `.{}` file is a fragment, reached through `include {name}` in \
+             a `{}`, or directly with `chore --file {name}`",
+            crate::FILE_EXT,
+            crate::FILE_NAME
+        ),
+        None => format!(
+            "`chore init` writes a starter `{}` here; the file is found by walking up from the \
+             working directory, and only that exact name is looked for",
+            crate::FILE_NAME
+        ),
     }
 }

@@ -67,7 +67,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::ast;
 use crate::error::{Error, Location, Result, Span};
-use crate::{FILE_NAME, NAMESPACE_SEP, parse, vars};
+use crate::{FILE_EXT, FILE_NAME, NAMESPACE_SEP, parse, vars};
 
 /// One chorefile and everything it included, merged into a single tree.
 ///
@@ -325,16 +325,22 @@ impl Resolver {
             return Err(self.cycle(start, path, at));
         }
 
-        let text = std::fs::read_to_string(path).map_err(|e| Error::Syntax {
+        let text = read_exact(path, from.is_some()).map_err(|e| Error::Syntax {
             // Named the way the author wrote it, with the path that spelling
             // worked out to — the two differ, and only one of them is
             // greppable in the file the reader is about to open.
             message: match from {
-                Some(origin) => format!(
-                    "cannot read `{}`: {e} (looked for `{}`)",
-                    origin.wrote,
-                    relative(path, &self.root)
-                ),
+                Some(origin) => {
+                    let mut message = format!(
+                        "cannot read `{}`: {e} (looked for `{}`)",
+                        origin.wrote,
+                        relative(path, &self.root)
+                    );
+                    if let Some(hint) = include_hint(path, &self.root) {
+                        message.push_str(&format!("\n  help: {hint}"));
+                    }
+                    message
+                }
                 None => format!("cannot read `{}`: {e}", vars::display(path)),
             },
             // A missing include is reported at the `include` line; a missing
@@ -510,6 +516,73 @@ fn include_path(from: &Path, path: &str) -> PathBuf {
         joined
     };
     normalize(&joined)
+}
+
+/// Read a file, holding a `chorefile` reached through an `include` to the
+/// exact spelling of its name.
+///
+/// `include web` means `web/chorefile`, and on a case-insensitive disk that
+/// path opens `web/Chorefile` too, which Linux then cannot find. Discovery
+/// already matches the directory listing rather than trusting the open; this
+/// is the same rule for the other way a `chorefile` gets read. A file named
+/// directly, at the top level or by `--file`, is taken as spelled.
+fn read_exact(path: &Path, included: bool) -> std::io::Result<String> {
+    if included && path.file_name() == Some(FILE_NAME.as_ref()) {
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        if crate::exact(dir, FILE_NAME).is_none() {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        }
+    }
+    std::fs::read_to_string(path)
+}
+
+/// What an `include` that could not be read was probably reaching for.
+///
+/// The three misses that happen: the `.chore` left off a fragment's name, a
+/// directory that holds fragments but no `chorefile`, and a `chorefile`
+/// spelled with a capital, which the directory check above accepted on a
+/// case-insensitive disk and the read then found on Linux only. Named from
+/// the directory listing, the same way discovery works, so the hint is the
+/// same on every platform.
+fn include_hint(path: &Path, root: &Path) -> Option<String> {
+    let dir = path.parent()?;
+    let name = path.file_name()?.to_str()?;
+    if name == FILE_NAME {
+        let mut fragments: Vec<String> = std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| Path::new(n).extension().is_some_and(|x| x == FILE_EXT))
+            .collect();
+        fragments.sort();
+        if let Some(spelled) = crate::near_miss(dir).filter(|n| n.eq_ignore_ascii_case(FILE_NAME)) {
+            return Some(format!(
+                "`{spelled}` is there, but only the exact lowercase name `{FILE_NAME}` is read, \
+                 on every platform; rename it"
+            ));
+        }
+        if !fragments.is_empty() {
+            let shown = relative(dir, root);
+            let shown = if shown.is_empty() {
+                ".".to_string()
+            } else {
+                shown
+            };
+            return Some(format!(
+                "a directory means the `{FILE_NAME}` inside it, and `{shown}/` has none; a \
+                 fragment is included by its full name: `include {shown}/{}`",
+                fragments[0]
+            ));
+        }
+        return None;
+    }
+    let with_ext = dir.join(format!("{name}.{FILE_EXT}"));
+    with_ext.is_file().then(|| {
+        format!(
+            "no `.{FILE_EXT}` is guessed onto a name; write `include {}`",
+            relative(&with_ext, root)
+        )
+    })
 }
 
 /// A path written in `from`, resolved against the file that wrote it.

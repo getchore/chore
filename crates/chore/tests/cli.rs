@@ -656,6 +656,63 @@ fn help_rejects_an_unknown_topic() {
     let dir = Dir::new();
     let run = chore(&dir, &["help", "nosuchbuiltin"]);
     assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("help topic"), "{}", run.stderr);
+}
+
+/// `include` is where the naming rule is written, and it is not a builtin,
+/// so `chore help include` has to answer or the rule is unreachable from the
+/// binary. The same for `task`, and for `files` itself.
+#[test]
+fn help_answers_for_a_statement_form_and_for_files() {
+    let dir = Dir::new();
+    let run = chore(&dir, &["help", "include"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    assert!(
+        run.stdout.starts_with("include path [as name]"),
+        "{}",
+        run.stdout
+    );
+    assert!(run.stdout.contains(".chore"), "{}", run.stdout);
+
+    let run = chore(&dir, &["help", "task"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+
+    let run = chore(&dir, &["help", "files"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    for name in [
+        "chorefile",
+        "rust.chore",
+        "release.chore",
+        "docker.chore",
+        ".chore/",
+    ] {
+        assert!(run.stdout.contains(name), "{name} missing:\n{}", run.stdout);
+    }
+}
+
+/// The usage block is what an agent reads first, so the file names are in it:
+/// which one is discovered, and what a fragment is called.
+#[test]
+fn usage_names_the_files() {
+    let dir = Dir::new();
+    let run = chore(&dir, &["--help"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let usage = run
+        .stdout
+        .split("chorefile 1")
+        .next()
+        .unwrap_or(&run.stdout);
+    assert!(usage.contains("\nfiles\n"), "{usage}");
+    assert!(usage.contains("--file <path>"), "{usage}");
+    for name in [
+        "rust.chore",
+        "release.chore",
+        "docker.chore",
+        "<name>.chore",
+    ] {
+        assert!(usage.contains(name), "{name} missing:\n{usage}");
+    }
+    assert!(!run.stdout.contains("tasks.chore"), "{}", run.stdout);
 }
 
 #[test]

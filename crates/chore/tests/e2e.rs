@@ -1247,6 +1247,117 @@ fn completions_cannot_be_shadowed_by_a_task() {
 }
 
 // ---------------------------------------------------------------------------
+// file names: discovery, near misses, --file
+// ---------------------------------------------------------------------------
+
+/// Only the exact lowercase name is discovered, on every platform, and the
+/// error names the file that was probably meant. On macOS and Windows the
+/// `Chorefile` case is the one that used to work by accident.
+#[test]
+fn a_near_miss_of_the_file_name_is_named_in_the_error() {
+    let dir = Dir::new();
+    dir.write("Chorefile", "task a {\n    echo a\n}\n");
+    let run = chore(&dir, &["a"]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("no chorefile found"), "{}", run.stderr);
+    assert!(run.stderr.contains("`Chorefile` is here"), "{}", run.stderr);
+
+    let dir = Dir::new();
+    dir.write("ci.chore", "task a {\n    echo a\n}\n");
+    let run = chore(&dir, &["list"]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("`ci.chore` is here"), "{}", run.stderr);
+    assert!(run.stderr.contains("--file ci.chore"), "{}", run.stderr);
+
+    let dir = Dir::new();
+    let run = chore(&dir, &["list"]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("chore init"), "{}", run.stderr);
+}
+
+/// `--file` reads the named file, whatever it is called, with `$ROOT` at its
+/// directory; and it is refused by the commands that read no chorefile.
+#[test]
+fn file_flag_names_the_chorefile_and_a_fragment_runs_on_its_own() {
+    let dir = Dir::new();
+    dir.chorefile("task top {\n    echo top\n}\n");
+    dir.write(
+        "tasks/rust.chore",
+        "task fmt {\n    echo \"root=$ROOT\"\n}\n",
+    );
+
+    let run = chore(&dir, &["--file", "tasks/rust.chore", "fmt"]).ok();
+    let root = dir
+        .path()
+        .join("tasks")
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().join("tasks"));
+    assert!(
+        run.stdout
+            .contains(&format!("root={}", chorefile::vars::display(&root)))
+            || run.stdout.contains(&format!(
+                "root={}",
+                chorefile::vars::display(&dir.path().join("tasks"))
+            )),
+        "{}",
+        run.stdout
+    );
+
+    let run = chore(&dir, &["--file=tasks/rust.chore", "list"]).ok();
+    assert!(run.stdout.contains("fmt"), "{}", run.stdout);
+    assert!(!run.stdout.contains("top"), "{}", run.stdout);
+
+    let run = chore(&dir, &["--file", "tasks/rust.chore", "--check"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+
+    let run = chore(&dir, &["--file", "nope.chore", "list"]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("nope.chore"), "{}", run.stderr);
+
+    let run = chore(&dir, &["--file", "chorefile", "init"]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("--file"), "{}", run.stderr);
+}
+
+/// The three ways an `include` misses, each pointed at the file that exists.
+#[test]
+fn an_include_that_misses_names_the_file_that_is_there() {
+    let dir = Dir::new();
+    dir.write("tasks/rust.chore", "task fmt {\n    echo fmt\n}\n");
+    dir.write("web/web.chore", "task dev {\n    echo dev\n}\n");
+    dir.write("libs/Chorefile", "task lib {\n    echo lib\n}\n");
+
+    dir.chorefile("include tasks/rust\n");
+    let run = chore(&dir, &["list"]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(
+        run.stderr.contains("`include tasks/rust.chore`"),
+        "{}",
+        run.stderr
+    );
+
+    dir.chorefile("include web\n");
+    let run = chore(&dir, &["list"]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(
+        run.stderr.contains("`include web/web.chore`"),
+        "{}",
+        run.stderr
+    );
+
+    // Exact spelling for an included `chorefile` too, so a tree that opens on
+    // a case-insensitive disk does not fail on Linux alone.
+    dir.chorefile("include libs\n");
+    let run = chore(&dir, &["list"]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(
+        run.stderr.contains("`Chorefile` is there"),
+        "{}",
+        run.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
 // init
 // ---------------------------------------------------------------------------
 
@@ -1258,10 +1369,13 @@ fn init_writes_a_chorefile_with_no_chorefile_anywhere() {
     let run = chore(&dir, &["init"]).ok();
     assert!(dir.exists("chorefile"), "init wrote nothing");
     assert!(run.stdout.contains("chorefile"), "{}", run.stdout);
-    // It must be a starting point, not a tutorial.
+    // It must be a starting point, not a tutorial. The header carries the
+    // naming rule in two lines, since the file is the one place a newcomer
+    // is guaranteed to read it; that is the whole budget for prose.
     let written = dir.read("chorefile");
+    assert!(written.contains("Named `chorefile`"), "{written}");
     assert!(
-        written.lines().count() < 25,
+        written.lines().count() < 28,
         "starter is {} lines:\n{written}",
         written.lines().count()
     );

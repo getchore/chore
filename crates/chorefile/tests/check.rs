@@ -1018,7 +1018,9 @@ fn including_a_file_named_chorefile_is_a_warning() {
     let help = found[0].help.as_deref().expect("help");
     assert!(help.contains("cd libs && chore list"), "{help}");
     assert!(help.contains("$ROOT"), "{help}");
-    assert!(help.contains("libs/tasks.chore"), "{help}");
+    // The suggested name is the directory's, not a `tasks.chore` in every
+    // directory of the tree.
+    assert!(help.contains("libs/libs.chore"), "{help}");
     // The deliberate case is named rather than argued with.
     assert!(help.contains("standalone subproject"), "{help}");
 }

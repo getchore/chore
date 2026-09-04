@@ -24,6 +24,8 @@ pub fn overview(out: &mut dyn Write, style: Style) -> Result<(), Exit> {
         "{}",
         style.bold(&format!("chorefile {}", spec::version()))
     )?;
+    files(out, style)?;
+
     section(out, "syntax", style)?;
     let rows: Vec<_> = spec::syntax()
         .iter()
@@ -75,7 +77,8 @@ pub fn overview(out: &mut dyn Write, style: Style) -> Result<(), Exit> {
 
     writeln!(
         out,
-        "`chore help <builtin>` explains one builtin. `chore spec` prints the whole\nreference as JSON."
+        "`chore help <builtin>` explains one builtin, `chore help include` one statement form,\n\
+         `chore help files` the file names. `chore spec` prints the whole reference as JSON."
     )?;
     // The question anyone adopting a task runner asks next is how to get it
     // onto CI, and `chore help` is where an agent looks before a README.
@@ -88,10 +91,44 @@ pub fn overview(out: &mut dyn Write, style: Style) -> Result<(), Exit> {
     Ok(())
 }
 
-pub fn builtin(out: &mut dyn Write, name: &str, style: Style) -> Result<(), Exit> {
-    let Some(builtin) = spec::builtin(name) else {
-        return Err(Exit::usage(unknown(name)));
-    };
+/// The files section: the first question anyone has, before any syntax.
+fn files(out: &mut dyn Write, style: Style) -> Result<(), Exit> {
+    section(out, "files", style)?;
+    let rows: Vec<_> = spec::files().iter().map(|f| (f.name, f.meaning)).collect();
+    columns(out, &rows, style)?;
+    Ok(())
+}
+
+/// `chore help <topic>`: a builtin, a statement form such as `include`, or
+/// `files`. Every name someone might type at the top of a chorefile answers
+/// here, so "no builtin `include`" is not a reply anyone gets any more.
+pub fn topic(out: &mut dyn Write, name: &str, style: Style) -> Result<(), Exit> {
+    if let Some(builtin) = spec::builtin(name) {
+        return self::builtin(out, builtin, style);
+    }
+    if let Some(form) = spec::form(name) {
+        writeln!(out, "{}\n", style.bold(form.syntax))?;
+        writeln!(out, "{}\n", wrap(form.meaning, "  "))?;
+        for line in form.example.lines() {
+            writeln!(out, "  {}", style.accent(line))?;
+        }
+        return Ok(());
+    }
+    if name == "files" {
+        writeln!(out, "{}", style.bold("files"))?;
+        for kind in spec::files() {
+            writeln!(out, "\n  {}", style.accent(kind.name))?;
+            if kind.examples != kind.name {
+                writeln!(out, "    {}", style.dim(kind.examples))?;
+            }
+            writeln!(out, "{}", wrap(kind.meaning, "    "))?;
+        }
+        return Ok(());
+    }
+    Err(Exit::usage(unknown(name)))
+}
+
+fn builtin(out: &mut dyn Write, builtin: &spec::Builtin, style: Style) -> Result<(), Exit> {
     writeln!(out, "{}\n", style.bold(builtin.usage))?;
     writeln!(out, "{}\n", wrap(builtin.summary, "  "))?;
     writeln!(out, "{}", wrap(builtin.description, "  "))?;
@@ -173,14 +210,17 @@ fn wrap(text: &str, indent: &str) -> String {
     out
 }
 
-/// A near miss is usually a typo, so point at the closest builtin rather than
+/// A near miss is usually a typo, so point at the closest name rather than
 /// making the user run `chore help` and read the whole list again.
 fn unknown(name: &str) -> String {
-    match spec::builtins()
-        .iter()
-        .find(|b| b.name.starts_with(name) || name.starts_with(b.name))
-    {
-        Some(near) => format!("no builtin `{name}` (did you mean `{}`?)", near.name),
-        None => format!("no builtin `{name}` (try `chore help`)"),
+    let near = |n: &str| n.starts_with(name) || name.starts_with(n);
+    let builtin = spec::builtins().iter().map(|b| b.name).find(|n| near(n));
+    let form = spec::syntax().iter().map(|f| f.name).find(|n| near(n));
+    match builtin.or(form) {
+        Some(near) => format!("no help topic `{name}` (did you mean `{near}`?)"),
+        None => format!(
+            "no help topic `{name}`: a builtin, a statement such as `include`, or `files` \
+             (try `chore help`)"
+        ),
     }
 }

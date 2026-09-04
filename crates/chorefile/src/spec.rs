@@ -103,6 +103,23 @@ pub struct Rule {
     pub rule: &'static str,
 }
 
+/// One kind of file `chore` reads or writes, by the shape of its name.
+///
+/// The naming rule is the first thing anyone, and any agent, has to get right
+/// before a single task runs, and it used to live in one paragraph of the
+/// spec. Stated here so `chore --help`, `chore help`, `chore spec` and the
+/// reference site all say the same thing from the same table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileKind {
+    /// The name as it appears on disk, or the pattern it follows.
+    pub name: &'static str,
+    /// Names of that shape, as they would be written in a real project.
+    pub examples: &'static str,
+    /// One line, for `chore --help`.
+    pub summary: &'static str,
+    pub meaning: &'static str,
+}
+
 // ---------------------------------------------------------------------------
 // the data
 // ---------------------------------------------------------------------------
@@ -728,6 +745,47 @@ the process's, and the move is undone when the task that made it returns.",
     },
 ];
 
+/// The files, by name. The examples are real names, since `tasks.chore` is
+/// the one example that teaches the wrong habit: a chore is a task, and a
+/// fragment is named for what it covers.
+static FILES: &[FileKind] = &[
+    FileKind {
+        name: "chorefile",
+        examples: "chorefile",
+        summary: "the project's tasks; the only name discovered, walking up from the working \
+directory",
+        meaning: "The project's tasks. Found by walking up from the working directory to the \
+first file with exactly this name, lowercase, no extension; nothing else is ever discovered, \
+and the directory holding it is `$ROOT`. `chore init` writes one.",
+    },
+    FileKind {
+        name: "<name>.chore",
+        examples: "rust.chore  release.chore  docker.chore",
+        summary: "a fragment, named for what it covers: `include rust.chore`; never found on its \
+own",
+        meaning: "A fragment of this project, named for what it covers and pulled in with \
+`include rust.chore` or `include tasks/rust.chore`. Discovery never finds one, so it only \
+means anything merged into the chorefile that includes it; `chore --file rust.chore` reads \
+one on its own.",
+    },
+    FileKind {
+        name: "<dir>/",
+        examples: "include web  include libs as libs",
+        summary: "`include web` means web/chorefile: a subproject that also runs from inside",
+        meaning: "A directory in an `include` means the `chorefile` inside it: a subproject \
+that also runs from inside, where `cd web && chore build` finds that file and `$ROOT` is \
+`web/`. Name a directory-shaped include only for something that really is its own project; \
+`check` warns otherwise.",
+    },
+    FileKind {
+        name: ".chore/",
+        examples: ".chore/state",
+        summary: "state written by `changed`; add it to .gitignore",
+        meaning: "State the `changed` builtin records, under `$ROOT`. Add `.chore/` to \
+`.gitignore`.",
+    },
+];
+
 /// The rules a reader will otherwise get wrong. Every one of these has a
 /// plausible-looking wrong answer, which is why they are stated rather than
 /// left to be inferred from the syntax.
@@ -790,6 +848,16 @@ shasum, test — and names the builtin that replaces each.",
 // ---------------------------------------------------------------------------
 // the public reference
 // ---------------------------------------------------------------------------
+
+/// The files `chore` reads and writes, by the shape of their names.
+pub fn files() -> &'static [FileKind] {
+    FILES
+}
+
+/// One statement form by name, for `chore help include` and friends.
+pub fn form(name: &str) -> Option<&'static Form> {
+    FORMS.iter().find(|f| f.name == name)
+}
 
 /// Every builtin command, in a stable order.
 pub fn builtins() -> &'static [Builtin] {
@@ -858,6 +926,17 @@ enum Json {
 pub fn json() -> String {
     let doc = Json::Obj(vec![
         ("version", Json::Str(version())),
+        (
+            "files",
+            arr(FILES, |f| {
+                Json::Obj(vec![
+                    ("name", Json::Str(f.name)),
+                    ("examples", Json::Str(f.examples)),
+                    ("summary", Json::Str(f.summary)),
+                    ("meaning", Json::Str(f.meaning)),
+                ])
+            }),
+        ),
         (
             "builtins",
             arr(BUILTINS, |b| {

@@ -405,3 +405,24 @@ fn interpolation_warns_about_an_empty_unquoted_argument() {
     assert!(form.meaning.contains("--dry"), "{}", form.meaning);
     assert!(form.meaning.contains("empty"), "{}", form.meaning);
 }
+
+/// The naming rule is the first thing an agent has to get right, so it is in
+/// the JSON, with real example names: `tasks.chore` says the same thing twice
+/// and is exactly the habit the examples exist to replace.
+#[test]
+fn files_are_documented_with_real_example_names() {
+    let doc = spec::json();
+    assert!(doc.contains("\"files\""), "{doc}");
+    let names: Vec<&str> = spec::files().iter().map(|f| f.name).collect();
+    assert_eq!(names, ["chorefile", "<name>.chore", "<dir>/", ".chore/"]);
+    let fragment = spec::files()
+        .iter()
+        .find(|f| f.name == "<name>.chore")
+        .expect("the fragment entry");
+    for example in ["rust.chore", "release.chore", "docker.chore"] {
+        assert!(fragment.examples.contains(example), "{}", fragment.examples);
+    }
+    assert!(!doc.contains("tasks.chore"), "{doc}");
+    assert!(spec::form("include").is_some());
+    assert!(spec::form("download").is_none());
+}

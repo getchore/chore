@@ -35,7 +35,11 @@ const USAGE: u8 = 2;
 /// coloured without the colour landing on the alignment.
 const SUBCOMMANDS: &[(&str, &str, &str)] = &[
     ("list", "[--json]", "tasks and descriptions"),
-    ("help", "[builtin]", "syntax and builtins, or one builtin"),
+    (
+        "help",
+        "[topic]",
+        "the language, or one builtin, statement or `files`",
+    ),
     ("check", "", "lint, unless a task takes the name"),
     ("spec", "", "full reference as JSON, for agents"),
     ("completions", "[shell]", "tab completion for task names"),
@@ -54,6 +58,10 @@ const FLAGS: &[(&str, &str)] = &[
         "--check",
         "lint without running, whatever the chorefile says",
     ),
+    (
+        "--file <path>",
+        "read this file instead of the chorefile discovery finds",
+    ),
 ];
 
 /// Width of the left column in the subcommand list, and in the flag list.
@@ -62,7 +70,7 @@ const FLAGS: &[(&str, &str)] = &[
 /// and tear the column apart, so every line here pads its plain text and
 /// colours only the word.
 const SUBCOMMAND_COLUMN: usize = 21;
-const FLAG_COLUMN: usize = 11;
+const FLAG_COLUMN: usize = 15;
 
 /// The usage block, for `chore --help` and for a bare `chore` with no
 /// chorefile to talk about instead.
@@ -86,6 +94,32 @@ fn usage(style: Style) -> String {
     for (flag, meaning) in FLAGS {
         let pad = " ".repeat(FLAG_COLUMN.saturating_sub(flag.chars().count()));
         text.push_str(&format!("  {}{pad}{meaning}\n", style.accent(flag)));
+    }
+    // The file names, in the compact form: which file is read, what a
+    // fragment is called, and that a chore is not named `tasks.chore`. The
+    // full table is `chore help files`; this is the part an agent needs
+    // before it writes anything.
+    text.push_str("\nfiles\n");
+    for kind in chorefile::spec::files() {
+        let pad = " ".repeat(FLAG_COLUMN.saturating_sub(kind.name.chars().count()));
+        let examples = if kind.examples == kind.name {
+            String::new()
+        } else {
+            format!(
+                "  {}",
+                style.dim(&format!(
+                    "({})",
+                    // Two spaces between examples, since one of them
+                    // (`include libs as libs`) has spaces of its own.
+                    kind.examples.split("  ").collect::<Vec<_>>().join(", ")
+                ))
+            )
+        };
+        text.push_str(&format!(
+            "  {}{pad}{}{examples}\n",
+            style.accent(kind.name),
+            kind.summary
+        ));
     }
     // The loop left a newline on the end and `writeln!` will add the other.
     text.pop();
@@ -197,7 +231,27 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
         command,
         mode,
         repeat,
+        file,
     } = invocation;
+
+    // `--file` names a chorefile, so it means nothing to a command that reads
+    // none. Rejected rather than ignored: `chore --file x init` would
+    // otherwise write `./chorefile` and leave the flag looking honoured.
+    if file.is_some()
+        && matches!(
+            command,
+            Command::Version
+                | Command::Help { .. }
+                | Command::Spec
+                | Command::Completions { .. }
+                | Command::Init
+        )
+    {
+        return Err(Exit::usage(
+            "--file goes with a task, `list`, or `--check`; this command reads no chorefile",
+        ));
+    }
+    let file = file.as_deref();
 
     match command {
         // `help` and `spec` describe the language, not a project, so they work
@@ -207,7 +261,7 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
             Ok(OK)
         }
         Command::Help { topic } => match topic {
-            Some(name) => help::builtin(out, &name, style).map(|()| OK),
+            Some(name) => help::topic(out, &name, style).map(|()| OK),
             // The usage block used to be the first thing bare `chore`
             // printed. Bare `chore` leads with the task list now, so the
             // block moves here, in front of the language reference: someone
@@ -228,7 +282,7 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
         // to lead with, so the old behaviour stands: print the usage block,
         // then fail on stderr the way every other missing-chorefile does.
         Command::Usage => {
-            let loaded = match Loaded::discover() {
+            let loaded = match Loaded::discover(file) {
                 Ok(loaded) => loaded,
                 Err(exit) => {
                     writeln!(out, "{}", usage(style))?;
@@ -251,7 +305,7 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
             Ok(OK)
         }
         Command::List { format } => {
-            let loaded = Loaded::discover()?;
+            let loaded = Loaded::discover(file)?;
             warn_unmet(&loaded.merged);
             match format {
                 ListFormat::Text => {
@@ -303,7 +357,7 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
                 Err(Exit::usage(init::occupied(&dir)))
             }
         }
-        Command::Check => check(out, style),
+        Command::Check => check(out, style, file),
         Command::Run { task, args } => {
             // `chore check` is the lint only while the chorefile has nothing
             // better to say: a project that defines `task check` gets its own
@@ -314,16 +368,16 @@ fn dispatch(invocation: Invocation, out: &mut dyn Write, style: Style) -> Result
             // `check` — costs a parse and keeps `check`'s own error handling:
             // a chorefile too broken to resolve defines no task, so it falls
             // through to the lint that can report why.
-            if task == CHECK_TASK && !defines(CHECK_TASK) {
+            if task == CHECK_TASK && !defines(CHECK_TASK, file) {
                 if !args.is_empty() || mode != Mode::Run || repeat != Repeat::Once {
                     return Err(Exit::usage(format!(
                         "no task `{CHECK_TASK}` here, so `chore {CHECK_TASK}` is the lint, \
                          which takes no arguments"
                     )));
                 }
-                return check(out, style);
+                return check(out, style, file);
             }
-            let loaded = Loaded::discover()?;
+            let loaded = Loaded::discover(file)?;
             // Before the task, and before the globals it would have been
             // preceded by: a chorefile that says it needs a newer `chore` has
             // said everything this one is qualified to conclude about it.
@@ -345,8 +399,8 @@ const CHECK_TASK: &str = "check";
 /// turns a failure to merge — a missing included file, a cycle — into a
 /// finding in the list instead of an error that ends the run, which is what a
 /// CI gate wants. A chorefile too broken to load still gets a full report.
-fn check(out: &mut dyn Write, style: Style) -> Result<u8, Exit> {
-    let path = discover()?;
+fn check(out: &mut dyn Write, style: Style, file: Option<&str>) -> Result<u8, Exit> {
+    let path = discover(file)?;
     let (findings, merged) = chorefile::check::check_path(&path);
     let fallback;
     let sources = match &merged {
@@ -369,8 +423,8 @@ fn check(out: &mut dyn Write, style: Style) -> Result<u8, Exit> {
 /// an include that does not exist. The caller is deciding whether a name was
 /// claimed, and a file that never assembled claimed nothing — the error it
 /// would have raised is raised, in full, by whatever runs next.
-fn defines(task: &str) -> bool {
-    discover().is_ok_and(|path| {
+fn defines(task: &str, file: Option<&str>) -> bool {
+    discover(file).is_ok_and(|path| {
         resolve::resolve(&path).is_ok_and(|merged| merged.file.tasks.iter().any(|t| t.name == task))
     })
 }
@@ -421,8 +475,8 @@ struct Loaded {
 }
 
 impl Loaded {
-    fn discover() -> Result<Self, Exit> {
-        let path = discover()?;
+    fn discover(file: Option<&str>) -> Result<Self, Exit> {
+        let path = discover(file)?;
         let merged = resolve::resolve(&path).map_err(|e| unresolved(&path, e))?;
         Ok(Self { path, merged })
     }
@@ -439,10 +493,24 @@ impl Loaded {
 }
 
 /// The chorefile governing the working directory: the nearest one at or above
-/// it. Every subcommand that needs a project starts here.
-fn discover() -> Result<PathBuf, Exit> {
+/// it, or the one `--file` named. Every subcommand that needs a project starts
+/// here.
+///
+/// A named file is taken as written, whatever it is called: `--file` is how a
+/// `.chore` fragment gets run or linted on its own, and its directory is
+/// `$ROOT` for that run, exactly as a discovered chorefile's would be.
+fn discover(file: Option<&str>) -> Result<PathBuf, Exit> {
     let cwd = std::env::current_dir().map_err(|e| Exit::usage(e.to_string()))?;
-    Ok(chorefile::find(&cwd)?)
+    match file {
+        Some(file) => {
+            let path = cwd.join(chorefile::vars::to_native(file));
+            if !path.is_file() {
+                return Err(Exit::usage(format!("--file {file}: no such file")));
+            }
+            Ok(path)
+        }
+        None => Ok(chorefile::find(&cwd)?),
+    }
 }
 
 /// One file's text as a [`Sources`], for rendering diagnostics when no merge

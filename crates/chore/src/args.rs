@@ -24,6 +24,13 @@ const FORCE: &str = "--force";
 /// a chorefile says reaches.
 const CHECK: &str = "--check";
 
+/// An explicit chorefile, instead of the one discovery would find.
+///
+/// Every other task runner has this flag, and every agent that has used one
+/// reaches for it. It is the only way to run a `.chore` fragment on its own,
+/// and `$ROOT` becomes the named file's directory.
+const FILE: &str = "--file";
+
 /// What the user asked for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
@@ -31,7 +38,7 @@ pub enum Command {
     Run { task: String, args: Vec<String> },
     /// `chore list [--json|--names]`
     List { format: ListFormat },
-    /// `chore help [builtin]`
+    /// `chore help [topic]`: a builtin, a statement form, or `files`
     Help { topic: Option<String> },
     /// `chore --check`, and `chore check` when no task claims the name.
     Check,
@@ -63,6 +70,10 @@ pub struct Invocation {
     pub command: Command,
     pub mode: Mode,
     pub repeat: Repeat,
+    /// `--file <path>`, when given. Only commands that read a chorefile
+    /// accept it; `dispatch` rejects it elsewhere, since a flag that is
+    /// silently ignored teaches that it does nothing.
+    pub file: Option<String>,
 }
 
 /// A usage error: printed to stderr, exit 2.
@@ -72,6 +83,7 @@ pub struct UsageError(pub String);
 pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, UsageError> {
     let mut mode = Mode::Run;
     let mut repeat = Repeat::Once;
+    let mut file = None;
     let mut rest = argv.into_iter().peekable();
 
     // Before the name, `--dry` and `--force` are the only flags that can
@@ -80,6 +92,18 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Usag
         match rest.next() {
             Some(arg) if arg == DRY => mode = Mode::Dry,
             Some(arg) if arg == FORCE => repeat = Repeat::Always,
+            // `--file x` and `--file=x` both, since a flag that takes a value
+            // is written either way by someone who has not read the docs.
+            Some(arg) if arg == FILE || arg.starts_with("--file=") => {
+                let value = match arg.strip_prefix("--file=") {
+                    Some(value) => value.to_string(),
+                    None => match rest.next() {
+                        Some(value) if !value.is_empty() && !value.starts_with('-') => value,
+                        _ => return Err(UsageError(format!("usage: chore {FILE} <path> ..."))),
+                    },
+                };
+                file = Some(value);
+            }
             // Nothing runs, so there is nothing for the other two flags to
             // act on and nothing to pass an argument to: rejected rather than
             // ignored, the way `chore list --nope` is.
@@ -91,6 +115,7 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Usag
                     command: Command::Check,
                     mode,
                     repeat,
+                    file,
                 });
             }
             Some(arg) if arg == "--help" || arg == "-h" => {
@@ -101,6 +126,7 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Usag
                     command: Command::Version,
                     mode,
                     repeat,
+                    file,
                 });
             }
             Some(arg) if arg.starts_with('-') && arg != "-" => {
@@ -115,6 +141,7 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Usag
             command: Command::Usage,
             mode,
             repeat,
+            file,
         });
     };
 
@@ -148,6 +175,7 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Usag
         command,
         mode,
         repeat,
+        file,
     })
 }
 
@@ -170,7 +198,7 @@ fn subcommand(name: &str, args: Vec<String>) -> Result<Command, UsageError> {
             1 if !args[0].starts_with('-') => Ok(Command::Help {
                 topic: Some(args[0].clone()),
             }),
-            _ => Err(UsageError("usage: chore help [builtin]".into())),
+            _ => Err(UsageError("usage: chore help [topic]".into())),
         },
         // `init` takes nothing: there is one starter chorefile and one place
         // it goes, so an argument here is a misunderstanding worth naming
@@ -364,5 +392,33 @@ mod tests {
     #[test]
     fn unknown_leading_flag_is_a_usage_error() {
         assert!(parse(["--nope".to_string()]).is_err());
+    }
+
+    #[test]
+    fn file_takes_a_path_either_way_and_only_before_the_task() {
+        assert_eq!(
+            parse_args(&["--file", "ci.chore", "build"]).file.as_deref(),
+            Some("ci.chore")
+        );
+        assert_eq!(
+            parse_args(&["--file=ci.chore", "list"]).file.as_deref(),
+            Some("ci.chore")
+        );
+        assert_eq!(
+            parse_args(&["--file", "x", "--check"]).command,
+            Command::Check
+        );
+        // After the task name it is the task's, like every other flag.
+        let got = parse_args(&["build", "--file", "x"]);
+        assert_eq!(got.file, None);
+        assert_eq!(
+            got.command,
+            Command::Run {
+                task: "build".into(),
+                args: vec!["--file".into(), "x".into()],
+            }
+        );
+        assert!(parse(["--file".to_string()]).is_err());
+        assert!(parse(["--file".to_string(), "--dry".to_string()]).is_err());
     }
 }

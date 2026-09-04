@@ -10,7 +10,7 @@ shell, so behavior is identical on macOS, Linux and Windows (gnu and msvc).
 ```
 chore <task> [args...] [--dry] [--force]
 chore list [--json|--names]         # tasks and descriptions
-chore help [builtin]                # syntax and builtins, or one builtin
+chore help [topic]                  # the language, or one builtin, statement or `files`
 chore check                         # lint, unless a task takes the name
 chore --check                       # lint, whatever the chorefile says
 chore spec                          # full reference as JSON, for agents
@@ -28,6 +28,32 @@ the word the way completion scripts and tooling depend on `chore list`. So
 does not, and `chore --check` is the lint either way — which is the spelling
 for a script or a CI job, since it does not change meaning when someone adds a
 task later.
+
+Every form above that reads a chorefile also takes `--file <path>` before the
+task name, and reads that file instead of discovering one.
+
+### Files
+
+| name | examples | what it is |
+| --- | --- | --- |
+| `chorefile` | `chorefile` | The project's tasks. Found by walking up from the working directory to the first file with exactly this name, lowercase, no extension; nothing else is ever discovered, and the directory holding it is `$ROOT`. `chore init` writes one. |
+| `<name>.chore` | `rust.chore`, `release.chore`, `docker.chore` | A fragment of this project, named for what it covers and pulled in with `include rust.chore` or `include tasks/rust.chore`. Discovery never finds one, so it only means anything merged into the chorefile that includes it. `chore --file rust.chore` reads one on its own. |
+| `<dir>/` | `include web`, `include libs as libs` | A directory in an `include` means the `chorefile` inside it: a subproject that also runs from inside, where `$ROOT` is that directory. |
+| `.chore/` | `.chore/state` | State the `changed` builtin records, under `$ROOT`. Belongs in `.gitignore`. |
+
+The same table is `chore help files`, the `files` block of `chore --help`, and
+the `files` array of `chore spec`. The name is matched against the directory
+listing rather than by opening the path, so `Chorefile` is not found on macOS
+any more than on Linux, and the error names it: "`Chorefile` is here, but only
+the exact lowercase name `chorefile` is read". A lone `ci.chore` gets the same
+treatment, and an empty directory is pointed at `chore init`. An `include`
+that misses says what it was reaching for: the `.chore` left off a name, a
+directory that holds fragments but no `chorefile`, or the capital.
+
+`--file <path>` reads the named file as written, whatever it is called, with
+`$ROOT` at its directory. It is the one way to run or lint a fragment alone.
+It is a usage error with `help`, `spec`, `completions` and `init`, which read
+no chorefile: a flag that is silently ignored teaches that it does nothing.
 
 - `--dry` echoes commands without side effects.
 - `--force` disables run-once.
@@ -456,7 +482,7 @@ skipped. Without it a missing file fails the run — which is what makes
 
 **At the top level** it is a directive, like `include`: the path is a literal
 and resolves relative to the file that wrote it, so a `dotenv .env` in
-`libs/tasks.chore` means `libs/.env` wherever `chore` was invoked from. Files
+`libs/rust.chore` means `libs/.env` wherever `chore` was invoked from. Files
 load once, before the top-level assignments — so a global may read
 `$env::NAME` — and after `require` is checked. An included file's `dotenv`
 loads too, after every one written in the file that included it, which is the
@@ -956,8 +982,9 @@ That second one is a real choice with a consequence, so make it deliberately: a
 task reading `download vendor/thing` puts the file under the project root when
 run from the root, and under `website/` when run from there. Neither is wrong,
 and nothing in between tells you which happened. If the directory is not
-genuinely its own project, name the file `.chore` and the question never comes
-up — `check` warns when an `include` points at a `chorefile` inside your
+genuinely its own project, give the file the `.chore` extension, named for
+what it covers — `website/web.chore` — and the question never comes up.
+`check` warns when an `include` points at a `chorefile` inside your
 project, for exactly this reason. It is a warning, once per include, and it
 says both halves: how to make the question go away, and that keeping it is a
 legitimate choice when the directory really is its own project.
