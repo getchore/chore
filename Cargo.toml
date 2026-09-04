@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
-version = "1.9.1"
+version = "1.10.0"
 license = "MIT"
 repository = "https://github.com/getchore/chore"
 # 1.87 for `std::io::pipe`, which is what lets `cmd 2>&1` hand a captured
@@ -12,7 +12,7 @@ repository = "https://github.com/getchore/chore"
 rust-version = "1.87"
 
 [workspace.dependencies]
-chorefile = { path = "crates/chorefile", version = "1.9.1" }
+chorefile = { path = "crates/chorefile", version = "1.10.0" }
 
 # --- HTTP, for `download` -----------------------------------------------
 # rustls, never native-tls: OpenSSL would leave a dynamic link on Linux and
